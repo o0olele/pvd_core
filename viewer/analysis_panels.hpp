@@ -16,6 +16,14 @@ struct ProfileTimelineView {
   float left = 0, top = 0, width = 0, height = 0;
   std::uint64_t begin_ticks = 0, end_ticks = 0;
 };
+// Last actual widget bounds, copied without exposing ImGui/session references.
+// Zero dimensions mean that the control was not submitted by this draw.
+struct ProfileControlRect {
+  float x = 0, y = 0, width = 0, height = 0;
+};
+struct ProfilePanelControls {
+  ProfileControlRect zone_combo, csv, measured_csv;
+};
 class AnalysisPanels {
 public:
   AnalysisPanels();
@@ -29,6 +37,7 @@ public:
   std::optional<memory::WindowStats> memory_window_statistics() const;
   std::optional<ProfileTimeSelection> profile_time_selection() const;
   ProfileTimelineView profile_timeline_view() const noexcept;
+  ProfilePanelControls profile_controls() const noexcept;
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

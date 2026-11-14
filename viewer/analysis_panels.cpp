@@ -51,6 +51,22 @@ std::uint64_t tick(long double value) {
 }
 using Lane=std::tuple<std::uint32_t,std::uint64_t,std::uint64_t,std::uint64_t>;
 Lane lane(const pvd::profile::Interval& e){return {e.thread_id,e.start_source.zone.id,e.start_source.zone.generation,e.context_id};}
+std::string zone_label(const pvd::profile::Zone &zone) {
+  return zone.name+" ["+hex(zone.key.id)+" / generation "+
+      std::to_string(zone.key.generation)+"]";
+}
+void same_line_if_fits(float width) {
+  const auto right=ImGui::GetWindowPos().x+ImGui::GetWindowContentRegionMax().x;
+  if(ImGui::GetItemRectMax().x+ImGui::GetStyle().ItemSpacing.x+width<=right)
+    ImGui::SameLine();
+}
+float button_width(const char *label) {
+  return ImGui::CalcTextSize(label).x+ImGui::GetStyle().FramePadding.x*2;
+}
+ProfileControlRect control_rect() {
+  const auto p=ImGui::GetItemRectMin(),size=ImGui::GetItemRectSize();
+  return {p.x,p.y,size.x,size.y};
+}
 } // namespace
 
 struct AnalysisPanels::Impl {
@@ -62,7 +78,7 @@ struct AnalysisPanels::Impl {
   bool profile_current=false,memory_current=true,error_current=false;
   bool profile_dirty=true,memory_dirty=true,error_dirty=true,view_manual=false;
   std::optional<std::uint32_t> thread;
-  std::optional<std::uint64_t> zone;
+  std::optional<pvd::profile::ZoneKey> zone;
   std::optional<std::size_t> selected_interval;
   std::vector<std::uint32_t> threads;
   std::vector<std::size_t> intervals;
@@ -71,6 +87,7 @@ struct AnalysisPanels::Impl {
   std::uint64_t view_begin=0,view_end=1;
   std::optional<ProfileTimeSelection> time_selection;
   ProfileTimelineView timeline_view;
+  ProfilePanelControls controls;
   std::optional<std::uint64_t> range_anchor;
   std::array<char,128> profile_search{},memory_search{},error_search{};
   pvd::memory::Filter memory_filter;
@@ -88,7 +105,7 @@ struct AnalysisPanels::Impl {
     if(source==session)return;
     source=session;profile.reset();memory.reset();errors.reset();
     memory_window.reset();
-    time_selection.reset();range_anchor.reset();timeline_view={};
+    time_selection.reset();range_anchor.reset();timeline_view={};controls={};
     profile_count=memory_count=error_count=0;profile_dirty=memory_dirty=error_dirty=true;
     selected_interval.reset();view_manual=false;memory_page=error_page=0;m_prefix=e_prefix=std::numeric_limits<std::size_t>::max();
     thread.reset();zone.reset();error.clear();
@@ -112,28 +129,32 @@ struct AnalysisPanels::Impl {
     }
   }
   void profile_view(Document& doc,const CsvExport& save) {
+    controls={};
     ImGui::TextUnformatted("CPU PROFILER");ImGui::SameLine();
     if(ImGui::Checkbox("Current frame",&profile_current)){profile_dirty=true;view_manual=false;}
-    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(185));
+    same_line_if_fits(ui_pixels(185));ImGui::SetNextItemWidth(ui_pixels(185));
     const auto thread_name=thread?std::to_string(*thread):"All threads";
     if(ImGui::BeginCombo("##thread",thread_name.c_str())) {
       if(ImGui::Selectable("All threads",!thread)){thread.reset();profile_dirty=true;}
       for(auto id:threads)if(ImGui::Selectable(std::to_string(id).c_str(),thread&&*thread==id)){thread=id;profile_dirty=true;}
       ImGui::EndCombo();
     }
-    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(190));
-    std::string zone_name="All zones";for(const auto& z:profile->zones())if(zone&&z.first.id==*zone)zone_name=z.second.name;
-    if(ImGui::BeginCombo("##zone",zone_name.c_str())) {
+    same_line_if_fits(ui_pixels(190));ImGui::SetNextItemWidth(ui_pixels(190));
+    std::string zone_name="All zones";for(const auto& z:profile->zones())if(zone&&z.first==*zone)zone_name=zone_label(z.second);
+    const bool zone_open=ImGui::BeginCombo("##zone",zone_name.c_str());
+    controls.zone_combo=control_rect();
+    if(zone_open) {
       if(ImGui::Selectable("All zones",!zone)){zone.reset();profile_dirty=true;}
       for(const auto& z:profile->zones()){
         ImGui::PushID(hex(z.first.id).c_str());ImGui::PushID(hex(z.first.generation).c_str());
-        if(ImGui::Selectable(z.second.name.c_str(),zone&&*zone==z.first.id)){zone=z.first.id;profile_dirty=true;}
+        if(ImGui::Selectable(zone_label(z.second).c_str(),zone&&*zone==z.first)){zone=z.first;profile_dirty=true;}
         ImGui::PopID();ImGui::PopID();
       }ImGui::EndCombo();
     }
     ImGui::SetNextItemWidth(ui_pixels(300));if(ImGui::InputTextWithHint("##profile-search","Filter event names...",profile_search.data(),profile_search.size()))profile_dirty=true;
-    ImGui::SameLine();if(ImGui::SmallButton("Fit timeline")){view_manual=false;profile_dirty=true;}
-    pvd::profile::Query q;q.thread_id=thread;q.zone_id=zone;q.text=profile_search.data();
+    same_line_if_fits(button_width("Fit timeline"));if(ImGui::SmallButton("Fit timeline")){view_manual=false;profile_dirty=true;}
+    pvd::profile::Query q;q.thread_id=thread;q.text=profile_search.data();
+    if(zone){q.zone_id=zone->id;q.zone_generation=zone->generation;}
     q.end_event_count=prefix(doc,profile_current);
     if(profile_current&&doc.frame()->marker)q.begin_event_count=doc.frame()->marker->begin_event_count;
     if(p_begin!=q.begin_event_count||p_end!=q.end_event_count){p_begin=q.begin_event_count;p_end=q.end_event_count;profile_dirty=true;if(profile_current)view_manual=false;}
@@ -148,7 +169,8 @@ struct AnalysisPanels::Impl {
       }
       profile_dirty=false;
     }
-    ImGui::SameLine();if(ImGui::Button("Export CSV..."))save("profile.csv",[&](std::ostream& out){profile->write_csv(out,q);});
+    same_line_if_fits(button_width("Export CSV..."));const bool export_csv=ImGui::Button("Export CSV...");controls.csv=control_rect();
+    if(export_csv)save("profile.csv",[&](std::ostream& out){profile->write_csv(out,q);});
     const auto statistics=profile->statistics();
     ImGui::TextDisabled("%zu packets  |  %zu completed intervals  |  %zu open scopes%s",statistics.profile_packets,intervals.size(),statistics.open_scopes,statistics.complete?"":statistics.malformed_packets||statistics.saturated||statistics.skipped_gpu_events?"  |  INCOMPLETE DATA":"  |  Has diagnostics");
     if(!statistics.profile_packets){ImGui::TextWrapped("This capture has no profile channel. Enable PhysX PVD ePROFILE instrumentation in the producer.");return;}
@@ -181,8 +203,10 @@ struct AnalysisPanels::Impl {
           static_cast<unsigned long long>(range.end_ticks),
           static_cast<unsigned long long>(range.duration_ticks),duration(range.duration_nanoseconds).c_str());
       if(ImGui::SmallButton("Clear measured range")){time_selection.reset();range_anchor.reset();}
-      ImGui::SameLine();
-      if(ImGui::SmallButton("Export measured intervals CSV...")) {
+      same_line_if_fits(button_width("Export measured intervals CSV..."));
+      const bool export_measured=ImGui::SmallButton("Export measured intervals CSV...");
+      controls.measured_csv=control_rect();
+      if(export_measured) {
         q.begin_ticks=range.begin_ticks;q.end_ticks=range.end_ticks;
         save("profile-range.csv",[&](std::ostream &out){profile->write_csv(out,q);});
       }
@@ -372,4 +396,5 @@ std::optional<memory::WindowStats> AnalysisPanels::memory_window_statistics()con
 }
 std::optional<ProfileTimeSelection> AnalysisPanels::profile_time_selection()const {return impl_->time_selection;}
 ProfileTimelineView AnalysisPanels::profile_timeline_view()const noexcept {return impl_->timeline_view;}
+ProfilePanelControls AnalysisPanels::profile_controls()const noexcept {return impl_->controls;}
 } // namespace pvd::viewer

@@ -219,6 +219,24 @@ native timestamps and small deltas are kept as integers even beyond `2^53`.
 `profile_time_selection` drives real ImGui Shift/mouse events over two lanes
 and blank space at 420/1060 logical pixels, 1x/1.5x/2x, with LE/BE data, high
 64-bit timestamps, backwards drags, unavailable clocks and source replacement.
+It also uses actual mouse-wheel zoom and middle-button panning and verifies
+that the measured native endpoints and duration remain unchanged.
+
+The Profiler zone selector retains the complete `(ID, generation)` key. Its
+rows and preview include the generation so two identically named zones reusing
+an ID can be distinguished. Timeline, summary and both CSV actions use that
+same identity filter. All zones clears both components. Receiving a later zone
+generation during live capture does not retarget an explicitly selected older
+generation. Thread, zone and CSV controls wrap at narrow panel widths.
+
+`profile_zone_filter_tests` operates the actual ImGui combos and both CSV
+buttons for LE/BE inputs, 1x/1.5x/2x and 420/1060 logical widths. It covers ID
+reuse with identical names, live updates, original interval durations and
+source immutability. Live oracle packets place intervals exactly at the
+measured range endpoints: an interval ending at begin or starting at end is
+excluded, while one exactly matching the range is included. Copied
+`profile_controls()` widget rectangles permit these real mouse interactions
+without exposing ImGui pointers or changing filters directly.
 Physical mouse coordinates select the native tick represented by that pixel;
 the display does not claim subpixel input resolution.
 

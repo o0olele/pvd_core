@@ -92,6 +92,24 @@ void run(ByteOrder order,bool clock,float scale,float logical_width) {
   io.AddMouseButtonEvent(0,false);draw(panels,doc,width,scale);io.AddKeyEvent(ImGuiMod_Shift,false);draw(panels,doc,width,scale);
   check(panels.profile_time_selection()->begin_ticks==expected_begin&&panels.profile_time_selection()->duration_ticks==4096,
         "right-to-left empty-space range selection");
+  const auto measured=*panels.profile_time_selection();
+  const auto fitted=panels.profile_timeline_view();
+  io.AddMousePosEvent(fitted.left+fitted.width*.5f,fitted.top+fitted.height*.7f);
+  draw(panels,doc,width,scale);draw(panels,doc,width,scale);
+  io.AddMouseWheelEvent(0,1);draw(panels,doc,width,scale);draw(panels,doc,width,scale);draw(panels,doc,width,scale);
+  const auto zoomed=panels.profile_timeline_view();
+  check(zoomed.end_ticks-zoomed.begin_ticks<fitted.end_ticks-fitted.begin_ticks,
+        "actual mouse wheel zooms high-u64 timeline");
+  const auto pan_x=zoomed.left+zoomed.width*.5f,pan_y=zoomed.top+zoomed.height*.7f;
+  io.AddMousePosEvent(pan_x,pan_y);io.AddMouseButtonEvent(2,true);draw(panels,doc,width,scale);
+  io.AddMousePosEvent(pan_x+20*scale,pan_y);draw(panels,doc,width,scale);
+  io.AddMouseButtonEvent(2,false);draw(panels,doc,width,scale);draw(panels,doc,width,scale);
+  const auto panned=panels.profile_timeline_view();
+  check(panned.begin_ticks!=zoomed.begin_ticks&&panned.end_ticks-panned.begin_ticks==zoomed.end_ticks-zoomed.begin_ticks,
+        "actual middle drag pans without changing viewport duration");
+  const auto retained=panels.profile_time_selection();
+  check(retained&&retained->begin_ticks==measured.begin_ticks&&retained->end_ticks==measured.end_ticks&&retained->duration_ticks==measured.duration_ticks,
+        "wheel zoom and middle pan retain exact measured native endpoints");
   check(doc.session()->event_count()==event_count&&doc.frame_index()==0,"measurement never seeks or edits source data");
   Document replacement;replacement.adopt(std::make_unique<Session>(source.header,source.events));
   draw(panels,replacement,width,scale);check(!panels.profile_time_selection(),"source replacement clears measurement");
