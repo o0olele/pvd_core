@@ -16,6 +16,8 @@
 
 0.6 版在 ImGui 中接入 Profiler、Memory 和 Errors 工作区，包含按线程/context 的可缩放 CPU 时间线、时长聚合、历史内存分组、错误定位及筛选后的 CSV。
 
+分析库还提供带生命周期/gap 语义的数值属性曲线、精确 CSV 与对象/属性/相机/原点偏移的帧差异查询。见 [曲线与状态差异 API](docs/curves.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
