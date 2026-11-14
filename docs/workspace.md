@@ -6,7 +6,7 @@ The viewer workspace is a UI-independent owner of multiple `Document` objects. I
 
 `Workspace::add` and `create_empty` return a nonzero 64-bit `SlotId`. The slot and its Document are heap allocated. Adding tabs or switching the active ID preserves their addresses, frame/selection state, camera, and view options. `active()` can be null when all tabs are closed. An explicit unlocked `replace` replaces that slot's Document; `close` destroys that slot. `replace` moves the supplied `unique_ptr` only on success.
 
-Each slot has its own `OrbitCamera` and `camera_ready` flag. The host can fit an initial camera only when `camera_ready()` is false, then call `set_camera_ready()`. Restored cameras include arbitrary `reference_up`, display handedness, target, yaw, pitch, distance, field of view, and near/far planes. They are validated with the same camera math used by the viewport. Category visibility, color mode, and uniform color are persisted through `Document::ViewOptions`. Transient hide/isolate rules and selection are not serialized; selection remains intact while switching between live in-memory tabs.
+Each slot has its own `OrbitCamera` and `camera_ready` flag. The host can fit an initial camera only when `camera_ready()` is false, then call `set_camera_ready()`. Restored cameras include arbitrary `reference_up`, display handedness, target, yaw, pitch, distance, field of view, and near/far planes. They are validated with the same camera math used by the viewport. Category visibility, sleeping/trigger None/All/Selected/Unselected scopes, color mode, and uniform color are persisted through `Document::ViewOptions`. Transient hide/isolate rules and selection are not serialized; selection remains intact while switching between live in-memory tabs.
 
 `WorkspaceSlot::preferences()` owns a UI-free `ViewPreferences` value: all render-layer switches, antialiasing, RGBA background, point size, contact-normal length, particle/rigid velocity scales, inspector numeric format/precision/array page size, and debug-text visibility. It includes bounds and linear/angular rigid-velocity overlays, scene-query paths/normals/volumes, native deformables, joints and debug primitives. `StoredView` and the capture's verified `last_view` archive carry that value alongside camera and category options. These values do not alter the captured Session.
 
@@ -39,6 +39,76 @@ An unsaved/live slot can have temporary bookmarks. It is excluded from disk work
 
 Recent paths are ordered most-recent-first, deduplicated by their exact UTF-8 string, and bounded. The host should supply absolute native file paths for persistence across working-directory changes. Relative paths are stored as given. Capture files themselves are not modified by workspace operations.
 
+## Named clip archives
+
+Version 4 retains `clips::State` values in each source-path archive. These are
+the independent core's named native-frame ranges, including exact scene
+generations, original frame ordinals, stable clip IDs, selected IDs, next-ID
+counters and each range's own sealed-prefix identity. See [clip ranges](clip-ranges.md).
+The workspace does not replace a prefix identity with a whole-file identity:
+a live source may append while an earlier sealed range remains valid.
+
+`WorkspaceSlot::clip_states()` and `clip_catalogs()` return cached, verified
+values for that slot's actual Session. The map contains ready-to-copy core
+`Catalog` values keyed by scene ID/generation. `pending_clip_states()` returns
+the metadata that could not yet be verified, belongs to other source contents,
+or could not be combined within the configured catalog budget. A placeholder
+has pending metadata and no active catalogs. Getters and panel drawing never
+rehash source history. `clip_revision()` changes on explicit commands and
+source classification so the host can refresh its panel cache only when needed.
+
+`set_clip_states(slot, states)` validates loaded inputs and replaces that
+Session's active catalogs. It preserves foreign/pending values. A placeholder
+retains structurally valid inputs as pending, without pretending it has loaded
+the source. `merge_clip_states` imports both sets: identical values are
+deduplicated; incompatible same-ID clip values receive fresh IDs rather than
+losing either named range. Compatible catalogs are combined by exact scene
+lifetime, retaining each range's original seal. If combining would exceed the
+per-catalog budget or exhaust IDs, the conflicting catalog remains pending with
+a warning. A source mismatch is likewise retained, not treated as an empty list.
+
+Ordinary setter edits replace only the slot's previously published active
+records. If live append has meanwhile received a pending catalog's seal, the
+setter still retains that catalog as pending until an explicit verification
+or classification command. Repeated edits cannot silently consume unseen
+ranges. Shared-path tabs keep independent pending masks; the prepared cache
+key includes that mask as well as the verified source identity.
+
+`verify_clip_states` explicitly retries pending values, for example after live
+append has received their sealed prefix. Merely appending or drawing does not
+silently promote them. Ordinary live locks permit metadata commands; loading
+and export locks reject them. `discard_pending_clip_states` is a separate,
+explicit user command. Ordinary editing, failed verification, load, replace,
+save and close never discard unverified foreign metadata. Its boolean result
+means the slot accepted the command, not that every pending source matched;
+inspect the pending list and returned warnings for that result.
+
+Catalogs are verified through core `restore_catalogs`, sharing prefix hashes and
+transaction/frame checks across a batch. Coalesced catalogs receive one further
+batch check. Duplicate file tabs with the same cached full source identity share
+the prepared projection during a command. This avoids one history scan per
+catalog or per draw. Allocation/cancellation failures propagate before metadata
+publication rather than being labeled as a foreign recording.
+
+Metadata is shared by source-path archives, like bookmarks. Editing one tab
+updates other tabs' cached catalogs and revisions; a tab still holding different
+source contents retains its own verified/pending classification. Closing and
+reopening keeps the archive. Replacing same-path content keeps old mismatching
+catalogs pending. `settings()` writes those pending values too, including when
+the capture has no open tab. A stopped live source's `bind_source` transfers its
+temporary clip values into the completed recording's archive without replacing
+the Session or retargeting another active tab. Existing path-archive conflicts
+are preserved. Unrecorded transient slots remain excluded from disk settings.
+
+The content-only clip panel emits `ClipPanelChange{source_slot, kind}` only after
+successful commands. `edited` and `verified` use the normal setter; only
+`discarded` authorizes the host to call `discard_pending_clip_states` first.
+Save As and pure drawing do not emit this callback. A host must not replace the
+panel's catalog map or its Document during the callback: store values and update
+the revision marker, then synchronize external revisions before the next draw.
+Save As continues to retain its copied source slot, validate before/after the
+destination chooser, and freeze that same Session for the existing ExportJob.
+
 ## Explicit persistence and strong restore
 
 ```cpp
@@ -57,9 +127,35 @@ Loading validates the complete sidecar before replacing workspace state. It crea
 
 The sidecar contains open file-source slots, their current view/camera/category options/render and inspector preferences/identity, per-path bookmark archives and latest matching views, recent files, global default preferences, and the active persisted slot. It embeds no raw capture, resource mesh, receiver state, export job, credentials, or hidden-object state. Transient slots are omitted; the host can explain this when saving a workspace containing unrecorded live data.
 
-The app-owned format uses an eight-byte magic, u32 version, u64 payload size, CRC-32 and a reserved zero field. The writer produces version 3. Each StoredView ends with a 79-byte preference record, and a final record stores defaults after recent-file strings. The first 62 bytes retain the v2 schema (RGBA, AA, 21 render switches, four floats, inspector format/precision/page size and debug text); v3 appends a navigation-mode byte and double speed/sensitivity. Native padding is never serialized. Versions 1/2 remain readable: v1 gets right-handed display and default preferences; both get built-in navigation defaults. Fixed independent 524-byte v1 and actual old-writer 491-byte v2 fixtures are retained. Integers and IEEE float bits are little endian; strings are length-prefixed validated UTF-8 without NUL. Booleans, enums, IDs, counts, identities, navigation and camera domains are validated. Integers never pass through JSON/double. CRC detects accidental damage, not authenticity. Unknown versions or identity algorithms fail explicitly.
+The app-owned format uses an eight-byte magic, u32 version, u64 payload size,
+CRC-32 and a reserved zero field. The current writer produces version 4. Its
+preference record retains the 62-byte v2 prefix and the 17-byte v3 navigation
+record, then appends visualization scopes, actor/shape/mass-frame switches,
+coordinate-frame scale, transparency opacity and the Inspector integer-hex
+boolean. Each stored view also appends sleeping/trigger scopes before its
+preference record. Each capture archive appends
+its bounded catalog list after bookmarks. Clip bindings and ranges use exact
+fixed-width u64 IDs, generations, event counts and frame ordinals. Native
+padding is never serialized.
 
-Default limits are 32 open slots, 256 capture archives, 32 recent files, 1,024 bookmarks per capture, 1 MiB per string, and 16 MiB per file. Counts and available bytes are checked before allocation. Limits can be reduced by the caller. Budgets fail explicitly; archived bookmarks are not silently evicted.
+Versions 1/2/3 remain readable. V1 gets right-handed display and default
+preferences; v1/v2 receive built-in navigation defaults. Older versions get
+default All scopes for existing master switches, no new coordinate frames,
+transparency None and integer hex off. They do not invent clip lists. Fixed independent
+524-byte v1, actual old-writer 491-byte v2 and actual 04c3055 v3-writer 558-byte
+fixtures are retained. Integers and IEEE float bits are little endian; strings
+are length-prefixed validated UTF-8 without NUL. Booleans, enums, IDs, counts,
+identities, navigation, visualization domains and camera math are validated.
+Integers never pass through JSON/double. CRC detects accidental damage, not
+authenticity. Unknown versions or identity algorithms fail explicitly.
+
+Default limits are 32 open slots, 256 capture archives, 32 recent files, 1,024
+bookmarks per capture, 64 clip catalogs per capture, 1,024 clips per catalog,
+4,096 clips across one capture archive, 256 UTF-8 bytes per clip name, 1 MiB per
+other string, and 16 MiB per file. Pending catalogs count against the same
+budgets. Collection counts, remaining bytes and clip-name limits are checked
+before allocation. Limits may be reduced. Budgets fail explicitly; bookmarks
+and foreign clip metadata are not silently evicted.
 
 A save validates and encodes first, exclusively creates a private sibling, writes/flushes/closes it, then atomically publishes it. Existing destinations are refused by default, including a file that appears during publication. Explicit overwrite uses replacement publication. Failure removes the private file and preserves an existing destination. Windows uses wide UTF-8 path conversion and `MoveFileExW`; POSIX uses exclusive `open`, `link` or `rename`. No destructive delete-then-rename gap is used. A process crash can leave an identifiable `.pvdws-tmp-*` sibling; directory-entry durability across power loss is not guaranteed.
 
@@ -68,6 +164,18 @@ A save validates and encodes first, exclusively creates a private sibling, write
 `tests/workspace_tests.cpp` uses real core Sessions and Document render/selection state. It verifies pointer stability through slot-vector growth, per-slot selection/frame/camera, locks and ownership, live updates continuing in the original slot after activation changes, and stopped-source binding without moving Session identity. It tests a same-path/same-event-count geometry change, per-bookmark identity verification across both old and new open Sessions, persistent placeholder restore, and canonical identity across wire repacking.
 
 Codec/file tests cover maximum/high-bit 64-bit IDs and frame values, UTF-8 names and filenames, exact arbitrary-up camera doubles, view options, every byte truncation, CRC damage, unknown version, hostile collection counts, invalid UTF-8/camera/enum/preference data, ID exhaustion, bounded reads, no implicit raw loading, default overwrite refusal, authorized atomic replacement, and failed-load strong protection. Preference tests cover exact float-bit round trips for every current field, per-slot/global-default isolation, matching versus changed-source restore, archive reopening, stopped-recording binding, camera-only bookmarks, all validation domains, hostile CRC-correct enum/boolean/NaN/page payloads, file budgets and unchanged destinations after rejected saves. The prior identity-quota and complete-camera bookmark collision audits remain covered.
+
+V4 tests additionally encode/decode and actually save/reload active plus foreign
+pending clip catalogs, restore placeholders, replace same-count changed sources,
+synchronize duplicate tabs, close/reopen archives, import conflicting stable IDs,
+promote a future seal only after explicit verification, and associate a stopped
+live Session with an existing recorded archive. They check all three named
+variants survive that merge, original live seals remain unchanged, ordinary
+setters preserve pending metadata, explicit discard removes it, and budget or
+structural rejection leaves values, caches and revisions unchanged. Correctly
+checksummed hostile clip counts and invalid clip UTF-8 are rejected. Actual
+1x/1.5x/2x ImGui command tests verify change kinds, no callback on draw/Save As,
+and no persistence notification after failed verification.
 
 
 ## Native application host

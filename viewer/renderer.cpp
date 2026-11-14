@@ -4,6 +4,7 @@
 #include "renderer.hpp"
 #include "model.hpp"
 #include "pvd/body_overlays.hpp"
+#include "pvd/coordinate_frames.hpp"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wincodec.h>
@@ -96,7 +97,24 @@ struct Apartment {
     Apartment(){const auto result=CoInitializeEx(nullptr,COINIT_MULTITHREADED);if(result!=RPC_E_CHANGED_MODE)hr(result,"CoInitializeEx");owned=SUCCEEDED(result);}
     ~Apartment(){if(owned)CoUninitialize();}
 };
+float mesh_opacity(const DrawItem& draw,const RenderOptions& options,bool selected) {
+    return float(draw.color.a)/255.f*(visualization_scope_matches(options.transparent_scope,selected)?options.transparent_opacity:1.f);
+}
+bool scope_valid(VisualizationScope scope) {
+    return scope==VisualizationScope::none||scope==VisualizationScope::all||scope==VisualizationScope::selected||scope==VisualizationScope::unselected;
+}
 } // namespace
+
+std::vector<DrawItem> visualization_pick_draws(const FrameState& frame,const RenderOptions& options,const VisualizationSelection& selection) {
+    need(scope_valid(options.transparent_scope),"unknown transparency scope");
+    need(std::isfinite(options.transparent_opacity)&&options.transparent_opacity>=0&&options.transparent_opacity<=1,"viewer opacity must be finite in [0,1]");
+    std::vector<DrawItem> result;
+    if(!options.show_solids&&!options.show_wireframe)return result;
+    const auto selected=visualization_selected_attachments(frame,selection);
+    for(const auto& draw:frame.draws)if(draw.visible&&draw.pickable&&draw.mesh&&mesh_opacity(draw,options,selected.count(draw.key)!=0)>0)
+        result.push_back(draw);
+    return result;
+}
 
 MultisampleStatus select_multisampling(Antialiasing request,bool color4x,bool depth4x,bool resolve) {
     if(request==Antialiasing::off)return {};
@@ -125,6 +143,7 @@ struct Renderer::Impl {
     MultisampleStatus multisampling;
     RenderStats stats;
     render::BodyOverlays overlays;
+    render::CoordinateFrames coordinate_frames;
     struct Mesh {
         std::weak_ptr<const render::TriangleBuffer> owner;
         ComPtr<ID3D11Buffer> vertices,indices;
@@ -242,11 +261,11 @@ struct Renderer::Impl {
         Constants data{projection.values,world.values,tint,{lit?1.0f:0.0f,depth_bias,0,0}};
         context->UpdateSubresource(constants.Get(),0,nullptr,&data,0,0);
     }
-    void indexed(Mesh& mesh,const Mat4& projection,const Mat4& world,std::array<float,4> color,bool lines) {
+    void indexed(Mesh& mesh,const Mat4& projection,const Mat4& world,std::array<float,4> color,bool lines,bool transparent=false) {
         const UINT stride=sizeof(Vertex),offset=0;auto* vb=mesh.vertices.Get();
         context->IASetVertexBuffers(0,1,&vb,&stride,&offset);context->IASetIndexBuffer(mesh.indices.Get(),DXGI_FORMAT_R32_UINT,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context->RSSetState(lines?(mirrored?wire_mirrored.Get():wire.Get()):(mirrored?solid_mirrored.Get():solid.Get()));context->OMSetDepthStencilState(lines?depth_read.Get():depth_write.Get(),0);
+        context->RSSetState(lines?(mirrored?wire_mirrored.Get():wire.Get()):(mirrored?solid_mirrored.Get():solid.Get()));context->OMSetDepthStencilState(lines||transparent?depth_read.Get():depth_write.Get(),0);
         update(projection,world,color,!lines,lines?3e-7f:0);context->DrawIndexed(mesh.index_count,0,0);
         ++stats.draw_calls;stats.triangles+=mesh.index_count/3;
     }
@@ -277,14 +296,18 @@ struct Renderer::Impl {
             context->Draw(static_cast<UINT>(lines.size()),static_cast<UINT>(triangles.size()));++stats.draw_calls;stats.line_segments+=lines.size()/2;
         }
     }
-    void render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options) {
-        stats={};overlays={};configure_samples(options.antialiasing);stats.multisampling=multisampling;if(!target)return;
+    void render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options,const VisualizationSelection& selection) {
+        stats={};overlays={};coordinate_frames={};configure_samples(options.antialiasing);stats.multisampling=multisampling;if(!target)return;
         mirrored=camera.handedness==DisplayHandedness::left_handed;
         for(float component:options.background_color)need(std::isfinite(component)&&component>=0&&component<=1,"viewer background color must be finite RGBA in [0,1]");
         need(std::isfinite(options.point_size)&&options.point_size>=1&&options.point_size<=64,"viewer point size must be in [1,64]");
         need(std::isfinite(options.contact_normal_length)&&options.contact_normal_length>=0,"viewer contact normal length must be finite/nonnegative");
         need(std::isfinite(options.particle_velocity_scale)&&options.particle_velocity_scale>=0&&options.particle_velocity_scale<=1e6f,"viewer particle velocity scale must be finite and in [0,1000000]");
         need(std::isfinite(options.rigid_velocity_scale)&&options.rigid_velocity_scale>=0&&options.rigid_velocity_scale<=1e6f,"viewer rigid velocity scale must be finite and in [0,1000000]");
+        need(std::isfinite(options.coordinate_frame_scale)&&options.coordinate_frame_scale>=0&&options.coordinate_frame_scale<=1e6f,"viewer coordinate frame scale must be finite in [0,1000000]");
+        need(std::isfinite(options.transparent_opacity)&&options.transparent_opacity>=0&&options.transparent_opacity<=1,"viewer opacity must be finite in [0,1]");
+        for(const auto scope:{options.bounds_scope,options.velocity_scope,options.scene_query_scope,options.coordinate_frame_scope,options.transparent_scope})need(scope_valid(scope),"unknown visualization scope");
+        const auto selected_keys=visualization_selected_attachments(frame,selection);
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
         ID3D11ShaderResourceView* unbound=nullptr;context->PSSetShaderResources(0,1,&unbound);
         auto* output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
@@ -311,17 +334,58 @@ struct Renderer::Impl {
         }
         draw_dynamic({},grid,projection);
         std::set<render::PickingKey> triggers;for(const auto& shape:frame.render.instances)if(shape.flags.trigger)triggers.insert(shape.picking_key());
+        const auto view=camera.view_matrix();
+        std::vector<const DrawItem*> transparent,wire_items;
+        const auto tint=[&](const DrawItem& item) {
+            const bool selected=selected_keys.count(item.key)!=0;
+            auto color=selected?std::array<float,4>{.12f,.78f,.70f,1}:rgba(item.color);
+            color[3]=mesh_opacity(item,options,selected);return color;
+        };
         for(const auto& item:frame.draws) {
             if(!item.visible||!item.mesh||item.mesh->indices.empty())continue;
             const bool trigger=triggers.count(item.key)!=0;
             // Visibility masks also hide selection overlays. Selection must not
             // accidentally resurrect geometry in a debug-primitives-only view.
             if(!options.show_solids&&!options.show_wireframe)continue;
-            auto& mesh=upload(item.mesh);const auto world=pose_matrix(item.world_pose);
-            if(options.show_solids&&!trigger)indexed(mesh,projection,world,item.selected?std::array<float,4>{0.12f,0.78f,0.70f,1}:rgba(item.color),false);
-            if(options.show_wireframe||trigger||item.selected)
-                indexed(mesh,projection,world,item.selected?std::array<float,4>{1,0.81f,0.29f,1}:
-                    trigger?std::array<float,4>{0.91f,0.64f,0.28f,0.9f}:std::array<float,4>{0.25f,0.40f,0.48f,0.7f},true);
+            const auto color=tint(item);if(color[3]<=0)continue;
+            if(options.show_solids&&!trigger) {
+                if(color[3]<1)transparent.push_back(&item);
+                else indexed(upload(item.mesh),projection,pose_matrix(item.world_pose),color,false);
+            }
+            if(options.show_wireframe||trigger||selected_keys.count(item.key))wire_items.push_back(&item);
+        }
+        // Opaque depth is complete before alpha composition. Transparent fills
+        // are back-to-front by world-bounds center, depth-tested without writes.
+        std::map<render::PickingKey,double> depths;
+        if(transparent.size()>1||wire_items.size()>1) {
+            const auto depth_of=[&](Vec3 p) {
+                need(finite(p),"viewer sorted draw has nonfinite center");
+                return -(double(view.values[2])*p.x+double(view.values[6])*p.y+double(view.values[10])*p.z+view.values[14]);
+            };
+            for(const auto* list:{&transparent,&wire_items})for(const auto* item:*list)
+                depths.emplace(item->key,depth_of(item->world_pose.position));
+            for(const auto& shape:frame.render.instances)if(shape.world_bounds) {
+                const auto found=depths.find(shape.picking_key());if(found==depths.end())continue;
+                const auto& b=*shape.world_bounds;
+                found->second=depth_of({b.minimum.x*.5f+b.maximum.x*.5f,b.minimum.y*.5f+b.maximum.y*.5f,b.minimum.z*.5f+b.maximum.z*.5f});
+            }
+        }
+        const auto far_first=[&](const DrawItem* a,const DrawItem* b) {
+            const auto ad=depths.at(a->key),bd=depths.at(b->key);
+            return ad!=bd?ad>bd:a->key<b->key;
+        };
+        if(transparent.size()>1)std::stable_sort(transparent.begin(),transparent.end(),far_first);
+        for(const auto* item:transparent) {
+            indexed(upload(item->mesh),projection,pose_matrix(item->world_pose),tint(*item),false,true);
+            ++stats.transparent_draws;
+        }
+        if(wire_items.size()>1)std::stable_sort(wire_items.begin(),wire_items.end(),far_first);
+        for(const auto* item:wire_items) {
+            const bool selected=selected_keys.count(item->key)!=0,trigger=triggers.count(item->key)!=0;
+            auto color=selected?std::array<float,4>{1,.81f,.29f,1}:
+                       trigger?std::array<float,4>{.91f,.64f,.28f,.9f}:std::array<float,4>{.25f,.40f,.48f,.7f};
+            color[3]*=mesh_opacity(*item,options,selected);
+            indexed(upload(item->mesh),projection,pose_matrix(item->world_pose),color,true,true);
         }
         std::vector<Vertex> lines,triangles;lines.reserve(512);
         if(options.show_axes) {
@@ -329,7 +393,7 @@ struct Renderer::Impl {
             line(lines,{0,0,0},{0,length,0},{0.28f,0.79f,0.46f,1},{0.28f,0.79f,0.46f,1});
             line(lines,{0,0,0},{0,0,length},{0.28f,0.54f,0.92f,1},{0.28f,0.54f,0.92f,1});
         }
-        const auto view=camera.view_matrix();const Vec3 right{view.values[0],view.values[4],view.values[8]},up{view.values[1],view.values[5],view.values[9]};
+        const Vec3 right{view.values[0],view.values[4],view.values[8]},up{view.values[1],view.values[5],view.values[9]};
         auto point=[&](Vec3 center,std::array<float,4> color,float pixels) {
             const double depth=-(double(view.values[2])*center.x+double(view.values[6])*center.y+double(view.values[10])*center.z+view.values[14]);
             if(depth<=camera.near_plane)return;
@@ -343,19 +407,42 @@ struct Renderer::Impl {
         if(options.show_joint_frames)for(const auto& l:frame.joint_frame_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_joint_limits)for(const auto& l:frame.joint_limit_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_bounds||options.show_linear_velocity||options.show_angular_velocity) {
-            render::BodyOverlayOptions request;
-            request.show_bounds=options.show_bounds;
-            request.show_linear_velocity=options.show_linear_velocity;
-            request.show_angular_velocity=options.show_angular_velocity;
-            request.velocity_scale=options.rigid_velocity_scale;
-            request.visible_attachments.emplace();
-            for(const auto& draw:frame.draws)if(draw.visible)request.visible_attachments->push_back(draw.key);
-            overlays=render::build_body_overlays(frame.render,frame.snapshot,request);
+            std::size_t remaining=262144;
+            for(bool bounds_pass:{true,false}) {
+                if(bounds_pass?!options.show_bounds:!options.show_linear_velocity&&!options.show_angular_velocity)continue;
+                render::BodyOverlayOptions request;
+                request.show_bounds=bounds_pass;
+                request.show_linear_velocity=!bounds_pass&&options.show_linear_velocity;
+                request.show_angular_velocity=!bounds_pass&&options.show_angular_velocity;
+                request.velocity_scale=options.rigid_velocity_scale;request.max_lines=remaining;
+                request.max_diagnostics=256-overlays.diagnostics.size();request.visible_attachments.emplace();
+                const auto scope=bounds_pass?options.bounds_scope:options.velocity_scope;
+                for(const auto& draw:frame.draws)if(draw.visible&&visualization_scope_matches(scope,selected_keys.count(draw.key)!=0))request.visible_attachments->push_back(draw.key);
+                auto part=render::build_body_overlays(frame.render,frame.snapshot,request);
+                remaining-=part.bounds.size()+part.linear_velocity.size()+part.angular_velocity.size();
+                overlays.bounds.insert(overlays.bounds.end(),part.bounds.begin(),part.bounds.end());
+                overlays.linear_velocity.insert(overlays.linear_velocity.end(),part.linear_velocity.begin(),part.linear_velocity.end());
+                overlays.angular_velocity.insert(overlays.angular_velocity.end(),part.angular_velocity.begin(),part.angular_velocity.end());
+                overlays.diagnostics.insert(overlays.diagnostics.end(),part.diagnostics.begin(),part.diagnostics.end());
+                overlays.bounds_count+=part.bounds_count;overlays.linear_vectors+=part.linear_vectors;overlays.angular_vectors+=part.angular_vectors;
+                overlays.processed_attachments+=part.processed_attachments;overlays.complete&=part.complete;
+            }
             for(const auto* family:{&overlays.bounds,&overlays.linear_velocity,&overlays.angular_velocity})
                 for(const auto& l:*family)line(lines,l.position0,l.position1,argb(l.color),argb(l.color));
             stats.body_bounds=overlays.bounds_count;
             stats.linear_velocity_vectors=overlays.linear_vectors;
             stats.angular_velocity_vectors=overlays.angular_vectors;
+        }
+        if(options.show_actor_frames||options.show_shape_frames||options.show_mass_frames) {
+            render::CoordinateFrameOptions request;
+            request.actor=options.show_actor_frames;request.shape=options.show_shape_frames;request.mass=options.show_mass_frames;
+            request.axis_length=options.coordinate_frame_scale;request.attachments.emplace();
+            for(const auto& draw:frame.draws)if(draw.visible&&visualization_scope_matches(options.coordinate_frame_scope,selected_keys.count(draw.key)!=0))request.attachments->push_back(draw.key);
+            coordinate_frames=render::build_coordinate_frames(frame.render,frame.snapshot,request);
+            for(const auto* family:{&coordinate_frames.actor,&coordinate_frames.shape,&coordinate_frames.mass})
+                for(const auto& value:*family)line(lines,value.position0,value.position1,argb(value.color),argb(value.color));
+            stats.actor_frames=coordinate_frames.actor_count;stats.shape_frames=coordinate_frames.shape_count;stats.mass_frames=coordinate_frames.mass_count;
+            stats.coordinate_frame_diagnostics=coordinate_frames.diagnostics.size();stats.coordinate_frames_complete=coordinate_frames.complete;
         }
         if(options.show_scene_queries) {
             const auto query_color=[&](const render::SceneQuerySource& source,std::uint32_t color) {
@@ -367,7 +454,7 @@ struct Renderer::Impl {
             for(int selected_pass=0;selected_pass<2;++selected_pass) {
             const auto in_pass=[&](const render::SceneQuerySource& source) {
                 const bool selected=frame.scene_query_selection&&same_query_source(source,*frame.scene_query_selection);
-                return selected==(selected_pass==1);
+                return visualization_scope_matches(options.scene_query_scope,selected)&&selected==(selected_pass==1);
             };
             for(const auto& value:frame.scene_queries.lines) {
                 if(!in_pass(value.source))continue;
@@ -450,13 +537,14 @@ struct Renderer::Impl {
 Renderer::Renderer(ID3D11Device* device,ID3D11DeviceContext* context,std::size_t limit):impl_(std::make_unique<Impl>(device,context,limit)){}
 Renderer::~Renderer()=default;Renderer::Renderer(Renderer&&) noexcept=default;Renderer& Renderer::operator=(Renderer&&) noexcept=default;
 void Renderer::resize(std::uint32_t w,std::uint32_t h){impl_->resize(w,h);}
-void Renderer::render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options){impl_->render(frame,camera,options);}
+void Renderer::render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options,const VisualizationSelection& selection){impl_->render(frame,camera,options,selection);}
 ID3D11ShaderResourceView* Renderer::shader_resource_view() const noexcept{return impl_->srv.Get();}
 ID3D11Texture2D* Renderer::texture() const noexcept{return impl_->target.Get();}
 std::uint32_t Renderer::width() const noexcept{return impl_->width;}
 std::uint32_t Renderer::height() const noexcept{return impl_->height;}
 RenderStats Renderer::stats() const noexcept{return impl_->stats;}
 const render::BodyOverlays& Renderer::body_overlays() const noexcept{return impl_->overlays;}
+const render::CoordinateFrames& Renderer::coordinate_frames() const noexcept{return impl_->coordinate_frames;}
 void Renderer::clear_mesh_cache() noexcept{impl_->meshes.clear();impl_->stats.cached_meshes=0;}
 
 RgbaImage readTextureRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Texture2D* source) {

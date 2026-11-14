@@ -1,18 +1,21 @@
+#include "clip_range_fixture.hpp"
 #include "pvd/writer.hpp"
 #include "workspace.hpp"
 #include "workspace_v1_fixture.hpp"
 #include "workspace_v2_fixture.hpp"
+#include "workspace_v3_fixture.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <tuple>
-#include <limits>
 
 namespace {
 using namespace pvd;
@@ -132,35 +135,45 @@ void camera_equal(const OrbitCamera &a, const OrbitCamera &b) {
             a.reference_up.z == b.reference_up.z && a.yaw == b.yaw &&
             a.pitch == b.pitch && a.distance == b.distance &&
             a.vertical_fov == b.vertical_fov && a.near_plane == b.near_plane &&
-              a.far_plane == b.far_plane && a.handedness == b.handedness,
+            a.far_plane == b.far_plane && a.handedness == b.handedness,
         "camera persistence lost values/reference up");
 }
 bool preferences_equal(const ViewPreferences &a, const ViewPreferences &b) {
   const auto rendering = [](const RenderOptions &r) {
     return std::make_tuple(
         r.background_color, r.antialiasing, r.point_size,
-        r.contact_normal_length, r.particle_velocity_scale, r.rigid_velocity_scale,
-        r.show_bounds, r.show_linear_velocity, r.show_angular_velocity,
-        r.show_grid, r.show_axes, r.show_solids, r.show_wireframe,
-        r.show_debug_points, r.show_debug_lines, r.show_debug_triangles,
-        r.show_contacts, r.show_joint_frames, r.show_joint_limits,
-        r.show_scene_queries, r.show_query_normals, r.show_query_volumes,
-        r.show_cloth, r.show_particles, r.show_cloth_constraints,
-        r.show_cloth_pins, r.show_particle_velocity);
+        r.contact_normal_length, r.particle_velocity_scale,
+        r.rigid_velocity_scale, r.show_bounds, r.show_linear_velocity,
+        r.show_angular_velocity, r.show_grid, r.show_axes, r.show_solids,
+        r.show_wireframe, r.show_debug_points, r.show_debug_lines,
+        r.show_debug_triangles, r.show_contacts, r.show_joint_frames,
+        r.show_joint_limits, r.show_scene_queries, r.show_query_normals,
+        r.show_query_volumes, r.show_cloth, r.show_particles,
+        r.show_cloth_constraints, r.show_cloth_pins, r.show_particle_velocity,
+        r.bounds_scope, r.velocity_scope, r.scene_query_scope,
+        r.coordinate_frame_scope, r.transparent_scope, r.show_actor_frames,
+        r.show_shape_frames, r.show_mass_frames, r.coordinate_frame_scale,
+        r.transparent_opacity);
   };
   return rendering(a.rendering) == rendering(b.rendering) &&
-      std::tie(a.inspection.number_format, a.inspection.float_precision,
-               a.inspection.double_precision, a.inspection.array_page_size,
-               a.show_debug_text,a.navigation.mode,a.navigation.movement_speed,a.navigation.look_sensitivity) ==
-      std::tie(b.inspection.number_format, b.inspection.float_precision,
-               b.inspection.double_precision, b.inspection.array_page_size,
-               b.show_debug_text,b.navigation.mode,b.navigation.movement_speed,b.navigation.look_sensitivity);
+         std::tie(a.inspection.number_format, a.inspection.float_precision,
+                  a.inspection.double_precision, a.inspection.array_page_size,
+                  a.inspection.integer_hex,
+                  a.show_debug_text, a.navigation.mode,
+                  a.navigation.movement_speed, a.navigation.look_sensitivity) ==
+             std::tie(b.inspection.number_format, b.inspection.float_precision,
+                      b.inspection.double_precision,
+                      b.inspection.array_page_size, b.inspection.integer_hex,
+                      b.show_debug_text,
+                      b.navigation.mode, b.navigation.movement_speed,
+                      b.navigation.look_sensitivity);
 }
 ViewPreferences distinct_preferences(bool second = false) {
   ViewPreferences v;
   auto &r = v.rendering;
-  r.background_color = second ? std::array<float,4>{1, .75f, .5f, 0} :
-      std::array<float,4>{0, std::nextafter(.25f, 1.f), .5f, 1};
+  r.background_color =
+      second ? std::array<float, 4>{1, .75f, .5f, 0}
+             : std::array<float, 4>{0, std::nextafter(.25f, 1.f), .5f, 1};
   r.antialiasing = second ? Antialiasing::off : Antialiasing::msaa4x;
   r.show_grid = r.show_axes = r.show_solids = second;
   r.show_wireframe = !second;
@@ -168,20 +181,38 @@ ViewPreferences distinct_preferences(bool second = false) {
   r.show_contacts = r.show_joint_frames = r.show_joint_limits = second;
   r.show_scene_queries = r.show_query_normals = r.show_query_volumes = second;
   r.show_bounds = r.show_linear_velocity = r.show_angular_velocity = !second;
-  r.show_cloth = r.show_particles = r.show_cloth_constraints = r.show_cloth_pins = second;
+  r.show_cloth = r.show_particles = r.show_cloth_constraints =
+      r.show_cloth_pins = second;
   r.show_particle_velocity = !second;
   r.point_size = second ? 64.f : std::nextafter(1.f, 2.f);
   r.contact_normal_length = second ? 1000000.f : std::nextafter(.125f, 1.f);
   r.particle_velocity_scale = second ? 1000000.f : std::nextafter(.5f, 1.f);
   r.rigid_velocity_scale = second ? .875f : 0;
-  v.inspection.number_format = second ? NumberFormat::fixed : NumberFormat::scientific;
+  r.bounds_scope =
+      second ? VisualizationScope::none : VisualizationScope::selected;
+  r.velocity_scope =
+      second ? VisualizationScope::unselected : VisualizationScope::all;
+  r.scene_query_scope =
+      second ? VisualizationScope::selected : VisualizationScope::unselected;
+  r.coordinate_frame_scope =
+      second ? VisualizationScope::all : VisualizationScope::selected;
+  r.transparent_scope =
+      second ? VisualizationScope::selected : VisualizationScope::unselected;
+  r.show_actor_frames = r.show_mass_frames = !second;
+  r.show_shape_frames = second;
+  r.coordinate_frame_scale = second ? 1000000.f : std::nextafter(.5f, 1.f);
+  r.transparent_opacity = second ? 1.f : std::nextafter(.25f, 1.f);
+  v.inspection.number_format =
+      second ? NumberFormat::fixed : NumberFormat::scientific;
   v.inspection.float_precision = second ? 17 : 3;
   v.inspection.double_precision = second ? 1 : 12;
   v.inspection.array_page_size = second ? 128 : 2048;
+  v.inspection.integer_hex = !second;
   v.show_debug_text = second;
-  v.navigation.mode=second?CameraNavigationMode::orbit:CameraNavigationMode::first_person;
-  v.navigation.movement_speed=second?0:std::nextafter(123.0,124.0);
-  v.navigation.look_sensitivity=second?.1:std::nextafter(.003,.004);
+  v.navigation.mode =
+      second ? CameraNavigationMode::orbit : CameraNavigationMode::first_person;
+  v.navigation.movement_speed = second ? 0 : std::nextafter(123.0, 124.0);
+  v.navigation.look_sensitivity = second ? .1 : std::nextafter(.003, .004);
   return v;
 }
 void ownership_and_locks() {
@@ -332,8 +363,9 @@ void rejected_identity_does_not_reserve_archive() {
   auto *candidate = incoming.get();
   auto wrong = workspace_source_identity(*incoming->session());
   ++wrong.event_count;
-  rejects([&] { workspace.replace(target, incoming, "bad.pxd2", nullptr, wrong); },
-          "invalid precomputed identity accepted");
+  rejects(
+      [&] { workspace.replace(target, incoming, "bad.pxd2", nullptr, wrong); },
+      "invalid precomputed identity accepted");
   check(incoming.get() == candidate && workspace.settings().captures.empty(),
         "rejected identity consumed candidate or leaked archive quota");
   check(workspace.replace(target, incoming, "retry.pxd2") && !incoming &&
@@ -362,17 +394,20 @@ void bookmark_camera_collision_preserves_both_views() {
   Workspace restored;
   restored.restore(settings);
   auto incoming = fixture.document();
-  check(restored.replace(slot, incoming, "source-A.pxd2"), "camera-collision source load");
-  check(restored.bind_source(slot, "source-B.pxd2"), "camera-collision source bind");
+  check(restored.replace(slot, incoming, "source-A.pxd2"),
+        "camera-collision source load");
+  check(restored.bind_source(slot, "source-B.pxd2"),
+        "camera-collision source bind");
   const auto &books = restored.find(slot)->bookmarks();
-  check(books.size() == 2 && books[0].id != books[1].id &&
-            books[0].camera && books[1].camera,
+  check(books.size() == 2 && books[0].id != books[1].id && books[0].camera &&
+            books[1].camera,
         "camera-distinct colliding bookmarks were merged");
   check(books[0].camera->target.x == 9 && books[1].camera->target.x == 1 &&
             books[0].camera->handedness == DisplayHandedness::left_handed &&
             books[1].camera->handedness == DisplayHandedness::right_handed,
         "bookmark camera fields were not preserved exactly");
-  check(restored.bind_source(slot, "source-B.pxd2") && restored.find(slot)->bookmarks().size() == 2,
+  check(restored.bind_source(slot, "source-B.pxd2") &&
+            restored.find(slot)->bookmarks().size() == 2,
         "rebinding the same archive duplicated bookmarks");
 }
 void stopped_live_binding() {
@@ -415,30 +450,33 @@ void stopped_live_binding() {
 }
 void preferences_and_source_identity() {
   Fixture original, changed(true);
-  const auto defaults = distinct_preferences(), saved = distinct_preferences(true);
+  const auto defaults = distinct_preferences(),
+             saved = distinct_preferences(true);
   const ViewPreferences builtin;
   Workspace w;
   w.set_default_preferences(defaults);
   const auto empty = w.create_empty();
   const auto a = w.add(original.document(), "prefs.pxd2");
   check(preferences_equal(w.find(empty)->preferences(), defaults) &&
-        preferences_equal(w.find(a)->preferences(), defaults),
+            preferences_equal(w.find(a)->preferences(), defaults),
         "new empty/source slots did not inherit global preferences");
   w.find(a)->preferences() = saved;
   w.set_default_preferences(builtin);
   const auto another = w.add(original.document(), "new.pxd2");
   check(preferences_equal(w.find(a)->preferences(), saved) &&
-        preferences_equal(w.find(empty)->preferences(), defaults) &&
-        preferences_equal(w.find(another)->preferences(), builtin),
+            preferences_equal(w.find(empty)->preferences(), defaults) &&
+            preferences_equal(w.find(another)->preferences(), builtin),
         "global defaults mutated existing slots or were not inherited");
   auto incoming = original.document();
-  check(w.replace(a, incoming, "prefs.pxd2") && preferences_equal(w.find(a)->preferences(), saved),
+  check(w.replace(a, incoming, "prefs.pxd2") &&
+            preferences_equal(w.find(a)->preferences(), saved),
         "same-identity replacement lost slot preferences");
   const auto book = w.add_bookmark(a, "Camera only", true);
   const auto camera = w.find(a)->camera();
   w.find(a)->preferences() = defaults;
   w.find(a)->camera().distance = 99;
-  check(w.jump_to_bookmark(a, book) && preferences_equal(w.find(a)->preferences(), defaults),
+  check(w.jump_to_bookmark(a, book) &&
+            preferences_equal(w.find(a)->preferences(), defaults),
         "camera bookmark unexpectedly restored view preferences");
   camera_equal(w.find(a)->camera(), camera);
   w.find(a)->preferences() = saved;
@@ -446,53 +484,68 @@ void preferences_and_source_identity() {
   const auto reopened = w.add(original.document(), "prefs.pxd2");
   check(preferences_equal(w.find(reopened)->preferences(), saved),
         "matching archived last_view preferences were not restored");
-  auto wrong = *w.find(reopened)->source_identity(); ++wrong.event_count;
+  auto wrong = *w.find(reopened)->source_identity();
+  ++wrong.event_count;
   auto invalid_document = original.document();
   auto *unchanged = invalid_document.get();
-  rejects([&]{ w.replace(reopened, invalid_document, "never-reserved.pxd2", nullptr, wrong); },
-          "invalid precomputed identity accepted while restoring preferences");
-  check(invalid_document.get() == unchanged &&
-        preferences_equal(w.find(reopened)->preferences(), saved),
-        "invalid identity changed slot preferences or consumed incoming source");
-  incoming = changed.document(); std::vector<std::string> warnings;
-  check(w.replace(reopened, incoming, "prefs.pxd2", &warnings) && !warnings.empty() &&
-        preferences_equal(w.find(reopened)->preferences(), builtin),
+  rejects(
+      [&] {
+        w.replace(reopened, invalid_document, "never-reserved.pxd2", nullptr,
+                  wrong);
+      },
+      "invalid precomputed identity accepted while restoring preferences");
+  check(
+      invalid_document.get() == unchanged &&
+          preferences_equal(w.find(reopened)->preferences(), saved),
+      "invalid identity changed slot preferences or consumed incoming source");
+  incoming = changed.document();
+  std::vector<std::string> warnings;
+  check(w.replace(reopened, incoming, "prefs.pxd2", &warnings) &&
+            !warnings.empty() &&
+            preferences_equal(w.find(reopened)->preferences(), builtin),
         "changed identity reused old view preferences instead of defaults");
 
-  Workspace seed; seed.set_default_preferences(defaults);
+  Workspace seed;
+  seed.set_default_preferences(defaults);
   const auto stored = seed.add(original.document(), "stored.pxd2");
   seed.find(stored)->preferences() = saved;
   const auto encoded = encode_workspace(seed.settings());
   const auto decoded = decode_workspace(encoded);
   check(preferences_equal(decoded.default_preferences, defaults) &&
-        preferences_equal(decoded.slots[0].view.preferences, saved) &&
-        decoded.captures[0].last_view && preferences_equal(decoded.captures[0].last_view->preferences, saved) &&
-        encode_workspace(decoded) == encoded,
-        "v2 did not exactly round-trip all slot/archive/default preference fields");
+            preferences_equal(decoded.slots[0].view.preferences, saved) &&
+            decoded.captures[0].last_view &&
+            preferences_equal(decoded.captures[0].last_view->preferences,
+                              saved) &&
+            encode_workspace(decoded) == encoded,
+        "v2 did not exactly round-trip all slot/archive/default preference "
+        "fields");
   Workspace restored;
   restored.restore(decoded);
   check(preferences_equal(restored.default_preferences(), defaults) &&
-        preferences_equal(restored.find(stored)->preferences(), saved),
+            preferences_equal(restored.find(stored)->preferences(), saved),
         "placeholder restore lost defaults or pending preference state");
   incoming = original.document();
   check(restored.replace(stored, incoming, "stored.pxd2") &&
-        preferences_equal(restored.find(stored)->preferences(), saved),
+            preferences_equal(restored.find(stored)->preferences(), saved),
         "verified restored source did not retain preferences");
-  restored.restore(decoded); incoming = changed.document();
+  restored.restore(decoded);
+  incoming = changed.document();
   check(restored.replace(stored, incoming, "stored.pxd2") &&
-        preferences_equal(restored.find(stored)->preferences(), defaults),
+            preferences_equal(restored.find(stored)->preferences(), defaults),
         "pending view preferences applied to a changed capture identity");
   const auto fallback = restored.create_empty();
   check(preferences_equal(restored.find(fallback)->preferences(), defaults),
         "restored global defaults were not applied to a new empty slot");
 
   const auto live = seed.create_empty("Recorded live");
-  auto *slot = seed.find(live); slot->document().begin_live(original.header);
-  slot->document().append_live(original.events); slot->document().finish_live();
+  auto *slot = seed.find(live);
+  slot->document().begin_live(original.header);
+  slot->document().append_live(original.events);
+  slot->document().finish_live();
   slot->preferences() = saved;
   const auto *stable = &slot->document();
   check(seed.bind_source(live, "stored.pxd2") && &slot->document() == stable &&
-        preferences_equal(slot->preferences(), saved),
+            preferences_equal(slot->preferences(), saved),
         "binding a recording replaced its current preferences or Document");
   check(seed.close(live), "close bound recording");
   const auto bound_reopen = seed.add(original.document(), "stored.pxd2");
@@ -515,6 +568,8 @@ WorkspaceSettings minimal() {
   options.show_static = false;
   options.color_mode = ColorMode::uniform;
   options.uniform_color = {1, 2, 3, 4};
+  options.sleeping_scope = VisualizationScope::selected;
+  options.trigger_scope = VisualizationScope::unselected;
   s->document().set_view_options(options);
   w.add_bookmark(id, u8"\u6d4b\u8bd5, \"quoted\"", true);
   return w.settings();
@@ -535,7 +590,8 @@ void fix_crc(Bytes &b) {
 }
 void invalid_preferences_are_atomic() {
   Fixture fixture;
-  Workspace w; w.set_default_preferences(distinct_preferences());
+  Workspace w;
+  w.set_default_preferences(distinct_preferences());
   const auto id = w.add(fixture.document(), "validated.pxd2");
   w.find(id)->preferences() = distinct_preferences(true);
   const auto original = w.settings();
@@ -543,76 +599,164 @@ void invalid_preferences_are_atomic() {
   const auto baseline = encode_workspace(original);
   std::vector<ViewPreferences> invalid;
   const auto bad = [&](auto change) {
-    auto prefs = distinct_preferences(); change(prefs); invalid.push_back(prefs);
+    auto prefs = distinct_preferences();
+    change(prefs);
+    invalid.push_back(prefs);
   };
   const auto nan = std::numeric_limits<float>::quiet_NaN();
   const auto inf = std::numeric_limits<float>::infinity();
-  bad([](auto &v){v.rendering.antialiasing=static_cast<Antialiasing>(99);});
-  bad([&](auto &v){v.rendering.background_color[0]=nan;});
-  bad([](auto &v){v.rendering.background_color[1]=-0.1f;});
-  bad([](auto &v){v.rendering.background_color[3]=1.01f;});
-  bad([&](auto &v){v.rendering.point_size=nan;});
-  bad([](auto &v){v.rendering.point_size=0;});
-  bad([](auto &v){v.rendering.point_size=65;});
-  bad([&](auto &v){v.rendering.contact_normal_length=inf;});
-  bad([](auto &v){v.rendering.contact_normal_length=-1;});
-  bad([&](auto &v){v.rendering.particle_velocity_scale=nan;});
-  bad([](auto &v){v.rendering.particle_velocity_scale=-1;});
-  bad([](auto &v){v.rendering.particle_velocity_scale=1000001.f;});
-  bad([&](auto &v){v.rendering.rigid_velocity_scale=inf;});
-  bad([](auto &v){v.rendering.rigid_velocity_scale=-1;});
-  bad([](auto &v){v.rendering.rigid_velocity_scale=1000001.f;});
-  bad([](auto &v){v.inspection.number_format=static_cast<NumberFormat>(99);});
-  bad([](auto &v){v.inspection.float_precision=0;});
-  bad([](auto &v){v.inspection.double_precision=18;});
-  bad([](auto &v){v.inspection.array_page_size=33;});
-  bad([](auto &v){v.inspection.array_page_size=std::numeric_limits<std::size_t>::max();});
-  bad([](auto &v){v.navigation.mode=static_cast<CameraNavigationMode>(99);});
-  bad([](auto &v){v.navigation.movement_speed=-1;});
-  bad([&](auto &v){v.navigation.look_sensitivity=std::numeric_limits<double>::quiet_NaN();});
+  bad([](auto &v) {
+    v.rendering.antialiasing = static_cast<Antialiasing>(99);
+  });
+  bad([&](auto &v) { v.rendering.background_color[0] = nan; });
+  bad([](auto &v) { v.rendering.background_color[1] = -0.1f; });
+  bad([](auto &v) { v.rendering.background_color[3] = 1.01f; });
+  bad([&](auto &v) { v.rendering.point_size = nan; });
+  bad([](auto &v) { v.rendering.point_size = 0; });
+  bad([](auto &v) { v.rendering.point_size = 65; });
+  bad([&](auto &v) { v.rendering.contact_normal_length = inf; });
+  bad([](auto &v) { v.rendering.contact_normal_length = -1; });
+  bad([&](auto &v) { v.rendering.particle_velocity_scale = nan; });
+  bad([](auto &v) { v.rendering.particle_velocity_scale = -1; });
+  bad([](auto &v) { v.rendering.particle_velocity_scale = 1000001.f; });
+  bad([&](auto &v) { v.rendering.rigid_velocity_scale = inf; });
+  bad([](auto &v) { v.rendering.rigid_velocity_scale = -1; });
+  bad([](auto &v) { v.rendering.rigid_velocity_scale = 1000001.f; });
+  bad([](auto &v) {
+    v.inspection.number_format = static_cast<NumberFormat>(99);
+  });
+  bad([](auto &v) { v.inspection.float_precision = 0; });
+  bad([](auto &v) { v.inspection.double_precision = 18; });
+  bad([](auto &v) { v.inspection.array_page_size = 33; });
+  bad([](auto &v) {
+    v.inspection.array_page_size = std::numeric_limits<std::size_t>::max();
+  });
+  bad([](auto &v) {
+    v.navigation.mode = static_cast<CameraNavigationMode>(99);
+  });
+  bad([](auto &v) { v.navigation.movement_speed = -1; });
+  bad([&](auto &v) {
+    v.navigation.look_sensitivity = std::numeric_limits<double>::quiet_NaN();
+  });
+  bad([](auto &v) {
+    v.rendering.bounds_scope = static_cast<VisualizationScope>(99);
+  });
+  bad([](auto &v) {
+    v.rendering.velocity_scope = static_cast<VisualizationScope>(99);
+  });
+  bad([](auto &v) {
+    v.rendering.scene_query_scope = static_cast<VisualizationScope>(99);
+  });
+  bad([](auto &v) {
+    v.rendering.coordinate_frame_scope = static_cast<VisualizationScope>(99);
+  });
+  bad([](auto &v) {
+    v.rendering.transparent_scope = static_cast<VisualizationScope>(99);
+  });
+  bad([&](auto &v) { v.rendering.coordinate_frame_scale = nan; });
+  bad([](auto &v) { v.rendering.coordinate_frame_scale = -1; });
+  bad([](auto &v) { v.rendering.coordinate_frame_scale = 1000001; });
+  bad([&](auto &v) { v.rendering.transparent_opacity = nan; });
+  bad([](auto &v) { v.rendering.transparent_opacity = -.01f; });
+  bad([](auto &v) { v.rendering.transparent_opacity = 1.01f; });
   for (const auto &prefs : invalid) {
     check(!valid_view_preferences(prefs), "invalid preferences reported valid");
-    rejects([&]{w.set_default_preferences(prefs);}, "invalid defaults accepted");
-    auto settings=original; settings.default_preferences=prefs;
-    rejects([&]{encode_workspace(settings);}, "invalid defaults encoded");
-    rejects([&]{w.restore(settings);}, "invalid defaults replaced workspace");
-    settings=original; settings.slots[0].view.preferences=prefs;
-    rejects([&]{encode_workspace(settings);}, "invalid per-slot preferences encoded");
-    rejects([&]{w.restore(settings);}, "invalid per-slot preferences replaced workspace");
-    settings=original; settings.captures[0].last_view->preferences=prefs;
-    rejects([&]{encode_workspace(settings);}, "invalid archived preferences encoded");
-    rejects([&]{w.restore(settings);}, "invalid archive preferences replaced workspace");
-    check(w.find(id)==stable && encode_workspace(w.settings())==baseline,
+    rejects([&] { w.set_default_preferences(prefs); },
+            "invalid defaults accepted");
+    auto settings = original;
+    settings.default_preferences = prefs;
+    rejects([&] { encode_workspace(settings); }, "invalid defaults encoded");
+    rejects([&] { w.restore(settings); },
+            "invalid defaults replaced workspace");
+    settings = original;
+    settings.slots[0].view.preferences = prefs;
+    rejects([&] { encode_workspace(settings); },
+            "invalid per-slot preferences encoded");
+    rejects([&] { w.restore(settings); },
+            "invalid per-slot preferences replaced workspace");
+    settings = original;
+    settings.captures[0].last_view->preferences = prefs;
+    rejects([&] { encode_workspace(settings); },
+            "invalid archived preferences encoded");
+    rejects([&] { w.restore(settings); },
+            "invalid archive preferences replaced workspace");
+    check(w.find(id) == stable && encode_workspace(w.settings()) == baseline,
           "rejected preferences changed slot/default/archive state");
   }
-  WorkspaceLimits limits; limits.max_file_bytes=baseline.size()-1;
-  rejects([&]{encode_workspace(original,limits);}, "preferences bypassed encode byte budget");
+  WorkspaceLimits limits;
+  limits.max_file_bytes = baseline.size() - 1;
+  rejects([&] { encode_workspace(original, limits); },
+          "preferences bypassed encode byte budget");
 
-  // Hostile but correctly checksummed v3 defaults. Existing v2 field offsets
-  // stay unchanged; the appended navigation record is 17 bytes.
+  // Hostile but correctly checksummed v4 defaults. The v2/v3 prefix is intact;
+  // v4 appends 16 visualization bytes and one hex boolean to the v3 record.
   const auto empty = encode_workspace(WorkspaceSettings{});
-  const auto base = empty.size()-79;
-  auto wire=empty; wire[base+16]=99; fix_crc(wire);
-  rejects([&]{decode_workspace(wire);}, "wire AA enum bypassed validation");
-  wire=empty; wire[base+61]=2; fix_crc(wire);
-  rejects([&]{decode_workspace(wire);}, "wire debug-text boolean accepted 2");
-  wire=empty; wire[base+50]=0; wire[base+51]=0; wire[base+52]=0xC0; wire[base+53]=0x7F; fix_crc(wire);
-  rejects([&]{decode_workspace(wire);}, "wire NaN point size accepted");
-  wire=empty; for(unsigned i=0;i<4;++i)wire[base+57+i]=255; fix_crc(wire);
-  rejects([&]{decode_workspace(wire);}, "wire inspector page count bypassed budget policy");
-  wire=empty; wire[base+62]=99; fix_crc(wire);
-  rejects([&]{decode_workspace(wire);}, "wire navigation mode bypassed validation");
+  const auto base = empty.size() - 96;
+  auto wire = empty;
+  wire[base + 16] = 99;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); }, "wire AA enum bypassed validation");
+  wire = empty;
+  wire[base + 61] = 2;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire debug-text boolean accepted 2");
+  wire = empty;
+  wire[base + 50] = 0;
+  wire[base + 51] = 0;
+  wire[base + 52] = 0xC0;
+  wire[base + 53] = 0x7F;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); }, "wire NaN point size accepted");
+  wire = empty;
+  for (unsigned i = 0; i < 4; ++i)
+    wire[base + 57 + i] = 255;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire inspector page count bypassed budget policy");
+  wire = empty;
+  wire[base + 62] = 99;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire navigation mode bypassed validation");
+  wire = empty;
+  wire[base + 79] = 99;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire visualization scope bypassed validation");
+  wire = empty;
+  wire[base + 84] = 2;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire coordinate boolean accepted 2");
+  wire = empty;
+  wire[base + 95] = 2;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire integer hexadecimal boolean accepted 2");
+  wire = empty;
+  wire[base + 89] = 0xC0;
+  wire[base + 90] = 0x7F;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "wire NaN coordinate scale accepted");
 
-  WorkspaceLimits quota; quota.max_captures=1;
-  Workspace bounded({},quota); const auto temporary=bounded.add(fixture.document());
-  bounded.find(temporary)->preferences().rendering.point_size=nan;
-  rejects([&]{bounded.bind_source(temporary,"invalid-bind.pxd2");}, "invalid current preferences archived by bind");
-  auto incoming=fixture.document(); auto *incoming_ptr=incoming.get();
-  rejects([&]{bounded.replace(temporary,incoming,"invalid-replace.pxd2");}, "invalid current preferences archived by replace");
-  check(incoming.get()==incoming_ptr && bounded.find(temporary)->source_path().empty(),
+  WorkspaceLimits quota;
+  quota.max_captures = 1;
+  Workspace bounded({}, quota);
+  const auto temporary = bounded.add(fixture.document());
+  bounded.find(temporary)->preferences().rendering.point_size = nan;
+  rejects([&] { bounded.bind_source(temporary, "invalid-bind.pxd2"); },
+          "invalid current preferences archived by bind");
+  auto incoming = fixture.document();
+  auto *incoming_ptr = incoming.get();
+  rejects([&] { bounded.replace(temporary, incoming, "invalid-replace.pxd2"); },
+          "invalid current preferences archived by replace");
+  check(incoming.get() == incoming_ptr &&
+            bounded.find(temporary)->source_path().empty(),
         "rejected preference publication consumed incoming or bound source");
-  bounded.find(temporary)->preferences()=distinct_preferences();
-  check(bounded.bind_source(temporary,"valid-bind.pxd2"),
+  bounded.find(temporary)->preferences() = distinct_preferences();
+  check(bounded.bind_source(temporary, "valid-bind.pxd2"),
         "invalid preference validation leaked archived source quota");
 }
 void codec_and_corruption() {
@@ -633,6 +777,10 @@ void codec_and_corruption() {
   camera_equal(decoded.slots[0].view.camera, camera);
   check(decoded.slots[0].view.options.color_mode == ColorMode::uniform &&
             !decoded.slots[0].view.options.show_static &&
+            decoded.slots[0].view.options.sleeping_scope ==
+                VisualizationScope::selected &&
+            decoded.slots[0].view.options.trigger_scope ==
+                VisualizationScope::unselected &&
             decoded.slots[0].view.options.uniform_color.a == 4,
         "display options lost");
   check(encode_workspace(decoded) == bytes,
@@ -681,6 +829,16 @@ void codec_and_corruption() {
   bad = settings;
   bad.slots[0].view.options.color_mode = static_cast<ColorMode>(99);
   rejects([&] { encode_workspace(bad); }, "unknown color mode accepted");
+  for (bool sleeping : {false, true}) {
+    bad = decoded;
+    if (sleeping)
+      bad.slots[0].view.options.sleeping_scope =
+          static_cast<VisualizationScope>(99);
+    else
+      bad.slots[0].view.options.trigger_scope =
+          static_cast<VisualizationScope>(99);
+    rejects([&] { encode_workspace(bad); }, "unknown category scope accepted");
+  }
   Workspace w;
   w.restore(decoded);
   rejects([&] { w.create_empty(); }, "slot ID wrapped after uint64 maximum");
@@ -727,7 +885,8 @@ void file_and_strong_restore() {
       std::numeric_limits<float>::quiet_NaN();
   rejects([&] { save_workspace_file(file.u8string(), invalid, true); },
           "invalid preferences were published to workspace file");
-  check(read(file) == original, "invalid preferences damaged existing workspace file");
+  check(read(file) == original,
+        "invalid preferences damaged existing workspace file");
   save_workspace_file(file.u8string(), changed, true);
   check(load_workspace_file(file.u8string()).slots[0].title == "different",
         "authorized atomic replace failed");
@@ -756,31 +915,360 @@ void file_and_strong_restore() {
               std::string::npos,
           "private settings temp leaked");
 }
+clips::State named_clips(const Session &source, clips::SceneKey scene,
+                         const char *name) {
+  auto catalog = clips::Catalog::create(source, scene);
+  catalog.rename(source, catalog.selected()->id, name);
+  return catalog.state();
+}
+void clip_archives_and_pending() {
+  Fixture original, altered(true);
+  Workspace workspace;
+  auto a = workspace.add(original.document(), "clips.pxd2");
+  auto *slot_a = workspace.find(a);
+  const auto first = named_clips(*slot_a->document().session(),
+                                 {Fixture::scene, 0}, "Original clips");
+  check(workspace.set_clip_states(a, {first}) &&
+            slot_a->clip_states().size() == 1 &&
+            slot_a->pending_clip_states().empty() &&
+            slot_a->clip_catalogs().size() == 1,
+        "loaded source did not accept/cache verified catalogs");
+  const auto b = workspace.add(original.document(), "clips.pxd2");
+  auto *slot_b = workspace.find(b);
+  check(slot_b->clip_states().size() == 1,
+        "duplicate tab did not receive per-source catalog");
+  const auto revision = slot_b->clip_revision();
+  auto edited = clips::Catalog::restore(*slot_a->document().session(),
+                                        slot_a->clip_states()[0]);
+  edited.split(*slot_a->document().session(), 0);
+  check(workspace.set_clip_states(a, {edited.state()}) &&
+            slot_b->clip_revision() > revision &&
+            slot_b->clip_catalogs().begin()->second.state().clips.size() == 2,
+        "command did not synchronize duplicate-tab cached clip values");
+  auto bytes = encode_workspace(workspace.settings());
+  auto decoded = decode_workspace(bytes);
+  check(decoded.version == 4 && decoded.captures[0].clip_states.size() == 1 &&
+            decoded.captures[0].clip_states[0].clips.size() == 2 &&
+            encode_workspace(decoded) == bytes,
+        "v4 codec did not exactly preserve named catalog values");
+  Workspace restored;
+  restored.restore(decoded);
+  check(restored.find(a)->clip_states().empty() &&
+            restored.find(a)->pending_clip_states().size() == 1,
+        "placeholder applied a catalog before source verification");
+  auto incoming = original.document();
+  check(restored.replace(a, incoming, "clips.pxd2") &&
+            restored.find(a)->clip_states().size() == 1 &&
+            restored.find(a)->pending_clip_states().empty(),
+        "matching placeholder source did not promote catalogs");
+  incoming = altered.document();
+  std::vector<std::string> warnings;
+  check(restored.replace(b, incoming, "clips.pxd2", &warnings) &&
+            !warnings.empty() && restored.find(b)->clip_states().empty() &&
+            restored.find(b)->pending_clip_states().size() == 1 &&
+            restored.settings().captures[0].clip_states.size() == 1,
+        "changed source applied or discarded unverified old clip metadata");
+  const auto second = named_clips(*restored.find(b)->document().session(),
+                                  {Fixture::scene, 0}, "Changed-source clips");
+  check(restored.set_clip_states(b, {second}) &&
+            restored.find(b)->clip_states().size() == 1 &&
+            restored.find(b)->pending_clip_states().size() == 1 &&
+            restored.find(a)->clip_states()[0].clips.size() == 2 &&
+            restored.find(a)->pending_clip_states().size() == 1,
+        "ordinary setter overwrote foreign source metadata or another open "
+        "source");
+  check(restored.settings().captures[0].clip_states.size() == 2,
+        "both source versions must remain in the per-path archive");
+  const auto file =
+      std::filesystem::temp_directory_path() /
+      ("workspace-clips-" +
+       std::to_string(
+           std::chrono::steady_clock::now().time_since_epoch().count()) +
+       ".pvdws");
+  restored.save_file(file.u8string());
+  auto saved = load_workspace_file(file.u8string());
+  std::filesystem::remove(file);
+  check(saved.captures[0].clip_states.size() == 2,
+        "file persistence lost pending foreign source catalogs");
+  restored.close(a);
+  restored.close(b);
+  const auto reopened = restored.add(original.document(), "clips.pxd2");
+  check(restored.find(reopened)->clip_states().size() == 1 &&
+            restored.find(reopened)->pending_clip_states().size() == 1,
+        "closed source archive did not restore verified and pending metadata");
+  check(restored.set_clip_states(reopened, {}) &&
+            restored.find(reopened)->clip_states().empty() &&
+            restored.find(reopened)->pending_clip_states().size() == 1 &&
+            restored.settings().captures[0].clip_states.size() == 1,
+        "clearing active clips silently discarded pending foreign catalogs");
+  check(restored.discard_pending_clip_states(reopened) &&
+            restored.find(reopened)->pending_clip_states().empty() &&
+            restored.settings().captures[0].clip_states.empty(),
+        "explicit discard command failed to remove pending metadata");
+  std::cout << "Workspace clip codec/pending/duplicate tabs/reopen passed\n";
+}
+void clip_live_binding_and_merge() {
+  Fixture fixture;
+  Workspace workspace;
+  const auto target = workspace.add(fixture.document(), "recorded-clips.pxd2");
+  const auto full = named_clips(*workspace.find(target)->document().session(),
+                                {Fixture::scene, 0}, "File range");
+  workspace.set_clip_states(target, {full});
+  const auto live = workspace.create_empty("Receiving");
+  auto *slot = workspace.find(live);
+  slot->document().begin_live(fixture.header);
+  const auto seed =
+      workspace.find(target)->document().session()->frames()[0].event_count;
+  slot->document().append_live(std::vector<Event>(
+      fixture.events.begin(), fixture.events.begin() + seed));
+  check(workspace.lock(live, SlotLock::live), "live source clip lock");
+  const auto first = named_clips(*slot->document().session(),
+                                 {Fixture::scene, 0}, "Live sealed range");
+  check(workspace.set_clip_states(live, {first}),
+        "ordinary live lock wrongly forbids sealed clip editing");
+  auto future = full;
+  future.clips[0].name = "Future source range";
+  check(
+      workspace.merge_clip_states(live, {future}) &&
+          slot->pending_clip_states().size() == 1 &&
+          slot->clip_states()[0].clips.size() == 1,
+      "not-yet-received seal was applied or lost instead of remaining pending");
+  slot->document().append_live(
+      std::vector<Event>(fixture.events.begin() + seed, fixture.events.end()));
+  check(slot->pending_clip_states().size() == 1,
+        "live append silently promoted pending data during a getter/draw");
+  for (unsigned edit = 0; edit < 2; ++edit) {
+    auto active = slot->clip_states();
+    active[0].clips[0].name = "Live sealed range edited " + std::to_string(edit);
+    check(workspace.set_clip_states(live, active) &&
+              slot->clip_states()[0].clips.size() == 1 &&
+              slot->pending_clip_states().size() == 1 &&
+              slot->pending_clip_states()[0].clips[0].name ==
+                  "Future source range",
+          "ordinary active editing after append dropped or silently promoted "
+          "a previously pending catalog");
+  }
+  check(workspace.verify_clip_states(live) &&
+            slot->clip_catalogs().size() == 1 &&
+            slot->pending_clip_states().empty() &&
+            slot->clip_states()[0].clips.size() == 2 &&
+            std::any_of(slot->clip_states()[0].clips.begin(),
+                         slot->clip_states()[0].clips.end(),
+                         [&](const auto &clip) {
+                           return clip.binding.source.event_count == seed;
+                         }),
+        "explicit verification did not promote received data while preserving "
+        "original sealed clip");
+  slot->document().finish_live();
+  auto *document = &slot->document();
+  auto *session = document->session();
+  check(!workspace.bind_source(live, "recorded-clips.pxd2"),
+        "locked stopped source bound clips");
+  workspace.unlock(live, SlotLock::live);
+  workspace.activate(target);
+  const auto old_revision = workspace.find(target)->clip_revision();
+  check(workspace.bind_source(live, "recorded-clips.pxd2") &&
+            &slot->document() == document &&
+            slot->document().session() == session &&
+            workspace.active_id() == target &&
+            workspace.find(target)->clip_revision() > old_revision,
+        "stopped-live clip association moved/retargeted source or missed "
+        "duplicate-tab revision");
+  const auto &merged = slot->clip_states()[0];
+  check(merged.clips.size() == 3 && slot->pending_clip_states().empty(),
+        "stop-live merge silently lost one conflicting named range");
+  std::set<clips::Id> ids;
+  bool sealed = false;
+  for (const auto &clip : merged.clips) {
+    check(ids.insert(clip.id).second, "merged stable IDs collided");
+    sealed = sealed || clip.binding.source.event_count == seed;
+  }
+  check(sealed, "stop-live binding rewrote original sealed clip identity");
+  workspace.close(live);
+  workspace.close(target);
+  const auto reopened =
+      workspace.add(fixture.document(), "recorded-clips.pxd2");
+  check(workspace.find(reopened)->clip_states()[0].clips.size() == 3,
+        "recorded live clip lists were not archived across close/reopen");
+  std::cout << "Workspace live seals/conflict merge/stopped binding passed\n";
+}
+void clip_pending_shared_source_edits() {
+  Fixture fixture;
+  Workspace workspace;
+  auto complete = fixture.document();
+  const auto seed = complete->session()->frames()[0].event_count;
+  const auto full = workspace.add(std::move(complete), "shared-prefix.pxd2");
+  const auto future = named_clips(*workspace.find(full)->document().session(),
+                                  {Fixture::scene, 0}, "Other tab full range");
+  workspace.set_clip_states(full, {future});
+  auto receiving = std::make_unique<Document>();
+  receiving->begin_live(fixture.header);
+  receiving->append_live(std::vector<Event>(fixture.events.begin(),
+                                            fixture.events.begin() + seed));
+  const auto live = workspace.add(std::move(receiving), "shared-prefix.pxd2");
+  auto *slot = workspace.find(live);
+  check(slot->pending_clip_states().size() == 1,
+        "shared-path shorter source should hold the other tab's seal pending");
+  const auto first = named_clips(*slot->document().session(),
+                                 {Fixture::scene, 0}, "Short prefix range");
+  workspace.set_clip_states(live, {first});
+  check(workspace.find(full)->clip_states()[0].clips.size() == 2,
+        "matching full tab did not retain both original prefix catalogs");
+  workspace.lock(live, SlotLock::live);
+  slot->document().append_live(std::vector<Event>(fixture.events.begin() + seed,
+                                                  fixture.events.end()));
+  const auto active_before = workspace.active_id();
+  for (unsigned edit = 0; edit < 2; ++edit) {
+    auto active = slot->clip_states();
+    active[0].clips[0].name = "Short prefix edited " + std::to_string(edit);
+    check(workspace.set_clip_states(live, active) &&
+              slot->clip_states()[0].clips.size() == 1 &&
+              slot->pending_clip_states().size() == 1 &&
+              workspace.find(full)->clip_states()[0].clips.size() == 2 &&
+              workspace.find(full)->pending_clip_states().empty() &&
+              workspace.active_id() == active_before,
+          "ordinary edits mixed per-tab pending classification or lost the "
+          "same-path archive's other range");
+  }
+  check(workspace.verify_clip_states(live) &&
+            slot->pending_clip_states().empty() &&
+            slot->clip_states()[0].clips.size() == 2 &&
+            workspace.find(full)->clip_states()[0].clips.size() == 2,
+        "explicit verification failed after stable same-path edits");
+  std::cout << "Workspace pending append/edits/duplicate source preservation passed\n";
+}
+void clip_placeholder_limits_and_corruption() {
+  Fixture fixture;
+  Workspace seed;
+  const auto id = seed.add(fixture.document(), "pending-clips.pxd2");
+  const auto original = named_clips(*seed.find(id)->document().session(),
+                                    {Fixture::scene, 0}, "Clip marker");
+  seed.set_clip_states(id, {original});
+  const auto settings = seed.settings();
+  Workspace placeholder;
+  placeholder.restore(settings);
+  auto another = original;
+  another.clips[0].name = "Imported pending name";
+  check(placeholder.merge_clip_states(id, {another}) &&
+            placeholder.find(id)->clip_states().empty() &&
+            placeholder.find(id)->pending_clip_states().size() == 2,
+        "placeholder merge did not retain unverified metadata separately");
+  auto incoming = fixture.document();
+  check(placeholder.replace(id, incoming, "pending-clips.pxd2") &&
+            placeholder.find(id)->clip_states()[0].clips.size() == 2 &&
+            placeholder.find(id)->pending_clip_states().empty(),
+        "matching load did not preserve/remap both pending clip-ID variants");
+  WorkspaceLimits quota;
+  quota.max_clip_catalogs_per_capture = 1;
+  Workspace bounded({}, quota);
+  const auto q = bounded.add(fixture.document(), "bounded-clips.pxd2");
+  bounded.set_clip_states(q, {original});
+  const auto baseline = encode_workspace(bounded.settings());
+  const auto revision = bounded.find(q)->clip_revision();
+  rejects([&] { bounded.merge_clip_states(q, {another}); },
+          "clip archive catalog budget ignored");
+  check(encode_workspace(bounded.settings()) == baseline &&
+            bounded.find(q)->clip_revision() == revision,
+        "rejected merge changed archive/cache/revision");
+  auto invalid = original;
+  invalid.clips[0].id = 0;
+  rejects([&] { bounded.set_clip_states(q, {invalid}); },
+          "invalid active clip ID accepted");
+  auto bad = settings;
+  bad.captures[0].clip_states[0].clips[0].frames.last = SIZE_MAX;
+  rejects([&] { encode_workspace(bad); }, "forged clip bounds encoded");
+  bad = settings;
+  bad.captures[0].clip_states[0].selected = 123456;
+  rejects([&] { placeholder.restore(bad); },
+          "invalid selected clip ID restored");
+  auto wire = encode_workspace(settings);
+  const std::string marker = "Clip marker";
+  auto found =
+      std::search(wire.begin(), wire.end(), marker.begin(), marker.end());
+  check(found != wire.end(), "clip corruption fixture marker");
+  const auto name_at = static_cast<std::size_t>(found - wire.begin());
+  wire[name_at] = 0xff;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); }, "wire clip invalid UTF8 accepted");
+  wire = encode_workspace(settings);
+  for (unsigned i = 0; i < 4; ++i)
+    wire[name_at - 16 + i] = 255;
+  fix_crc(wire);
+  rejects([&] { decode_workspace(wire); },
+          "hostile clip count bypassed pre-allocation budget");
+  const auto all = encode_workspace(settings);
+  for (std::size_t n = 0; n < all.size(); ++n) {
+    rejects([&] { decode_workspace(Bytes(all.begin(), all.begin() + n)); },
+            "truncated v4 clip data accepted");
+  }
+  std::cout << "Workspace pending/clip budgets/corruption passed\n";
+}
 } // namespace
 int main() {
   try {
-    const Bytes v2(workspace_v2_fixture.begin(),workspace_v2_fixture.end());
-    const auto restored_v2=decode_workspace(v2);
-    check(restored_v2.version==workspace_format_version&&restored_v2.slots.size()==1&&
-          restored_v2.slots[0].view.camera.handedness==DisplayHandedness::left_handed&&
-          restored_v2.slots[0].view.preferences.rendering.antialiasing==Antialiasing::msaa4x&&
-          restored_v2.default_preferences.inspection.array_page_size==512&&
-          restored_v2.default_preferences.navigation.mode==CameraNavigationMode::orbit&&
-          restored_v2.default_preferences.navigation.movement_speed==10,
-          "actual v2 workspace migration lost display state or navigation defaults");
-    const Bytes old(std::begin(test_fixtures::workspace_v1), std::end(test_fixtures::workspace_v1));
+    const Bytes v3(workspace_v3_fixture.begin(), workspace_v3_fixture.end());
+    const auto restored_v3 = decode_workspace(v3);
+    check(
+        restored_v3.version == 4 && restored_v3.slots.size() == 1 &&
+            restored_v3.slots[0].view.preferences.navigation.mode ==
+                CameraNavigationMode::first_person &&
+            restored_v3.slots[0].view.preferences.navigation.movement_speed ==
+                123.5 &&
+            restored_v3.slots[0].view.preferences.navigation.look_sensitivity ==
+                .0125 &&
+            restored_v3.default_preferences.navigation.movement_speed ==
+                321.25 &&
+            restored_v3.default_preferences.navigation.look_sensitivity ==
+                .03125 &&
+            restored_v3.default_preferences.rendering.bounds_scope ==
+                VisualizationScope::all &&
+            restored_v3.default_preferences.rendering.transparent_scope ==
+                VisualizationScope::none &&
+            !restored_v3.default_preferences.rendering.show_mass_frames &&
+            !restored_v3.default_preferences.inspection.integer_hex &&
+            !restored_v3.slots[0].view.preferences.inspection.integer_hex &&
+            restored_v3.slots[0].view.options.sleeping_scope ==
+                VisualizationScope::all &&
+            restored_v3.slots[0].view.options.trigger_scope ==
+                VisualizationScope::all &&
+            restored_v3.captures[0].clip_states.empty(),
+        "actual v3 writer fixture did not migrate navigation/visual defaults "
+        "without fabricated clips");
+    const Bytes v2(workspace_v2_fixture.begin(), workspace_v2_fixture.end());
+    const auto restored_v2 = decode_workspace(v2);
+    check(restored_v2.version == workspace_format_version &&
+              restored_v2.slots.size() == 1 &&
+              restored_v2.slots[0].view.camera.handedness ==
+                  DisplayHandedness::left_handed &&
+              restored_v2.slots[0].view.preferences.rendering.antialiasing ==
+                  Antialiasing::msaa4x &&
+              restored_v2.default_preferences.inspection.array_page_size ==
+                  512 &&
+              restored_v2.default_preferences.navigation.mode ==
+                  CameraNavigationMode::orbit &&
+              restored_v2.default_preferences.navigation.movement_speed == 10,
+          "actual v2 workspace migration lost display state or navigation "
+          "defaults");
+    const Bytes old(std::begin(test_fixtures::workspace_v1),
+                    std::end(test_fixtures::workspace_v1));
     const auto migrated = decode_workspace(old);
-    check(migrated.version == workspace_format_version && migrated.slots.size() == 1 &&
-              migrated.slots[0].view.camera.handedness == DisplayHandedness::right_handed &&
+    check(migrated.version == workspace_format_version &&
+              migrated.slots.size() == 1 &&
+              migrated.slots[0].view.camera.handedness ==
+                  DisplayHandedness::right_handed &&
               migrated.captures[0].bookmarks[0].camera &&
-              migrated.captures[0].bookmarks[0].camera->handedness == DisplayHandedness::right_handed,
+              migrated.captures[0].bookmarks[0].camera->handedness ==
+                  DisplayHandedness::right_handed,
           "v1 cameras/bookmarks did not migrate to right-handed display");
-    camera_equal(migrated.slots[0].view.camera,
-                 decode_workspace(encode_workspace(migrated)).slots[0].view.camera);
+    camera_equal(
+        migrated.slots[0].view.camera,
+        decode_workspace(encode_workspace(migrated)).slots[0].view.camera);
     check(preferences_equal(migrated.default_preferences, ViewPreferences{}) &&
-              preferences_equal(migrated.slots[0].view.preferences, ViewPreferences{}) &&
+              preferences_equal(migrated.slots[0].view.preferences,
+                                ViewPreferences{}) &&
               migrated.captures[0].last_view &&
-              preferences_equal(migrated.captures[0].last_view->preferences, ViewPreferences{}),
+              preferences_equal(migrated.captures[0].last_view->preferences,
+                                ViewPreferences{}),
           "v1 migration fabricated nondefault view preferences");
     ownership_and_locks();
     bookmarks_and_identity();
@@ -791,6 +1279,10 @@ int main() {
     invalid_preferences_are_atomic();
     codec_and_corruption();
     file_and_strong_restore();
+    clip_archives_and_pending();
+    clip_live_binding_and_merge();
+    clip_pending_shared_source_edits();
+    clip_placeholder_limits_and_corruption();
     std::cout << "workspace tests passed\n";
     return 0;
   } catch (const std::exception &e) {

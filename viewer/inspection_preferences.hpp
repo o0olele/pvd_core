@@ -7,6 +7,7 @@ struct InspectorPreferences {
   NumberFormat number_format = NumberFormat::general;
   unsigned float_precision = 9, double_precision = 17;
   std::size_t array_page_size = 32;
+  bool integer_hex = false;
 };
 inline bool
 valid_inspector_preferences(const InspectorPreferences &v) noexcept {

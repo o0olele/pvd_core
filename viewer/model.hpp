@@ -6,10 +6,19 @@
 #include "pvd/scene_queries.hpp"
 #include <array>
 #include <memory>
+#include <set>
 
 namespace pvd::viewer {
 using render::ObjectKey;
 using render::PickingKey;
+enum class VisualizationScope { none, all, selected, unselected };
+// Transient inspection context, independent of GPU/UI. An explicit owner
+// selects its recorded attachment graph; a shared shape's attachment is exact.
+struct VisualizationSelection {
+  std::optional<ObjectKey> object;
+  std::optional<PickingKey> attachment;
+};
+bool visualization_scope_matches(VisualizationScope, bool selected) noexcept;
 bool same_query_source(const render::SceneQuerySource &,
                        const render::SceneQuerySource &) noexcept;
 // Column-major m[column*4+row], column vectors, right-handed world, Y up.
@@ -90,6 +99,10 @@ struct ViewOptions {
        show_sleeping = true, show_trigger = true;
   ColorMode color_mode = ColorMode::recorded_status;
   Color uniform_color{160, 180, 205, 255};
+  // Additional filters for known sleeping actors and trigger attachments.
+  // Awake/unknown-sleep and non-trigger shapes remain governed by categories.
+  VisualizationScope sleeping_scope = VisualizationScope::all;
+  VisualizationScope trigger_scope = VisualizationScope::all;
 };
 struct ColorLegendEntry {
   std::string label;
@@ -154,6 +167,12 @@ struct FrameState {
   std::string label;
   std::vector<std::string> errors;
 };
+// The default preserves legacy manually constructed DrawItem::selected flags.
+// Documents pass use_draw_selection=false so clearing/invalidating inspection
+// never reuses flags from the previously published frame.
+std::set<PickingKey> visualization_selected_attachments(
+    const FrameState &, const VisualizationSelection & = {},
+    bool use_draw_selection = true);
 struct ModelOptions {
   render::ExtractorOptions extractor;
   render::MeshBuildOptions mesh;

@@ -1,5 +1,6 @@
 #pragma once
 #include "model.hpp"
+#include "pvd/clips.hpp"
 #include "view_preferences.hpp"
 #include <functional>
 #include <iosfwd>
@@ -8,7 +9,7 @@
 namespace pvd::viewer {
 using SlotId = std::uint64_t;
 using BookmarkId = std::uint64_t;
-inline constexpr std::uint32_t workspace_format_version = 3;
+inline constexpr std::uint32_t workspace_format_version = 4;
 enum class SlotLock { loading, live, exporting };
 struct SourceIdentity {
   std::uint32_t algorithm =
@@ -51,6 +52,8 @@ struct CaptureSettings {
   std::vector<Bookmark> bookmarks;
   std::optional<StoredView> last_view;
   std::optional<SourceIdentity> identity;
+  // Includes unverified source versions; never discard these on a failed load.
+  std::vector<clips::State> clip_states;
 };
 struct SlotSettings {
   SlotId id = 0;
@@ -71,6 +74,9 @@ struct WorkspaceLimits {
   std::size_t max_bookmarks_per_capture = 1024;
   std::size_t max_string_bytes = 1024u * 1024u;
   std::size_t max_file_bytes = 16u * 1024u * 1024u;
+  std::size_t max_clip_catalogs_per_capture = 64;
+  std::size_t max_clips_per_catalog = 1024, max_clips_per_capture = 4096;
+  std::size_t max_clip_name_bytes = 256;
 };
 class WorkspaceError : public std::runtime_error {
 public:
@@ -105,6 +111,13 @@ public:
   bool bookmarks_verified() const noexcept;
   bool bookmark_verified(BookmarkId) const noexcept;
   std::optional<SourceIdentity> source_identity() const noexcept;
+  // Cached on commands/load/bind, never rehash on a getter/draw. Active values
+  // passed sealed-prefix/scene-generation validation against this Session.
+  const std::vector<clips::State> &clip_states() const noexcept;
+  const std::vector<clips::State> &pending_clip_states() const noexcept;
+  const std::map<clips::SceneKey, clips::Catalog> &
+  clip_catalogs() const noexcept;
+  std::uint64_t clip_revision() const noexcept;
   const std::string &warning() const noexcept;
 
 private:
@@ -168,6 +181,18 @@ public:
   bool remove_bookmark(SlotId, BookmarkId);
   bool rename_bookmark(SlotId, BookmarkId, std::string name);
   bool jump_to_bookmark(SlotId, BookmarkId);
+  // Replaces this Session's verified catalogs while preserving unverified
+  // foreign-source metadata. Loaded inputs are strictly validated; placeholders
+  // store structurally valid values as pending. Ordinary live locks are
+  // allowed.
+  bool set_clip_states(SlotId, std::vector<clips::State>,
+                       std::vector<std::string> *warnings = nullptr);
+  // Keeps both sets. Conflicting stable clip IDs are reassigned, never dropped.
+  bool merge_clip_states(SlotId, std::vector<clips::State>,
+                         std::vector<std::string> *warnings = nullptr);
+  bool verify_clip_states(SlotId, std::vector<std::string> *warnings = nullptr);
+  // Explicit user command; ordinary setter/load never drops pending states.
+  bool discard_pending_clip_states(SlotId);
   WorkspaceSettings settings() const;
   WorkspaceRestore restore(const WorkspaceSettings &);
   void save_file(const std::string &utf8_path, bool overwrite = false) const;

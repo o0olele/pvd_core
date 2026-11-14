@@ -418,6 +418,10 @@ void drawSceneQueries(Document &doc, OrbitCamera &camera,
         static_cast<unsigned long long>(q.source.outer_timestamp),
         static_cast<unsigned long long>(q.source.byte_offset));
     ImGui::Text("Raw query type: %u", q.type);
+    if (q.coordinates_ambiguous)
+      ImGui::TextWrapped("OriginShift overlaps collection: values below are raw "
+                         "recorded coordinates with unknown per-query epochs. "
+                         "Spatial preview and Fit are unavailable.");
     value("Filter flags", hex(q.filter_flags));
     if (q.origin)
       vec("Origin", *q.origin);

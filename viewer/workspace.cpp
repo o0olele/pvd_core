@@ -32,16 +32,26 @@ constexpr std::uint8_t magic[8] = {'P', 'V', 'D', 'W', 'S', 10, 13, 26};
 constexpr std::size_t header_size = 28;
 // Explicit field order is the v2 wire schema, independent of struct padding.
 constexpr std::array<bool RenderOptions::*, 21> rendering_switches = {
-    &RenderOptions::show_grid, &RenderOptions::show_axes,
-    &RenderOptions::show_solids, &RenderOptions::show_wireframe,
-    &RenderOptions::show_debug_points, &RenderOptions::show_debug_lines,
-    &RenderOptions::show_debug_triangles, &RenderOptions::show_contacts,
-    &RenderOptions::show_joint_frames, &RenderOptions::show_joint_limits,
-    &RenderOptions::show_scene_queries, &RenderOptions::show_query_normals,
-    &RenderOptions::show_query_volumes, &RenderOptions::show_bounds,
-    &RenderOptions::show_linear_velocity, &RenderOptions::show_angular_velocity,
-    &RenderOptions::show_cloth, &RenderOptions::show_particles,
-    &RenderOptions::show_cloth_constraints, &RenderOptions::show_cloth_pins,
+    &RenderOptions::show_grid,
+    &RenderOptions::show_axes,
+    &RenderOptions::show_solids,
+    &RenderOptions::show_wireframe,
+    &RenderOptions::show_debug_points,
+    &RenderOptions::show_debug_lines,
+    &RenderOptions::show_debug_triangles,
+    &RenderOptions::show_contacts,
+    &RenderOptions::show_joint_frames,
+    &RenderOptions::show_joint_limits,
+    &RenderOptions::show_scene_queries,
+    &RenderOptions::show_query_normals,
+    &RenderOptions::show_query_volumes,
+    &RenderOptions::show_bounds,
+    &RenderOptions::show_linear_velocity,
+    &RenderOptions::show_angular_velocity,
+    &RenderOptions::show_cloth,
+    &RenderOptions::show_particles,
+    &RenderOptions::show_cloth_constraints,
+    &RenderOptions::show_cloth_pins,
     &RenderOptions::show_particle_velocity};
 void require(bool value, const char *message) {
   if (!value)
@@ -104,27 +114,35 @@ void camera(const OrbitCamera &c) {
 }
 bool same_camera(const std::optional<OrbitCamera> &a,
                  const std::optional<OrbitCamera> &b) {
-  if (a.has_value() != b.has_value()) return false;
-  if (!a) return true;
-  return std::tie(a->target.x, a->target.y, a->target.z,
-      a->reference_up.x, a->reference_up.y, a->reference_up.z,
-      a->handedness, a->yaw, a->pitch, a->distance, a->vertical_fov,
-      a->near_plane, a->far_plane) ==
-      std::tie(b->target.x, b->target.y, b->target.z,
-      b->reference_up.x, b->reference_up.y, b->reference_up.z,
-      b->handedness, b->yaw, b->pitch, b->distance, b->vertical_fov,
-      b->near_plane, b->far_plane);
+  if (a.has_value() != b.has_value())
+    return false;
+  if (!a)
+    return true;
+  return std::tie(a->target.x, a->target.y, a->target.z, a->reference_up.x,
+                  a->reference_up.y, a->reference_up.z, a->handedness, a->yaw,
+                  a->pitch, a->distance, a->vertical_fov, a->near_plane,
+                  a->far_plane) ==
+         std::tie(b->target.x, b->target.y, b->target.z, b->reference_up.x,
+                  b->reference_up.y, b->reference_up.z, b->handedness, b->yaw,
+                  b->pitch, b->distance, b->vertical_fov, b->near_plane,
+                  b->far_plane);
 }
 void view_options(const ViewOptions &v) {
   require(v.color_mode >= ColorMode::recorded_status &&
               v.color_mode <= ColorMode::uniform,
           "workspace color mode is unsupported");
+  const auto valid_scope = [](VisualizationScope s) {
+    return s >= VisualizationScope::none && s <= VisualizationScope::unselected;
+  };
+  require(valid_scope(v.sleeping_scope) && valid_scope(v.trigger_scope),
+          "workspace category scope is unsupported");
 }
 void view(const StoredView &v) {
   sample(v.sample_point);
   camera(v.camera);
   view_options(v.options);
-  require(valid_view_preferences(v.preferences), "workspace view preferences are invalid");
+  require(valid_view_preferences(v.preferences),
+          "workspace view preferences are invalid");
   require(v.scene_id || (v.frame_index == 0 &&
                          v.sample_point == SamplePoint::native_frame),
           "workspace view without scene has a frame/sample selection");
@@ -133,10 +151,52 @@ void identity(const std::optional<SourceIdentity> &i) {
   require(!i || i->algorithm == 1,
           "workspace source identity algorithm is unsupported");
 }
+void clip_binding(const clips::Binding &b) {
+  require(b.source.algorithm == 1 && b.source.event_count != 0 &&
+              b.scene.id != 0 && b.native_frame_count != 0 &&
+              b.native_frame_count <= b.source.event_count &&
+              b.available.first <= b.available.last &&
+              b.available.last < b.native_frame_count,
+          "workspace clip binding is invalid");
+}
+void clip_pool(const std::vector<clips::State> &states,
+               const WorkspaceLimits &limits) {
+  require(states.empty() || (limits.max_clips_per_catalog && limits.max_clip_name_bytes &&
+                               limits.max_string_bytes),
+          "workspace clip catalogs are disabled by zero limits");
+  require(states.size() <= limits.max_clip_catalogs_per_capture,
+          "workspace clip catalog count exceeds budget");
+  std::size_t total = 0;
+  for (const auto &state : states) {
+    clip_binding(state.binding);
+    require(state.clips.size() <= limits.max_clips_per_catalog &&
+                state.clips.size() <= limits.max_clips_per_capture - total,
+            "workspace clip count exceeds budget");
+    total += state.clips.size();
+    std::set<clips::Id> ids;
+    for (const auto &clip : state.clips) {
+      clip_binding(clip.binding);
+      require(clip.binding.scene == state.binding.scene &&
+                  clip.binding.source.event_count <=
+                      state.binding.source.event_count &&
+                  clip.id && clip.id < state.next_id &&
+                  ids.insert(clip.id).second &&
+                  clip.frames.first <= clip.frames.last &&
+                  clip.frames.first >= clip.binding.available.first &&
+                  clip.frames.last <= clip.binding.available.last,
+              "workspace clip ID, source or range is invalid");
+      utf8(clip.name,
+           std::min(limits.max_string_bytes, limits.max_clip_name_bytes), true);
+    }
+    require(state.next_id && (!state.selected || ids.count(*state.selected)),
+            "workspace clip selected/next ID is invalid");
+  }
+}
 void valid(const WorkspaceSettings &s, const WorkspaceLimits &l) {
   require(s.version == workspace_format_version,
           "unsupported workspace version");
-  require(valid_view_preferences(s.default_preferences), "workspace default preferences are invalid");
+  require(valid_view_preferences(s.default_preferences),
+          "workspace default preferences are invalid");
   require(s.slots.size() <= l.max_slots, "workspace slot count exceeds budget");
   require(s.captures.size() <= l.max_captures,
           "workspace capture-state count exceeds budget");
@@ -151,6 +211,7 @@ void valid(const WorkspaceSettings &s, const WorkspaceLimits &l) {
     require(c.bookmarks.size() <= l.max_bookmarks_per_capture,
             "workspace bookmark count exceeds budget");
     identity(c.identity);
+    clip_pool(c.clip_states, l);
     if (c.last_view)
       view(*c.last_view);
     std::set<BookmarkId> books;
@@ -251,9 +312,11 @@ struct Encoder {
     u(static_cast<unsigned>(c.handedness), 1);
   }
   void preferences(const ViewPreferences &v) {
-    for (float component : v.rendering.background_color) f(component);
+    for (float component : v.rendering.background_color)
+      f(component);
     u(static_cast<unsigned>(v.rendering.antialiasing), 1);
-    for (auto member : rendering_switches) u(v.rendering.*member, 1);
+    for (auto member : rendering_switches)
+      u(v.rendering.*member, 1);
     f(v.rendering.rigid_velocity_scale);
     f(v.rendering.particle_velocity_scale);
     f(v.rendering.contact_normal_length);
@@ -266,6 +329,42 @@ struct Encoder {
     u(static_cast<unsigned>(v.navigation.mode), 1);
     d(v.navigation.movement_speed);
     d(v.navigation.look_sensitivity);
+    u(static_cast<unsigned>(v.rendering.bounds_scope), 1);
+    u(static_cast<unsigned>(v.rendering.velocity_scope), 1);
+    u(static_cast<unsigned>(v.rendering.scene_query_scope), 1);
+    u(static_cast<unsigned>(v.rendering.coordinate_frame_scope), 1);
+    u(static_cast<unsigned>(v.rendering.transparent_scope), 1);
+    u(v.rendering.show_actor_frames, 1);
+    u(v.rendering.show_shape_frames, 1);
+    u(v.rendering.show_mass_frames, 1);
+    f(v.rendering.coordinate_frame_scale);
+    f(v.rendering.transparent_opacity);
+    u(v.inspection.integer_hex, 1);
+  }
+  void clip_binding(const clips::Binding &b) {
+    u(b.source.algorithm, 4);
+    u(b.source.event_count, 8);
+    u(b.source.fingerprint, 8);
+    u(b.scene.id, 8);
+    u(b.scene.generation, 8);
+    u(b.available.first, 8);
+    u(b.available.last, 8);
+    u(b.native_frame_count, 8);
+  }
+  void clip_state(const clips::State &s) {
+    clip_binding(s.binding);
+    u(s.next_id, 8);
+    u(s.selected.has_value(), 1);
+    if (s.selected)
+      u(*s.selected, 8);
+    u(s.clips.size(), 4);
+    for (const auto &clip : s.clips) {
+      u(clip.id, 8);
+      str(clip.name);
+      clip_binding(clip.binding);
+      u(clip.frames.first, 8);
+      u(clip.frames.last, 8);
+    }
   }
   void view(const StoredView &v) {
     u(v.scene_id.has_value(), 1);
@@ -284,6 +383,8 @@ struct Encoder {
     u(v.options.uniform_color.g, 1);
     u(v.options.uniform_color.b, 1);
     u(v.options.uniform_color.a, 1);
+    u(static_cast<unsigned>(v.options.sleeping_scope), 1);
+    u(static_cast<unsigned>(v.options.trigger_scope), 1);
     preferences(v.preferences);
   }
 };
@@ -312,12 +413,51 @@ struct Decoder {
               "workspace collection count exceeds remaining payload");
     return static_cast<std::size_t>(n);
   }
-  std::string str() {
-    auto n = count(limits.max_string_bytes);
+  std::string str(std::size_t maximum) {
+    auto n = count(maximum);
     require(n <= bytes.size() - at, "workspace string length exceeds file");
     std::string s(reinterpret_cast<const char *>(bytes.data() + at), n);
     at += n;
-    utf8(s, limits.max_string_bytes);
+    utf8(s, maximum);
+    return s;
+  }
+  std::string str() { return str(limits.max_string_bytes); }
+  std::size_t index() {
+    const auto value = u(8);
+    require(value <= std::numeric_limits<std::size_t>::max(),
+            "workspace clip frame index exceeds platform size");
+    return static_cast<std::size_t>(value);
+  }
+  clips::Binding clip_binding() {
+    clips::Binding b;
+    b.source.algorithm = static_cast<std::uint32_t>(u(4));
+    b.source.event_count = u(8);
+    b.source.fingerprint = u(8);
+    b.scene.id = u(8);
+    b.scene.generation = u(8);
+    b.available.first = index();
+    b.available.last = index();
+    b.native_frame_count = index();
+    return b;
+  }
+  clips::State clip_state(std::size_t remaining_clips) {
+    clips::State s;
+    s.binding = clip_binding();
+    s.next_id = u(8);
+    if (boolean())
+      s.selected = u(8);
+    auto n = count(std::min(remaining_clips, limits.max_clips_per_catalog), 88);
+    s.clips.reserve(n);
+    while (n--) {
+      clips::Clip clip;
+      clip.id = u(8);
+      clip.name =
+          str(std::min(limits.max_string_bytes, limits.max_clip_name_bytes));
+      clip.binding = clip_binding();
+      clip.frames.first = index();
+      clip.frames.last = index();
+      s.clips.push_back(std::move(clip));
+    }
     return s;
   }
   float f() {
@@ -351,14 +491,17 @@ struct Decoder {
     c.vertical_fov = d();
     c.near_plane = d();
     c.far_plane = d();
-    if (version >= 2) c.handedness = static_cast<DisplayHandedness>(u(1));
+    if (version >= 2)
+      c.handedness = static_cast<DisplayHandedness>(u(1));
     return c;
   }
   ViewPreferences preferences() {
     ViewPreferences v;
-    for (auto &component : v.rendering.background_color) component = f();
+    for (auto &component : v.rendering.background_color)
+      component = f();
     v.rendering.antialiasing = static_cast<Antialiasing>(u(1));
-    for (auto member : rendering_switches) v.rendering.*member = boolean();
+    for (auto member : rendering_switches)
+      v.rendering.*member = boolean();
     v.rendering.rigid_velocity_scale = f();
     v.rendering.particle_velocity_scale = f();
     v.rendering.contact_normal_length = f();
@@ -372,6 +515,20 @@ struct Decoder {
       v.navigation.mode = static_cast<CameraNavigationMode>(u(1));
       v.navigation.movement_speed = d();
       v.navigation.look_sensitivity = d();
+    }
+    if (version >= 4) {
+      v.rendering.bounds_scope = static_cast<VisualizationScope>(u(1));
+      v.rendering.velocity_scope = static_cast<VisualizationScope>(u(1));
+      v.rendering.scene_query_scope = static_cast<VisualizationScope>(u(1));
+      v.rendering.coordinate_frame_scope =
+          static_cast<VisualizationScope>(u(1));
+      v.rendering.transparent_scope = static_cast<VisualizationScope>(u(1));
+      v.rendering.show_actor_frames = boolean();
+      v.rendering.show_shape_frames = boolean();
+      v.rendering.show_mass_frames = boolean();
+      v.rendering.coordinate_frame_scale = f();
+      v.rendering.transparent_opacity = f();
+      v.inspection.integer_hex = boolean();
     }
     return v;
   }
@@ -391,7 +548,12 @@ struct Decoder {
     v.options.uniform_color = {
         static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1)),
         static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1))};
-    if (version >= 2) v.preferences = preferences();
+    if (version >= 4) {
+      v.options.sleeping_scope = static_cast<VisualizationScope>(u(1));
+      v.options.trigger_scope = static_cast<VisualizationScope>(u(1));
+    }
+    if (version >= 2)
+      v.preferences = preferences();
     return v;
   }
 };
@@ -515,7 +677,135 @@ struct CaptureData {
   std::vector<Bookmark> bookmarks;
   std::optional<StoredView> last_view;
   std::optional<SourceIdentity> identity;
+  std::vector<clips::State> clip_states;
 };
+clips::Limits clip_limits(const WorkspaceLimits &limits) {
+  clips::Limits result;
+  result.max_clips = limits.max_clips_per_catalog;
+  result.max_name_bytes =
+      std::min(limits.max_clip_name_bytes, limits.max_string_bytes);
+  result.max_catalogs = limits.max_clip_catalogs_per_capture;
+  return result;
+}
+bool same_clip_binding(const clips::Binding &a, const clips::Binding &b) {
+  return a.source == b.source && a.scene == b.scene &&
+         a.available.first == b.available.first &&
+         a.available.last == b.available.last &&
+         a.native_frame_count == b.native_frame_count;
+}
+bool same_clip(const clips::Clip &a, const clips::Clip &b) {
+  return a.id == b.id && a.name == b.name &&
+         same_clip_binding(a.binding, b.binding) &&
+         a.frames.first == b.frames.first && a.frames.last == b.frames.last;
+}
+bool same_clip_state(const clips::State &a, const clips::State &b) {
+  return same_clip_binding(a.binding, b.binding) && a.next_id == b.next_id &&
+         a.selected == b.selected && a.clips.size() == b.clips.size() &&
+         std::equal(a.clips.begin(), a.clips.end(), b.clips.begin(), same_clip);
+}
+void append_clip_states(std::vector<clips::State> &target,
+                        const std::vector<clips::State> &incoming) {
+  for (const auto &state : incoming)
+    if (std::none_of(target.begin(), target.end(), [&](const auto &old) {
+          return same_clip_state(old, state);
+        }))
+      target.push_back(state);
+}
+clips::State merge_clip_state(clips::State left, const clips::State &right,
+                              const WorkspaceLimits &limits) {
+  require(left.binding.scene == right.binding.scene,
+          "Cannot merge unrelated clip scene lifetimes");
+  if (right.binding.source.event_count > left.binding.source.event_count)
+    left.binding = right.binding;
+  left.next_id = std::max(left.next_id, right.next_id);
+  std::map<clips::Id, clips::Id> mapped;
+  for (const auto &original : right.clips) {
+    auto next = original;
+    const auto collision =
+        std::find_if(left.clips.begin(), left.clips.end(),
+                     [&](const auto &old) { return old.id == next.id; });
+    if (collision != left.clips.end()) {
+      if (same_clip(*collision, next)) {
+        mapped[original.id] = next.id;
+        continue;
+      }
+      require(left.next_id != UINT64_MAX,
+              "Clip ID space exhausted while preserving conflicting metadata");
+      next.id = left.next_id++;
+    }
+    require(left.clips.size() < limits.max_clips_per_catalog,
+            "Compatible clip catalogs exceed the merged per-catalog budget");
+    mapped[original.id] = next.id;
+    left.clips.push_back(std::move(next));
+  }
+  if (right.selected)
+    left.selected = mapped.at(*right.selected);
+  return left;
+}
+struct ClipProjection {
+  std::vector<clips::State> active, pending;
+  std::map<clips::SceneKey, clips::Catalog> catalogs;
+  std::set<std::size_t> active_records;
+  std::vector<std::string> warnings;
+};
+ClipProjection project_clips(const Session *session,
+                             const std::vector<clips::State> &pool,
+                             const WorkspaceLimits &limits,
+                             const std::set<std::size_t> &held_pending = {}) {
+  clip_pool(pool, limits);
+  ClipProjection projected;
+  if (!session) {
+    projected.pending = pool;
+    return projected;
+  }
+  if (pool.empty())
+    return projected;
+  const auto results =
+      clips::restore_catalogs(*session, pool, clip_limits(limits));
+  std::map<clips::SceneKey, clips::State> combined;
+  for (std::size_t i = 0; i < pool.size(); ++i) {
+    if (held_pending.count(i)) {
+      projected.pending.push_back(pool[i]);
+      projected.warnings.push_back(
+          "Clip catalog remains pending until explicit verification.");
+      continue;
+    }
+    std::string error = results[i].error;
+    if (results[i].catalog) {
+      auto found = combined.find(pool[i].binding.scene);
+      if (found == combined.end())
+        combined.emplace(pool[i].binding.scene, pool[i]);
+      else
+        try {
+          found->second = merge_clip_state(found->second, pool[i], limits);
+        } catch (const WorkspaceError &e) {
+          error = e.what();
+        }
+      if (error.empty()) {
+        projected.active_records.insert(i);
+        continue;
+      }
+    }
+    projected.pending.push_back(pool[i]);
+    projected.warnings.push_back(
+        "Clip catalog scene " + std::to_string(pool[i].binding.scene.id) +
+        "/generation " + std::to_string(pool[i].binding.scene.generation) +
+        " remains pending: " + error);
+  }
+  for (auto &entry : combined)
+    projected.active.push_back(std::move(entry.second));
+  if (!projected.active.empty()) {
+    auto restored = clips::restore_catalogs(*session, projected.active,
+                                            clip_limits(limits));
+    for (std::size_t i = 0; i < restored.size(); ++i) {
+      require(restored[i].catalog.has_value(),
+              "Merged clip catalog failed source validation");
+      projected.catalogs.emplace(projected.active[i].binding.scene,
+                                 std::move(*restored[i].catalog));
+    }
+  }
+  return projected;
+}
 bool can_apply(const Document &doc, const StoredView &v) {
   if (!doc.loaded())
     return true;
@@ -582,6 +872,9 @@ Bytes encode_workspace(const WorkspaceSettings &s,
         p.camera(*b.camera);
       p.identity(b.identity);
     }
+    p.u(c.clip_states.size(), 4);
+    for (const auto &state : c.clip_states)
+      p.clip_state(state);
   }
   p.u(s.recent_files.size(), 4);
   for (const auto &r : s.recent_files)
@@ -605,7 +898,8 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
           "workspace magic is invalid");
   Decoder h{bytes, limits, 8};
   auto version = h.u(4);
-  require(version >= 1 && version <= workspace_format_version, "unsupported workspace version");
+  require(version >= 1 && version <= workspace_format_version,
+          "unsupported workspace version");
   auto size = h.u(8);
   auto checksum = h.u(4);
   require(h.u(4) == 0, "workspace header reserved field is unsupported");
@@ -653,13 +947,24 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
       b.identity = p.identity();
       c.bookmarks.push_back(std::move(b));
     }
+    if (version >= 4) {
+      auto n_clips = p.count(limits.max_clip_catalogs_per_capture, 73);
+      c.clip_states.reserve(n_clips);
+      std::size_t total_clips = 0;
+      while (n_clips--) {
+        auto state = p.clip_state(limits.max_clips_per_capture - total_clips);
+        total_clips += state.clips.size();
+        c.clip_states.push_back(std::move(state));
+      }
+    }
     s.captures.push_back(std::move(c));
   }
   count = p.count(limits.max_recent_files, 4);
   s.recent_files.reserve(count);
   while (count--)
     s.recent_files.push_back(p.str());
-  if (version >= 2) s.default_preferences = p.preferences();
+  if (version >= 2)
+    s.default_preferences = p.preferences();
   require(p.at == bytes.size(), "workspace file contains trailing payload");
   valid(s, limits);
   return s;
@@ -704,6 +1009,34 @@ struct WorkspaceSlot::Impl {
   std::optional<StoredView> pending_view;
   std::optional<SourceIdentity> identity, pending_identity;
   std::string warning;
+  ClipProjection clips;
+  std::string combined_warning;
+  std::uint64_t clip_revision = 0;
+  static std::string combined(const std::string &base,
+                              const ClipProjection &projection) {
+    auto result = base;
+    if (!projection.pending.empty()) {
+      if (!result.empty())
+        result += " ";
+      result += std::to_string(projection.pending.size()) +
+                " clip catalogs remain pending source verification.";
+    }
+    return result;
+  }
+  void publish_clips(ClipProjection next, std::string text) noexcept {
+    clips.active.swap(next.active);
+    clips.pending.swap(next.pending);
+    clips.catalogs.swap(next.catalogs);
+    clips.active_records.swap(next.active_records);
+    clips.warnings.swap(next.warnings);
+    combined_warning.swap(text);
+    ++clip_revision;
+  }
+  void set_clips(ClipProjection next) {
+    require(clip_revision != UINT64_MAX, "workspace clip revision exhausted");
+    auto text = combined(warning, next);
+    publish_clips(std::move(next), std::move(text));
+  }
   StoredView view() const {
     auto v = pending_view.value_or(StoredView{});
     if (document->loaded()) {
@@ -734,8 +1067,12 @@ OrbitCamera &WorkspaceSlot::camera() noexcept { return impl_->camera; }
 const OrbitCamera &WorkspaceSlot::camera() const noexcept {
   return impl_->camera;
 }
-ViewPreferences &WorkspaceSlot::preferences() noexcept { return impl_->preferences; }
-const ViewPreferences &WorkspaceSlot::preferences() const noexcept { return impl_->preferences; }
+ViewPreferences &WorkspaceSlot::preferences() noexcept {
+  return impl_->preferences;
+}
+const ViewPreferences &WorkspaceSlot::preferences() const noexcept {
+  return impl_->preferences;
+}
 bool WorkspaceSlot::camera_ready() const noexcept {
   return impl_->camera_ready;
 }
@@ -772,8 +1109,22 @@ bool WorkspaceSlot::bookmark_verified(BookmarkId id) const noexcept {
 std::optional<SourceIdentity> WorkspaceSlot::source_identity() const noexcept {
   return impl_->identity;
 }
+const std::vector<clips::State> &WorkspaceSlot::clip_states() const noexcept {
+  return impl_->clips.active;
+}
+const std::vector<clips::State> &
+WorkspaceSlot::pending_clip_states() const noexcept {
+  return impl_->clips.pending;
+}
+const std::map<clips::SceneKey, clips::Catalog> &
+WorkspaceSlot::clip_catalogs() const noexcept {
+  return impl_->clips.catalogs;
+}
+std::uint64_t WorkspaceSlot::clip_revision() const noexcept {
+  return impl_->clip_revision;
+}
 const std::string &WorkspaceSlot::warning() const noexcept {
-  return impl_->warning;
+  return impl_->combined_warning;
 }
 SourceIdentity workspace_source_identity(const Session &session) {
   return workspace_source_identity(session, {});
@@ -866,6 +1217,83 @@ struct Workspace::Impl {
       slot.impl_->capture->last_view = std::move(current);
     }
   }
+  struct ClipUpdate {
+    WorkspaceSlot::Impl *slot;
+    ClipProjection projection;
+    std::string warning;
+  };
+  std::vector<ClipUpdate>
+  prepare_clips(const std::shared_ptr<CaptureData> &capture,
+                const std::vector<clips::State> &pool,
+                WorkspaceSlot *extra = nullptr,
+                const std::string *extra_warning = nullptr,
+                bool preserve_pending = false,
+                const std::vector<clips::State> *explicit_active = nullptr) {
+    clip_pool(pool, limits);
+    std::vector<ClipUpdate> updates;
+    std::map<std::tuple<std::uint32_t, std::uint64_t, std::uint64_t,
+                        std::set<std::size_t>>,
+             ClipProjection>
+        cache;
+    auto prepare = [&](WorkspaceSlot &slot) {
+      require(slot.impl_->clip_revision != UINT64_MAX,
+              "workspace clip revision exhausted");
+      const auto &doc = slot.document();
+      std::set<std::size_t> held_pending;
+      if (preserve_pending)
+        for (std::size_t i = 0; i < pool.size(); ++i)
+          if (std::any_of(slot.impl_->clips.pending.begin(),
+                          slot.impl_->clips.pending.end(),
+                          [&](const auto &old) {
+                            return same_clip_state(old, pool[i]);
+                          }) &&
+              (!explicit_active ||
+               std::none_of(explicit_active->begin(), explicit_active->end(),
+                            [&](const auto &active) {
+                              return same_clip_state(active, pool[i]);
+                            })))
+            held_pending.insert(i);
+      ClipProjection projection;
+      if (doc.loaded() && !doc.live() && slot.impl_->identity &&
+          slot.impl_->identity->event_count == doc.session()->event_count()) {
+        const auto &identity = *slot.impl_->identity;
+        const auto key = std::make_tuple(identity.algorithm, identity.event_count,
+                                         identity.fingerprint, held_pending);
+        auto found = cache.find(key);
+        if (found == cache.end())
+          found = cache.emplace(key, project_clips(doc.session(), pool, limits,
+                                                    held_pending))
+                      .first;
+        projection = found->second;
+      } else
+        projection =
+            project_clips(doc.loaded() ? doc.session() : nullptr, pool, limits,
+                           held_pending);
+      auto text = WorkspaceSlot::Impl::combined(extra == &slot && extra_warning
+                                                    ? *extra_warning
+                                                    : slot.impl_->warning,
+                                                projection);
+      updates.push_back(
+          {slot.impl_.get(), std::move(projection), std::move(text)});
+    };
+    bool has_extra = false;
+    for (const auto &slot : slots)
+      if (slot->impl_->capture == capture) {
+        prepare(*slot);
+        has_extra = has_extra || slot.get() == extra;
+      }
+    if (extra && !has_extra)
+      prepare(*extra);
+    return updates;
+  }
+  static void publish_clips(const std::shared_ptr<CaptureData> &capture,
+                            std::vector<clips::State> pool,
+                            std::vector<ClipUpdate> updates) noexcept {
+    capture->clip_states.swap(pool);
+    for (auto &update : updates)
+      update.slot->publish_clips(std::move(update.projection),
+                                 std::move(update.warning));
+  }
 };
 Workspace::Workspace(ModelOptions m, WorkspaceLimits l)
     : impl_(std::make_unique<Impl>(m, l)) {}
@@ -934,6 +1362,9 @@ SlotId Workspace::add(std::unique_ptr<Document> document, std::string path,
       p->warning = "Capture content changed or is unverified. Old bookmarks "
                    "are retained but cannot be applied.";
   }
+  p->set_clips(
+      project_clips(p->document->loaded() ? p->document->session() : nullptr,
+                    p->capture->clip_states, impl_->limits));
   auto id = p->id;
   auto slot = std::unique_ptr<WorkspaceSlot>(new WorkspaceSlot(std::move(p)));
   impl_->slots.push_back(std::move(slot));
@@ -950,7 +1381,8 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
   if (!slot || slot->impl_->lock)
     return false;
   require(bool(incoming), "workspace replacement document is null");
-  require(valid_view_preferences(slot->preferences()), "workspace view preferences are invalid");
+  require(valid_view_preferences(slot->preferences()),
+          "workspace view preferences are invalid");
   utf8(path, impl_->limits.max_string_bytes);
   identity(precomputed);
   std::optional<SourceIdentity> actual;
@@ -1006,6 +1438,15 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
                             }))
     warning = "Capture content changed or is unverified. Old bookmarks are "
               "retained but cannot be applied.";
+  auto projected =
+      project_clips(incoming->loaded() ? incoming->session() : nullptr,
+                    data->clip_states, impl_->limits);
+  require(slot->impl_->clip_revision != UINT64_MAX,
+          "workspace clip revision exhausted");
+  auto combined_warning = WorkspaceSlot::Impl::combined(warning, projected);
+  if (warnings)
+    warnings->insert(warnings->end(), projected.warnings.begin(),
+                     projected.warnings.end());
   if (!warning.empty() && warnings)
     warnings->push_back(warning);
   impl_->preserve(*slot);
@@ -1027,6 +1468,7 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
   slot->impl_->pending_identity = pending_identity;
   slot->impl_->identity = actual;
   slot->impl_->warning = std::move(warning);
+  slot->impl_->publish_clips(std::move(projected), std::move(combined_warning));
   if (!path.empty())
     remember_recent(std::move(path));
   return true;
@@ -1066,7 +1508,8 @@ bool Workspace::bind_source(SlotId id, std::string path,
         if (collision->name == b.name && collision->scene_id == b.scene_id &&
             collision->frame_index == b.frame_index &&
             collision->sample_point == b.sample_point &&
-            collision->identity == b.identity && same_camera(collision->camera, b.camera))
+            collision->identity == b.identity &&
+            same_camera(collision->camera, b.camera))
           continue;
         require(next_bookmark != 0, "workspace bookmark ID space exhausted");
         b.id = next_bookmark;
@@ -1077,6 +1520,12 @@ bool Workspace::bind_source(SlotId id, std::string path,
               "workspace bookmark budget exceeded");
       merged->bookmarks.push_back(std::move(b));
     }
+  if (target != slot->impl_->capture)
+    append_clip_states(merged->clip_states,
+                       slot->source_path().empty()
+                           ? slot->impl_->capture->clip_states
+                           : slot->clip_states());
+  clip_pool(merged->clip_states, impl_->limits);
   std::string warning;
   if (std::any_of(
           merged->bookmarks.begin(), merged->bookmarks.end(),
@@ -1085,6 +1534,13 @@ bool Workspace::bind_source(SlotId id, std::string path,
               "capture content; they remain unverified.";
   if (!warning.empty() && warnings)
     warnings->push_back(warning);
+  auto clip_updates =
+      impl_->prepare_clips(target, merged->clip_states, slot, &warning);
+  if (warnings)
+    for (const auto &update : clip_updates)
+      if (update.slot == slot->impl_.get())
+        warnings->insert(warnings->end(), update.projection.warnings.begin(),
+                         update.projection.warnings.end());
   auto recent = impl_->recent;
   recent.erase(std::remove(recent.begin(), recent.end(), path), recent.end());
   recent.insert(recent.begin(), path);
@@ -1092,6 +1548,7 @@ bool Workspace::bind_source(SlotId id, std::string path,
     recent.resize(impl_->limits.max_recent_files);
   merged->identity = actual;
   merged->last_view = current;
+  auto clip_states = std::move(merged->clip_states);
   impl_->preserve(*slot);
   *target = std::move(*merged);
   slot->impl_->capture = target;
@@ -1102,6 +1559,7 @@ bool Workspace::bind_source(SlotId id, std::string path,
   slot->impl_->warning = std::move(warning);
   impl_->recent.swap(recent);
   impl_->next_bookmark = next_bookmark;
+  Impl::publish_clips(target, std::move(clip_states), std::move(clip_updates));
   return true;
 }
 bool Workspace::close(SlotId id) {
@@ -1191,7 +1649,8 @@ const ViewPreferences &Workspace::default_preferences() const noexcept {
   return impl_->default_preferences;
 }
 void Workspace::set_default_preferences(ViewPreferences value) {
-  require(valid_view_preferences(value), "workspace default preferences are invalid");
+  require(valid_view_preferences(value),
+          "workspace default preferences are invalid");
   impl_->default_preferences = value;
 }
 
@@ -1279,6 +1738,99 @@ bool Workspace::jump_to_bookmark(SlotId id, BookmarkId book) {
     }
   return false;
 }
+bool Workspace::set_clip_states(SlotId id, std::vector<clips::State> incoming,
+                                std::vector<std::string> *warnings) {
+  auto *slot = find(id);
+  if (!slot || (slot->lock_reason() && slot->lock_reason() != SlotLock::live))
+    return false;
+  clip_pool(incoming, impl_->limits);
+  const auto *session =
+      slot->document().loaded() ? slot->document().session() : nullptr;
+  if (session && !incoming.empty()) {
+    const auto verified =
+        clips::restore_catalogs(*session, incoming, clip_limits(impl_->limits));
+    std::set<clips::SceneKey> scenes;
+    for (std::size_t i = 0; i < verified.size(); ++i) {
+      require(verified[i].catalog.has_value(),
+              "Cannot set clip metadata that is unverified for this source");
+      require(scenes.insert(incoming[i].binding.scene).second,
+              "Setter requires one active catalog per scene lifetime; use "
+              "merge for imports");
+    }
+  }
+  std::vector<clips::State> next;
+  for (std::size_t i = 0; i < slot->impl_->capture->clip_states.size(); ++i)
+    // Append may make an unpublished future seal verifiable. Replacing only
+    // the already presented active records prevents an ordinary edit from
+    // consuming that still-pending catalog without user verification.
+    if (!slot->impl_->clips.active_records.count(i))
+      next.push_back(slot->impl_->capture->clip_states[i]);
+  append_clip_states(next, incoming);
+  clip_pool(next, impl_->limits);
+  auto updates = impl_->prepare_clips(slot->impl_->capture, next, nullptr,
+                                      nullptr, true, &incoming);
+  if (warnings)
+    for (const auto &update : updates)
+      if (update.slot == slot->impl_.get())
+        warnings->insert(warnings->end(), update.projection.warnings.begin(),
+                         update.projection.warnings.end());
+  Impl::publish_clips(slot->impl_->capture, std::move(next),
+                      std::move(updates));
+  return true;
+}
+bool Workspace::merge_clip_states(SlotId id, std::vector<clips::State> incoming,
+                                  std::vector<std::string> *warnings) {
+  auto *slot = find(id);
+  if (!slot || (slot->lock_reason() && slot->lock_reason() != SlotLock::live))
+    return false;
+  clip_pool(incoming, impl_->limits);
+  auto next = slot->impl_->capture->clip_states;
+  append_clip_states(next, incoming);
+  clip_pool(next, impl_->limits);
+  auto updates = impl_->prepare_clips(slot->impl_->capture, next);
+  if (warnings)
+    for (const auto &update : updates)
+      if (update.slot == slot->impl_.get())
+        warnings->insert(warnings->end(), update.projection.warnings.begin(),
+                         update.projection.warnings.end());
+  Impl::publish_clips(slot->impl_->capture, std::move(next),
+                      std::move(updates));
+  return true;
+}
+bool Workspace::verify_clip_states(SlotId id,
+                                   std::vector<std::string> *warnings) {
+  auto *slot = find(id);
+  if (!slot || (slot->lock_reason() && slot->lock_reason() != SlotLock::live))
+    return false;
+  auto updates = impl_->prepare_clips(slot->impl_->capture,
+                                      slot->impl_->capture->clip_states);
+  if (warnings)
+    for (const auto &update : updates)
+      if (update.slot == slot->impl_.get())
+        warnings->insert(warnings->end(), update.projection.warnings.begin(),
+                         update.projection.warnings.end());
+  for (auto &update : updates)
+    update.slot->publish_clips(std::move(update.projection),
+                               std::move(update.warning));
+  return true;
+}
+bool Workspace::discard_pending_clip_states(SlotId id) {
+  auto *slot = find(id);
+  if (!slot || (slot->lock_reason() && slot->lock_reason() != SlotLock::live))
+    return false;
+  std::vector<clips::State> next;
+  for (const auto &state : slot->impl_->capture->clip_states)
+    if (std::none_of(slot->pending_clip_states().begin(),
+                     slot->pending_clip_states().end(),
+                     [&](const auto &pending) {
+                       return same_clip_state(state, pending);
+                     }))
+      next.push_back(state);
+  auto updates = impl_->prepare_clips(slot->impl_->capture, next);
+  Impl::publish_clips(slot->impl_->capture, std::move(next),
+                      std::move(updates));
+  return true;
+}
 WorkspaceSettings Workspace::settings() const {
   WorkspaceSettings result;
   result.default_preferences = impl_->default_preferences;
@@ -1287,7 +1839,8 @@ WorkspaceSettings Workspace::settings() const {
   for (const auto &c : impl_->captures)
     captures.emplace(c.first,
                      CaptureSettings{c.first, c.second->bookmarks,
-                                     c.second->last_view, c.second->identity});
+                                     c.second->last_view, c.second->identity,
+                                     c.second->clip_states});
   for (const auto &s : impl_->slots)
     if (!s->impl_->path.empty()) {
       auto v = s->impl_->view();
@@ -1325,6 +1878,7 @@ WorkspaceRestore Workspace::restore(const WorkspaceSettings &settings) {
     data->bookmarks = c.bookmarks;
     data->last_view = c.last_view;
     data->identity = c.identity;
+    data->clip_states = c.clip_states;
     for (const auto &b : c.bookmarks) {
       if (b.id == UINT64_MAX)
         next->next_bookmark = 0;
@@ -1346,6 +1900,7 @@ WorkspaceRestore Workspace::restore(const WorkspaceSettings &settings) {
     p->pending_view = saved.view;
     p->pending_identity = saved.identity;
     p->capture = next->captures.at(p->path);
+    p->set_clips(project_clips(nullptr, p->capture->clip_states, next->limits));
     next->slots.push_back(
         std::unique_ptr<WorkspaceSlot>(new WorkspaceSlot(std::move(p))));
     result.source_slots.push_back(saved.id);

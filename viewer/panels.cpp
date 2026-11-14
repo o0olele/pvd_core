@@ -1,5 +1,6 @@
 ﻿#include "panels.hpp"
 #include "ui_scale.hpp"
+#include "pvd/coordinates.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -156,9 +157,102 @@ float raw_float(const PropertyValue &v, std::size_t offset) {
   std::memcpy(&value, &bits, 4);
   return value;
 }
+std::string integer_text(std::uint64_t n, const InspectorPreferences &p) {
+  return p.integer_hex ? id_text(n) : std::to_string(n);
+}
+std::string integer_text(std::int64_t n, const InspectorPreferences &p) {
+  if (!p.integer_hex)
+    return std::to_string(n);
+  return n < 0 ? "-" + id_text(std::uint64_t(0) - static_cast<std::uint64_t>(n))
+               : id_text(static_cast<std::uint64_t>(n));
+}
+std::string named_integer(std::uint64_t n, const InspectorPreferences &p,
+                          const PropertyDefinition *definition) {
+  const auto raw = integer_text(n, p);
+  if (!definition || definition->named_values.empty())
+    return raw;
+  const bool flags = definition->semantic == "Bitflag";
+  if (!flags && definition->semantic != "Enumeration Value")
+    return raw;
+  std::map<std::uint32_t, std::string> names;
+  for (const auto &entry : definition->named_values) {
+    auto &name = names[entry.second];
+    if (!name.empty())
+      name += "/";
+    name += entry.first;
+  }
+  if (n <= std::numeric_limits<std::uint32_t>::max())
+    if (auto exact = names.find(static_cast<std::uint32_t>(n));
+        exact != names.end())
+      return exact->second + " (" + raw + ")";
+  if (!flags)
+    return "Unknown (" + raw + ")";
+  std::uint64_t remaining = n;
+  std::string symbolic;
+  const auto consume = [&](const auto &entry) {
+    const auto bits = static_cast<std::uint64_t>(entry.first);
+    if (!bits || (remaining & bits) != bits)
+      return;
+    if (!symbolic.empty())
+      symbolic += " | ";
+    symbolic += entry.second;
+    remaining &= ~bits;
+  };
+  // Prefer individual bits; composite aliases are used only for residual bits.
+  for (const auto &entry : names)
+    if (entry.first && !(entry.first & (entry.first - 1)))
+      consume(entry);
+  for (const auto &entry : names)
+    if (entry.first & (entry.first - 1))
+      consume(entry);
+  if (remaining) {
+    if (!symbolic.empty())
+      symbolic += " | ";
+    symbolic += "Unknown bits " + id_text(remaining);
+  }
+  if (symbolic.empty())
+    symbolic = "None";
+  return symbolic + " (" + raw + ")";
+}
+void copy_text(PanelState &state, const std::string &value) {
+  if (state.copy_text)
+    state.copy_text(value);
+  else
+    ImGui::SetClipboardText(value.c_str());
+}
+void property_copy_menu(PanelState &state, const PropertyValue &value,
+                        std::size_t item,
+                        const PropertyDefinition *definition) {
+  if (!ImGui::BeginPopupContextItem("##property-copy"))
+    return;
+  if (ImGui::MenuItem("Copy native value"))
+    command(state, [&] {
+      copy_text(state, propertyValueCopyText(value, item,
+                  PropertyCopy::native_value, state.inspector_preferences,
+                  definition));
+    });
+  if (ImGui::MenuItem("Copy last wire value"))
+    command(state, [&] {
+      copy_text(state, propertyValueCopyText(value, item,
+                  PropertyCopy::last_wire_value, state.inspector_preferences,
+                  definition));
+    });
+  if (ImGui::MenuItem("Copy wire bytes"))
+    command(state, [&] {
+      copy_text(state, propertyValueCopyText(value, item,
+                  PropertyCopy::wire_bytes, state.inspector_preferences,
+                  definition));
+    });
+  ImGui::TextWrapped("Copy uses the full selected element, not its row preview. "
+      "Native coordinates include OriginShift; last wire values and bytes "
+      "retain their incoming coordinate epoch. Decoded floats use float 9 / "
+      "double 17 General precision.");
+  ImGui::EndPopup();
+}
 void property_value(Document &doc, PanelState &state,
                     const PropertyValue &value, std::size_t item,
-                    bool compact = false) {
+                    bool compact = false,
+                    const PropertyDefinition *definition = nullptr) {
   if (value.reference_ids) {
     if (item >= value.reference_ids->size()) {
       muted("Unavailable reference");
@@ -182,15 +276,21 @@ void property_value(Document &doc, PanelState &state,
     return;
   }
   const auto summary =
-      propertyValueText(value, item, state.inspector_preferences);
+      propertyValueText(value, item, state.inspector_preferences, false,
+                        definition);
   auto display = summary;
   if (compact) {
     std::replace(display.begin(), display.end(), '\n', ' ');
     std::replace(display.begin(), display.end(), '\r', ' ');
   }
-  text(display);
-  tooltip(clipped(summary, 1024) + "\n" +
-          std::to_string(value.raw_bytes().size()) + " captured bytes");
+  text(display + (value.native_coordinate_bytes ? "  [native]" : ""));
+  auto detail = clipped(summary, 1024) + "\n" +
+                std::to_string(value.raw_bytes().size()) + " captured bytes";
+  if (value.native_coordinate_bytes)
+    detail += "\nNative coordinates include recorded OriginShift.\nLast wire value: " +
+              propertyValueText(value, item, state.inspector_preferences, true,
+                                definition);
+  tooltip(detail);
 }
 void properties(Document &doc, PanelState &state, const InstanceState &object) {
   ImGui::SetNextItemWidth(-1);
@@ -232,8 +332,10 @@ void properties(Document &doc, PanelState &state, const InstanceState &object) {
     ImGui::TableSetColumnIndex(1);
     if (array)
       muted(std::to_string(value.item_count) + " items");
-    else
-      property_value(doc, state, value, 0);
+    else {
+      property_value(doc, state, value, 0, false, definition);
+      property_copy_menu(state, value, 0, definition);
+    }
     ImGui::TableSetColumnIndex(2);
     muted(value.incoming_type.name);
     tooltip(value.incoming_type.str());
@@ -284,9 +386,12 @@ void properties(Document &doc, PanelState &state, const InstanceState &object) {
           ImGui::TableSetColumnIndex(1);
           if (item > std::numeric_limits<std::size_t>::max())
             muted("Index unavailable on this host");
-          else
+          else {
             property_value(doc, state, value, static_cast<std::size_t>(item),
-                           true);
+                           true, definition);
+            property_copy_menu(state, value, static_cast<std::size_t>(item),
+                               definition);
+          }
         }
     }
   }
@@ -514,8 +619,17 @@ void object_categories(Document &doc, PanelState &state,
 }
 } // namespace
 
-std::string propertyValueText(const PropertyValue &value, std::size_t item,
-                              const InspectorPreferences &preferences) {
+namespace {
+std::string format_property(const PropertyValue &value, std::size_t item,
+                            const InspectorPreferences &preferences,
+                            bool last_wire_value,
+                            const PropertyDefinition *definition,
+                            bool complete) {
+  if (!valid_inspector_preferences(preferences))
+    throw std::invalid_argument("invalid Inspector preferences");
+  if (!last_wire_value && value.native_coordinate_bytes)
+    return format_property(coordinates::native_value(value), item, preferences,
+                           true, definition, complete);
   try {
     if (item >= value.item_count)
       return "<unavailable>";
@@ -526,8 +640,19 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item,
                  ? id_text((*value.reference_ids)[item])
                  : "None";
     }
-    if (auto s = value.as_string(); s && item == 0)
-      return clipped(*s, 4096);
+    if (auto s = value.as_string(); s && item == 0) {
+      if (!complete)
+        return clipped(*s, 4096);
+      // ImGui's UTF-8 clipboard is NUL-terminated. Keep embedded NUL visible
+      // instead of silently losing the rest of the captured string.
+      std::string out;
+      for (char c : *s)
+        if (c == '\0')
+          out += "\\u0000";
+        else
+          out += c;
+      return out;
+    }
     if (value.incoming_type.namespace_name == "physx3") {
       const auto &name = value.incoming_type.name;
       if (name == "PvdBool") {
@@ -535,9 +660,10 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item,
         return n ? (*n ? "True" : "False") : "<unavailable>";
       }
       if (auto n = value.as_uint(item))
-        return name == "VoidPtr" ? id_text(*n) : std::to_string(*n);
+        return name == "VoidPtr" ? id_text(*n)
+                                 : named_integer(*n, preferences, definition);
       if (auto n = value.as_int(item))
-        return std::to_string(*n);
+        return integer_text(*n, preferences);
       if (auto n = value.as_double(item))
         return numeric(*n, name == "PvdF64", preferences);
       if (auto n = value.as_vec3(item))
@@ -603,15 +729,18 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item,
         for (unsigned j = 0; j < 4; ++j) {
           if (j)
             s += ", ";
-          s +=
-              std::to_string(raw_uint(value, item * stride + j * width, width));
+          s += integer_text(raw_uint(value, item * stride + j * width, width),
+                            preferences);
         }
         return s;
       }
     }
     const auto &bytes = value.raw_bytes();
-    if (!value.item_count || bytes.size() % value.item_count)
+    if (!value.item_count || bytes.size() % value.item_count) {
+      if (complete)
+        throw std::invalid_argument("opaque element byte boundaries unavailable");
       return "Opaque payload (" + std::to_string(bytes.size()) + " bytes)";
+    }
     const auto stride = bytes.size() / value.item_count;
     if (item > std::numeric_limits<std::size_t>::max() /
                    std::max<std::size_t>(stride, 1))
@@ -619,20 +748,80 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item,
     const auto start = item * stride;
     std::string out;
     char hex[4];
-    for (std::size_t i = 0; i < std::min<std::size_t>(stride, 16); ++i) {
+    for (std::size_t i = 0; i < (complete ? stride : std::min<std::size_t>(stride, 16)); ++i) {
       std::snprintf(hex, sizeof(hex), "%02X", bytes[start + i]);
       if (i)
         out += ' ';
       out += hex;
     }
-    if (stride > 16)
+    if (!complete && stride > 16)
       out += " ...";
     return out.empty() ? "No captured data" : out;
   } catch (const std::exception &) {
+    if (complete)
+      throw;
     return "<incomplete or unavailable>";
+  } catch (...) {
+    if (complete)
+      throw;
+    return "<unavailable>";
+  }
+}
+} // namespace
+
+std::string propertyValueText(const PropertyValue &value, std::size_t item,
+                              const InspectorPreferences &preferences,
+                              bool last_wire_value,
+                              const PropertyDefinition *definition) {
+  if (!valid_inspector_preferences(preferences))
+    return "<invalid display preferences>";
+  try {
+    return format_property(value, item, preferences, last_wire_value, definition,
+                           false);
   } catch (...) {
     return "<unavailable>";
   }
+}
+
+std::string propertyValueCopyText(const PropertyValue &value, std::size_t item,
+                                  PropertyCopy representation,
+                                  const InspectorPreferences &preferences,
+                                  const PropertyDefinition *definition) {
+  if (item >= value.item_count)
+    throw std::out_of_range("selected property element is unavailable");
+  if (representation == PropertyCopy::wire_bytes) {
+    const auto &bytes = value.raw_bytes();
+    if (!value.item_count || bytes.size() % value.item_count)
+      throw std::invalid_argument("wire element byte boundaries unavailable");
+    const auto stride = bytes.size() / value.item_count;
+    if (item > std::numeric_limits<std::size_t>::max() /
+                   std::max<std::size_t>(stride, 1))
+      throw std::out_of_range("wire element offset exceeds host size");
+    const auto start = item * stride;
+    std::string result;
+    if (stride > result.max_size() / 3)
+      throw std::length_error("wire element is too large to copy");
+    char hex[4];
+    for (std::size_t i = 0; i < stride; ++i) {
+      if (i)
+        result += ' ';
+      std::snprintf(hex, sizeof(hex), "%02X", bytes[start + i]);
+      result += hex;
+    }
+    return result;
+  }
+  if (representation != PropertyCopy::native_value &&
+      representation != PropertyCopy::last_wire_value)
+    throw std::invalid_argument("unsupported property copy representation");
+  InspectorPreferences exact;
+  exact.integer_hex = preferences.integer_hex;
+  auto result = format_property(value, item, exact,
+                    representation == PropertyCopy::last_wire_value,
+                    definition, true);
+  if (!value.text && (result == "<unavailable>" ||
+      result == "Unresolved internal reference"))
+    throw std::invalid_argument("selected property element is unavailable");
+  return result;
 }
 
 void drawEmptyState(const char *title, const char *description) {
@@ -817,6 +1006,8 @@ void drawInspector(Document &doc, PanelState &state) {
         preferences.number_format = static_cast<NumberFormat>(format);
         changed = true;
       }
+      if (ImGui::Checkbox("Integer hexadecimal", &preferences.integer_hex))
+        changed = true;
       int fp = static_cast<int>(preferences.float_precision),
           dp = static_cast<int>(preferences.double_precision);
       ImGui::SetNextItemWidth(ui_pixels(180));
@@ -888,7 +1079,7 @@ void drawInspector(Document &doc, PanelState &state) {
     muted(id_text(object->id));
     ImGui::Spacing();
     if (ImGui::SmallButton("Copy ID"))
-      ImGui::SetClipboardText(id_text(object->id).c_str());
+      command(state, [&] { copy_text(state, id_text(object->id)); });
     tooltip("Copy the full captured object ID");
     ImGui::SameLine();
     muted(std::to_string(object->properties.size()) + " properties");

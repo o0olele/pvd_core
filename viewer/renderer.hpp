@@ -5,16 +5,19 @@
 #include <filesystem>
 #include <memory>
 #include <vector>
+#include "model.hpp"
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
-namespace pvd::render { struct BodyOverlays; }
+namespace pvd::render { struct BodyOverlays; struct CoordinateFrames; }
 
 namespace pvd::viewer {
 struct FrameState;
+struct DrawItem;
 class OrbitCamera;
+
 enum class Antialiasing { off, msaa4x };
 struct MultisampleStatus {
     std::uint32_t requested_samples = 1, actual_samples = 1;
@@ -43,6 +46,15 @@ struct RenderOptions {
     float particle_velocity_scale = 0.2f;
     float contact_normal_length = 0.6f;
     float point_size = 5.0f;
+    // Existing bools remain master switches; default all preserves old views.
+    VisualizationScope bounds_scope = VisualizationScope::all;
+    VisualizationScope velocity_scope = VisualizationScope::all;
+    VisualizationScope scene_query_scope = VisualizationScope::all;
+    bool show_actor_frames = false, show_shape_frames = false, show_mass_frames = false;
+    VisualizationScope coordinate_frame_scope = VisualizationScope::all;
+    float coordinate_frame_scale = 0.5f;
+    VisualizationScope transparent_scope = VisualizationScope::none;
+    float transparent_opacity = 0.35f;
 };
 struct RenderStats {
     std::uint64_t draw_calls = 0, triangles = 0, line_segments = 0, points = 0;
@@ -54,6 +66,10 @@ struct RenderStats {
     std::uint64_t query_lines = 0, query_volumes = 0;
     std::uint64_t body_bounds = 0, linear_velocity_vectors = 0,
                   angular_velocity_vectors = 0;
+    std::uint64_t actor_frames = 0, shape_frames = 0, mass_frames = 0,
+                  transparent_draws = 0;
+    std::size_t coordinate_frame_diagnostics = 0;
+    bool coordinate_frames_complete = true;
 };
 struct RgbaImage {
     std::uint32_t width = 0, height = 0;
@@ -75,7 +91,8 @@ public:
     // Zero dimensions release viewport targets. Nonzero dimensions are bounded
     // by the device's D3D11 texture limit and validated before allocation.
     void resize(std::uint32_t width, std::uint32_t height);
-    void render(const FrameState&, const OrbitCamera&, const RenderOptions& options = {});
+    void render(const FrameState&, const OrbitCamera&, const RenderOptions& options = {},
+                const VisualizationSelection& selection = {});
     ID3D11ShaderResourceView* shader_resource_view() const noexcept;
     ID3D11Texture2D* texture() const noexcept;
     std::uint32_t width() const noexcept;
@@ -84,11 +101,17 @@ public:
     // Last render's requested rigid overlays and bounded diagnostics. Off
     // layers leave this empty and never traverse source properties.
     const render::BodyOverlays& body_overlays() const noexcept;
+    const render::CoordinateFrames& coordinate_frames() const noexcept;
     void clear_mesh_cache() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+// Same visibility/opacity-zero policy as rendering. The host should use this
+// for CPU shape picking so an invisible transparent face cannot intercept it.
+std::vector<DrawItem> visualization_pick_draws(
+    const FrameState&, const RenderOptions&,
+    const VisualizationSelection& selection = {});
 
 // Actual GPU readback; accepts RGBA8/BGRA8 UNORM or SRGB textures. Multisampled
 // inputs are resolved first. RowPitch is respected and BGRA is converted to RGBA.

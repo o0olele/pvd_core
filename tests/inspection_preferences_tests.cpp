@@ -81,6 +81,76 @@ void formatting() {
     }
     check(small.raw_bytes() == original,
           "preferences cannot mutate source bytes");
+    p.integer_hex = true;
+    check(propertyValueText(large, 0, p) == "0xFEDCBA9876543210" &&
+              propertyValueText(negative, 0, p) == "-0x7FFFFFFFFFFFFFF9",
+          "exact unsigned and signed-magnitude hexadecimal formatting");
+    auto minimum = property("PvdI64", integer(0x8000000000000000ull, 8, order), order);
+    check(propertyValueText(minimum, 0, p) == "-0x8000000000000000",
+          "INT64_MIN hexadecimal avoids signed overflow");
+    p.integer_hex = false;
+    Bytes raw_position, native_position;
+    for (const auto v : {100., 5., 0.}) {
+      auto part = fp(v, false, order);
+      raw_position.insert(raw_position.end(), part.begin(), part.end());
+    }
+    for (const auto v : {0., 3., 3.}) {
+      auto part = fp(v, false, order);
+      native_position.insert(native_position.end(), part.begin(), part.end());
+    }
+    auto shifted = property("PxVec3", raw_position, order);
+    shifted.native_coordinate_bytes =
+        std::make_shared<const Bytes>(std::move(native_position));
+    check(propertyValueText(shifted).find("100") == std::string::npos &&
+              propertyValueText(shifted, 0, {}, true).find("100") !=
+                  std::string::npos,
+          "Inspector defaults to native coordinates and exposes last-wire value");
+    check(shifted.raw_bytes() == raw_position,
+          "native inspection cannot modify source bytes");
+    check(propertyValueCopyText(shifted, 0).find("100") == std::string::npos &&
+              propertyValueCopyText(shifted, 0, PropertyCopy::last_wire_value)
+                  .find("100") != std::string::npos &&
+              propertyValueCopyText(shifted, 0, PropertyCopy::wire_bytes) ==
+                  propertyValueCopyText(property("PxVec3", raw_position, order),
+                                        0, PropertyCopy::wire_bytes),
+          "clipboard native/wire/byte coordinates remain explicit");
+    InspectorPreferences low;
+    low.number_format = NumberFormat::fixed;
+    low.double_precision = 1;
+    check(std::stod(propertyValueCopyText(precise, 0, PropertyCopy::native_value, low)) ==
+              1.2345678901234567 &&
+              std::stof(propertyValueCopyText(small, 0, PropertyCopy::native_value, low)) ==
+                  static_cast<float>(1e-12),
+          "copy does not lose real values through row precision");
+    PropertyDefinition symbols;
+    symbols.semantic = "Enumeration Value";
+    symbols.named_values = {{"eA", 1}, {"eB", 2}, {"eZero", 0}};
+    auto combined = property("PvdU64", integer(3, 8, order), order);
+    check(propertyValueText(combined, 0, {}, false, &symbols) == "Unknown (3)",
+          "enum values are never inferred as bitflags");
+    auto zero = property("PvdU32", integer(0, 4, order), order);
+    check(propertyValueText(zero, 0, {}, false, &symbols) == "eZero (0)",
+          "zero enum mapping remains visible");
+    symbols.semantic = "Bitflag";
+    auto unknown = property("PvdU64", integer(0x8000000000000003ull, 8, order), order);
+    const auto flags = propertyValueText(unknown, 0, {}, false, &symbols);
+    check(flags == "eA | eB | Unknown bits 0x8000000000000000 (9223372036854775811)",
+          "bitflag symbols preserve exact uint64 and all unknown bits");
+    p.integer_hex = true;
+    check(propertyValueText(unknown, 0, p, false, &symbols).find(
+              "(0x8000000000000003)") != std::string::npos,
+          "symbolic raw annotation obeys exact hexadecimal preference");
+    p.integer_hex = false;
+    Bytes selected_bytes = integer(1, 4, order);
+    auto second = integer(2, 4, order);
+    selected_bytes.insert(selected_bytes.end(), second.begin(), second.end());
+    auto selected = property("PvdU32", selected_bytes, order);
+    selected.item_count = 2;
+    check(propertyValueCopyText(selected, 1, PropertyCopy::native_value, {}, &symbols) ==
+              "eB (2)" &&
+              propertyValueCopyText(selected, 1, PropertyCopy::wire_bytes) ==
+                  (order == ByteOrder::little ? "02 00 00 00" : "00 00 00 02"),
+          "array copy selects original element and incoming byte order");
   }
   for (auto group : {32u, 128u, 512u, 2048u}) {
     p.array_page_size = group;
@@ -91,6 +161,31 @@ void formatting() {
   p = {};
   p.double_precision = 18;
   check(!valid_inspector_preferences(p), "precision limit validated");
+  auto long_text = property("String", {});
+  long_text.text = std::string(7000, 'x') + "\nend";
+  check(propertyValueText(long_text).size() < long_text.text->size() &&
+            propertyValueCopyText(long_text, 0) == *long_text.text,
+        "copy retains complete long strings and newlines beyond row preview");
+  long_text.text = std::string("before\0after", 12);
+  check(propertyValueCopyText(long_text, 0) == "before\\u0000after",
+        "embedded NUL cannot silently truncate clipboard content");
+  Bytes opaque(64);
+  for (std::size_t i = 0; i < opaque.size(); ++i)
+    opaque[i] = static_cast<std::uint8_t>(i);
+  auto blob = property("UnknownOpaque", opaque);
+  check(propertyValueText(blob).find(" ...") != std::string::npos &&
+            propertyValueCopyText(blob, 0).size() == 64 * 3 - 1 &&
+            propertyValueCopyText(blob, 0).find("3E 3F") != std::string::npos,
+        "opaque copy retains all selected bytes");
+  blob.item_count = 3;
+  bool rejected = false;
+  try { (void)propertyValueCopyText(blob, 0, PropertyCopy::wire_bytes); }
+  catch (const std::invalid_argument &) { rejected = true; }
+  check(rejected, "ambiguous opaque element copy fails explicitly");
+  rejected = false;
+  try { (void)propertyValueCopyText(property("PvdU64", Bytes{1}), 0); }
+  catch (const std::exception &) { rejected = true; }
+  check(rejected, "incomplete typed data cannot be copied as a true value");
 }
 constexpr std::uint64_t object_id = 0xfedcba9876543210ull;
 struct Fixture {
@@ -112,11 +207,16 @@ struct Fixture {
     auto ns = str("physx3"), name = str(n);
     return {ns, name};
   }
-  void prop(const char *name, const char *t, bool array = false) {
+  void prop(const char *name, const char *t, bool array = false,
+            const char *semantic = "",
+            std::initializer_list<std::pair<const char *, std::uint32_t>> named = {}) {
     auto cls = type("NumberObject"), dt = type(t);
     auto h = str(name);
-    emit(CreateProperty{
-        cls, h, 0, dt, static_cast<std::uint8_t>(array ? 2 : 1), {}});
+    std::vector<NameHandleValue> values;
+    for (const auto &entry : named)
+      values.push_back({str(entry.first), entry.second});
+    emit(CreateProperty{cls, h, *semantic ? str(semantic) : 0, dt,
+                        static_cast<std::uint8_t>(array ? 2 : 1), values});
   }
   void value(const char *name, const char *t, Bytes bytes,
              std::uint32_t count = 1) {
@@ -133,6 +233,8 @@ struct Fixture {
                       {"ESigned", "PvdI64"}})
       prop(pair.first, pair.second);
     prop("AArray", "PvdU32", true);
+    prop("FEnum", "PvdU32", false, "Enumeration Value", {{"eA", 1}, {"eB", 2}});
+    prop("GFlags", "PvdU64", false, "Bitflag", {{"eA", 1}, {"eB", 2}});
     emit(CreateInstance{type("PxScene"), 1});
     emit(CreateInstance{type("NumberObject"), object_id});
     Bytes array;
@@ -145,6 +247,8 @@ struct Fixture {
     value("CDouble", "PvdF64", fp(1.2345678901234567, true));
     value("DInteger", "PvdU64", integer(object_id, 8));
     value("ESigned", "PvdI64", integer(0x8000000000000007ull, 8));
+    value("FEnum", "PvdU32", integer(2));
+    value("GFlags", "PvdU64", integer(0x8000000000000003ull, 8));
     for (unsigned i = 0; i < 6; ++i) {
       auto frame = str("frame");
       emit(BeginSection{1, frame, 100 + i * 100});
@@ -171,14 +275,14 @@ struct Harness {
     f.load(doc);
   }
   void frame(std::optional<ImVec2> mouse = {}, std::optional<bool> down = {},
-             bool log = false) {
+             bool log = false, int mouse_button = 0) {
     auto &io = ImGui::GetIO();
     io.DisplaySize = {width, 900};
     io.DeltaTime = 1.f / 60;
     if (mouse)
       io.AddMousePosEvent(mouse->x, mouse->y);
     if (down)
-      io.AddMouseButtonEvent(0, *down);
+      io.AddMouseButtonEvent(mouse_button, *down);
     ImGui::NewFrame();
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({width, 800});
@@ -210,6 +314,12 @@ struct Harness {
     frame(p, true);
     frame(p, false);
     frame(p, false);
+  }
+  void context_click(ImVec2 p) {
+    frame(p, false, false, 1);
+    frame(p, true, false, 1);
+    frame(p, false, false, 1);
+    frame(p, false, false, 1);
   }
   void key(ImGuiKey k) {
     ImGui::GetIO().AddKeyEvent(k, true);
@@ -255,7 +365,9 @@ void widgets(float width) {
   h.frame();
   h.frame({}, {}, true);
   check(h.text.find("18364758544493064720") != std::string::npos &&
-            h.text.find("1.2345678901234567") != std::string::npos,
+            h.text.find("1.2345678901234567") != std::string::npos &&
+            h.text.find("eB (2)") != std::string::npos &&
+            h.text.find("Unknown bits 0x8000000000000000") != std::string::npos,
         "real inspector displays exact integer and default double");
   const auto original = h.doc.frame()
                             ->snapshot.instance(object_id)
@@ -274,6 +386,12 @@ void widgets(float width) {
   h.choose(preferences, "Number format", 0);
   check(h.panel.inspector_preferences.number_format == NumberFormat::general,
         "real mouse general format selection");
+  h.focus(preferences, "Integer hexadecimal");
+  h.click(h.focused());
+  check(h.panel.inspector_preferences.integer_hex,
+        "real mouse integer hexadecimal preference");
+  h.focus(preferences, "Integer hexadecimal");
+  h.click(h.focused());
   h.choose(preferences, "Array group size", 3);
   check(h.panel.inspector_preferences.array_page_size == 2048,
         "real mouse array grouping selection");
@@ -283,6 +401,16 @@ void widgets(float width) {
   auto *table = ImGui::GetCurrentContext()->Tables.GetByKey(table_id);
   check(table, "real inspector property table");
   const auto row = ImGui::GetTextLineHeight() + 2 * style.CellPadding.y;
+  std::vector<std::string> copied;
+  h.panel.copy_text = [&](const std::string &value) { copied.push_back(value); };
+  h.context_click({table->Columns[1].WorkMinX + 12,
+                   table->OuterRect.Min.y + row * 4.5f});
+  auto *copy_menu = h.popup();
+  h.focus(copy_menu, "Copy native value");
+  h.click(h.focused());
+  check(copied.size() == 1 && copied.back() == "18364758544493064720",
+        "real property context command copies exact selected uint64 through callback");
+  h.frame();
   h.click(
       {table->Columns[0].WorkMinX + 6, table->OuterRect.Min.y + row * 1.5f});
   check(h.panel.array_visible_rows > 0, "real array tree expands");
@@ -306,6 +434,23 @@ void widgets(float width) {
   h.frame({}, {}, true);
   check(h.text.find("4097-4097 / 4097") != std::string::npos,
         "array last page is bounded without inventing elements");
+  table = ImGui::GetCurrentContext()->Tables.GetByKey(table_id);
+  h.context_click({table->Columns[1].WorkMinX + 5,
+                   table->OuterRect.Min.y + row * 3.5f});
+  copy_menu = h.popup();
+  h.focus(copy_menu, "Copy native value");
+  h.click(h.focused());
+  check(copied.size() == 2 && copied.back() == "4096",
+        "real array row copies original sparse-page element, not page offset");
+  h.frame();
+  h.context_click({table->Columns[1].WorkMinX + 5,
+                   table->OuterRect.Min.y + row * 3.5f});
+  copy_menu = h.popup();
+  h.focus(copy_menu, "Copy wire bytes");
+  h.click(h.focused());
+  check(copied.size() == 3 && copied.back() == "00 10 00 00",
+        "real array wire-byte command uses selected element only");
+  h.frame();
   check(h.doc.frame()
                 ->snapshot.instance(object_id)
                 ->property("BFloat")

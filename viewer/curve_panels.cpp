@@ -1,5 +1,6 @@
 #include "curve_panels.hpp"
 #include "ui_scale.hpp"
+#include "pvd/coordinates.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <array>
@@ -51,9 +52,12 @@ bool parse_hex(const char *s, std::uint64_t &v) {
   auto r = std::from_chars(s, end, v, 16);
   return r.ec == std::errc{} && r.ptr == end;
 }
-std::string value_text(const std::optional<PropertyValue> &value) {
+std::string value_text(const std::optional<PropertyValue> &value,
+                       bool last_wire = false) {
   if (!value)
     return "(absent)";
+  if (!last_wire && value->native_coordinate_bytes)
+    return value_text(coordinates::native_value(*value), true);
   const auto &v = *value;
   if (v.text)
     return v.text->substr(0, 160);
@@ -101,6 +105,24 @@ std::string value_text(const std::optional<PropertyValue> &value) {
       if (auto n = v.as_transform()) {
         s << "position (" << n->position.x << ", " << n->position.y << ", "
           << n->position.z << ")";
+        return s.str();
+      }
+      if (v.incoming_type == QualifiedName{"physx3", "PxVec4"}) {
+        const auto &bytes = v.raw_bytes();
+        if (bytes.size() < 16)
+          return "(malformed value)";
+        s << '(';
+        for (std::size_t i = 0; i < 4; ++i) {
+          std::uint32_t bits = 0;
+          for (std::size_t j = 0; j < 4; ++j)
+            bits |= std::uint32_t(bytes[i * 4 + j]) <<
+                    (8 * (v.byte_order == ByteOrder::little ? j : 3 - j));
+          float component;
+          std::memcpy(&component, &bits, 4);
+          if (i) s << ", ";
+          s << component;
+        }
+        s << ')';
         return s.str();
       }
     } catch (const std::exception &) {
@@ -686,6 +708,7 @@ struct CurvePanels::Impl {
     for (const auto &e : entries)
       curve_rows += e.data.samples.size();
     ImGui::Text("%zu curves | %zu sampled rows", entries.size(), curve_rows);
+    ImGui::TextWrapped("Default: native coordinates, including recorded OriginShift.");
     if (entries.empty())
       ImGui::TextWrapped(
           "Add a recorded numeric property to plot its actual samples. Missing "
@@ -792,6 +815,7 @@ struct CurvePanels::Impl {
     ImGui::Text("Result A %zu -> B %zu | prefixes %zu -> %zu", compared_a + 1,
                 compared_b + 1, diff->before_event_count,
                 diff->after_event_count);
+    ImGui::TextWrapped("Native coordinate diff; hover shifted values for last-wire data.");
     if (diff->truncated || diff->cancelled || !diff->complete)
       ImGui::TextColored({1, .7f, .3f, 1}, "Partial result: %s%s",
                          diff->truncated ? "budget reached " : "",
@@ -918,11 +942,15 @@ struct CurvePanels::Impl {
             const auto &p = c.properties[first + static_cast<std::size_t>(row)];
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            text(p.name);
+            text(p.name + (p.coordinates_changed ? "  [OriginShift]" : ""));
             ImGui::TableNextColumn();
             text(value_text(p.before));
+            if (p.before && p.before->native_coordinate_bytes && ImGui::IsItemHovered())
+              ImGui::SetTooltip("Last wire: %s", value_text(p.before, true).c_str());
             ImGui::TableNextColumn();
             text(value_text(p.after));
+            if (p.after && p.after->native_coordinate_bytes && ImGui::IsItemHovered())
+              ImGui::SetTooltip("Last wire: %s", value_text(p.after, true).c_str());
           }
         ImGui::EndTable();
       }

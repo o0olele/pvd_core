@@ -155,6 +155,7 @@ struct Fixture {
     mark(false);
     mark(true);
     pose(10, {2, 0, 0});
+    emit(SetCamera{"rolled", {2, 1, 7}, {1, 1, 0}, {1, 0, 0}});
     emit(DestroyInstance{11});
     mark(false);
     mark(true);
@@ -387,6 +388,7 @@ Output draw(Document &doc, OrbitCamera &camera, SceneToolState &scene,
     io.AddMousePosEvent(mouse->x, mouse->y);
   if (down)
     io.AddMouseButtonEvent(0, *down);
+  updateTrackedCamera(doc, camera, scene);
   ImGui::NewFrame();
   ImGui::SetNextWindowPos({0, 0});
   ImGui::SetNextWindowSize({width, 920});
@@ -452,6 +454,61 @@ void widgets(float width) {
   std::cout << "scene widgets width=" << width
             << " virtual rows=" << panel.object_visible_rows << " passed\n";
 }
+void recorded_camera_widgets(float width) {
+  Fixture f;
+  Document doc;
+  f.load(doc);
+  OrbitCamera camera;
+  SceneToolState scene;
+  PanelState panel;
+  auto tick = [&](std::optional<ImVec2> pos = {},
+                  std::optional<bool> down = {}) {
+    return draw(doc, camera, scene, panel, false, width, pos, down);
+  };
+  auto click = [&](SceneToolRect r) {
+    check(r.width > 0 && r.height > 0, "camera widget actual rect missing");
+    const ImVec2 p{r.x + r.width * .5f, r.y + r.height * .5f};
+    tick(p, false);tick(p, true);tick(p, false);
+  };
+  auto choose = [&] {
+    tick();tick();
+    click(scene.recorded_combo_rect);
+    tick();
+    const auto found=scene.recorded_choice_rects.find("rolled");
+    check(found!=scene.recorded_choice_rects.end(),"actual camera combo did not open");
+    const auto rect=found->second;
+    click(rect);
+    if (!scene.recorded_follow.enabled)
+      std::cerr<<"camera choose width="<<width<<" row="<<rect.x<<','<<rect.y
+               <<','<<rect.width<<','<<rect.height<<" name="<<scene.recorded_camera
+               <<" message="<<scene.message<<" error="<<scene.error<<'\n';
+    check(scene.recorded_follow.enabled&&!scene.tracking_object(),
+          "actual recorded camera choice did not start exclusive Clip follow");
+  };
+  choose();
+  near(camera.position(),{0,0,5},"camera combo used unrelated sample");
+  doc.set_frame(1);tick();
+  near(camera.position(),{2,1,7},"UI-selected Clip camera did not follow seek");
+  tick();click(scene.free_camera_rect);
+  check(!scene.recorded_follow.enabled,"actual Free camera did not release follow");
+  doc.set_frame(0);tick();
+  near(camera.position(),{2,1,7},"released camera continued following");
+  click(scene.apply_camera_rect);
+  check(!scene.tracking(),"actual Apply once enabled persistent tracking");
+  near(camera.position(),{0,0,5},"actual Apply once did not apply current frame");
+  doc.set_frame(1);tick();near(camera.position(),{0,0,5},"one-shot UI became follow");
+  doc.set_frame(0);doc.inspect(10);
+  check(trackSelected(doc,camera,scene),"object tracking test setup");
+  choose();check(!scene.tracking_object(),"Clip choice retained selected-object tracking");
+  check(trackSelected(doc,camera,scene)&&!scene.recorded_follow.enabled,
+        "Track selected retained Clip camera follow");
+  choose();f.load(doc);const auto source_changed=tick();
+  check(!scene.recorded_follow.enabled&&scene.recorded_follow.status==RecordedCameraStatus::source_changed&&
+            source_changed.text.find("source changed")!=std::string::npos,
+        "source replacement silently lost follow diagnostic");
+  check(source_changed.overflow<=1,"recorded camera controls overflow available width");
+  std::cout<<"recorded camera widgets width="<<width<<" combo/seek/free/apply/source passed\n";
+}
 void real(const char *path) {
   Document doc;
   doc.open_file(path);
@@ -488,7 +545,9 @@ int main(int argc, char **argv) {
     int w, h;
     io.Fonts->GetTexDataAsRGBA32(&b, &w, &h);
     widgets(1060);
+    recorded_camera_widgets(1060);
     widgets(420);
+    recorded_camera_widgets(420);
     if (argc > 1)
       real(argv[1]);
     ImGui::DestroyContext();

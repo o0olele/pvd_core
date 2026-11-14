@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "pvd/coordinates.hpp"
 #include "scene_tools.hpp"
 #include <algorithm>
 #include <cmath>
@@ -169,6 +170,7 @@ Color display_color(const render::ShapeInstance &shape,
 void enable_categories(ViewOptions &v) {
   v.show_static = v.show_dynamic = v.show_kinematic = v.show_sleeping =
       v.show_trigger = true;
+  v.sleeping_scope = v.trigger_scope = VisualizationScope::all;
 }
 
 const deformables::ClothSurface *cloth_owner(const FrameState &frame,
@@ -241,7 +243,74 @@ deformable_bounds(const FrameState &frame,
   return result;
 }
 
+bool live_key(const Snapshot& snapshot,render::ObjectKey key) {
+    const auto* object=snapshot.instance(key.id);return object&&object->generation==key.generation;
+}
+std::optional<render::ObjectKey> articulation_owner(const Snapshot& snapshot,render::ObjectKey actor) {
+    std::set<std::uint64_t> seen;
+    auto* current=snapshot.instance(actor.id);
+    for(unsigned depth=0;current&&depth<65;++depth) {
+        if(current->class_name==QualifiedName{"physx3","PxArticulation"})return render::ObjectKey{current->id,current->generation};
+        if(current->class_name!=QualifiedName{"physx3","PxArticulationLink"}||!seen.insert(current->id).second)return {};
+        const auto* parent=current->property("Parent");
+        if(!parent||!parent->reference_ids||parent->reference_ids->size()!=1)return {};
+        current=snapshot.instance(parent->reference_ids->front());
+    }
+    return {};
+}
 } // namespace
+bool visualization_scope_matches(VisualizationScope scope,bool selected) noexcept {
+    switch(scope) {
+    case VisualizationScope::none:return false;
+    case VisualizationScope::all:return true;
+    case VisualizationScope::selected:return selected;
+    case VisualizationScope::unselected:return !selected;
+    }
+    return false;
+}
+std::set<render::PickingKey> visualization_selected_attachments(const FrameState& frame,const VisualizationSelection& selection,bool use_draw_selection) {
+    std::set<render::PickingKey> result;
+    const auto* object=selection.object?frame.snapshot.instance(selection.object->id):nullptr;
+    if(selection.object&&(!object||object->generation!=selection.object->generation))return result;
+    std::set<render::ObjectKey> aggregate_actors,aggregate_articulations;
+    if(object&&object->class_name==QualifiedName{"physx3","PxAggregate"}) {
+        for(const auto& entry:std::array<std::pair<const char*,std::set<render::ObjectKey>*>,2>{{{"Actors",&aggregate_actors},{"Articulations",&aggregate_articulations}}}) {
+            const auto* value=object->property(entry.first);if(!value||!value->reference_ids)continue;
+            if(value->reference_ids->size()>262144)throw std::length_error("visualization owner relationship budget exceeded");
+            for(auto id:*value->reference_ids)if(const auto* member=frame.snapshot.instance(id))entry.second->insert({id,member->generation});
+        }
+    }
+    std::map<render::ObjectKey,bool> owners;
+    for(const auto& draw:frame.draws) {
+        if(!selection.object&&!selection.attachment) {if(use_draw_selection&&draw.selected)result.insert(draw.key);continue;}
+        if(!live_key(frame.snapshot,draw.key.scene)||!live_key(frame.snapshot,draw.key.actor)||!live_key(frame.snapshot,draw.key.shape))continue;
+        bool selected=false;
+        if(object) {
+            const auto key=*selection.object;
+            selected=draw.key.scene==key||draw.key.actor==key;
+            if(object->class_name==QualifiedName{"physx3","PxArticulation"}||object->class_name==QualifiedName{"physx3","PxAggregate"}) {
+                auto found=owners.find(draw.key.actor);
+                if(found==owners.end()) {
+                    bool member=false;
+                    if(object->class_name.name=="PxArticulation")member=articulation_owner(frame.snapshot,draw.key.actor)==std::optional<render::ObjectKey>(key);
+                    else {
+                        member=aggregate_actors.count(draw.key.actor)!=0;
+                        const auto owner=articulation_owner(frame.snapshot,draw.key.actor);
+                        member|=owner&&aggregate_articulations.count(*owner)!=0;
+                    }
+                    found=owners.emplace(draw.key.actor,member).first;
+                }
+                selected|=found->second;
+            } else if(draw.key.shape==key)
+                selected|=!selection.attachment||draw.key==*selection.attachment;
+            else if(selection.attachment&&draw.key==*selection.attachment)
+                selected=true;
+        } else if(selection.attachment)selected=draw.key==*selection.attachment;
+        else selected=draw.selected;
+        if(selected)result.insert(draw.key);
+    }
+    return result;
+}
 bool same_query_source(const render::SceneQuerySource &a,
                        const render::SceneQuerySource &b) noexcept {
   return a.scene == b.scene && a.kind == b.kind && a.batched == b.batched &&
@@ -731,7 +800,7 @@ struct Document::Impl {
       index = timeline.size() - 1;
   }
 
-  bool shape_visible(const render::ShapeInstance &s) const {
+  bool shape_visible(const render::ShapeInstance &s, bool selection_member) const {
     if (isolated_deformable)
       return false;
     const auto key = s.picking_key();
@@ -750,9 +819,13 @@ struct Document::Impl {
         return false;
     } else if (!view.show_dynamic)
       return false;
-    if (!view.show_sleeping && s.actor.sleeping == true)
+    if (s.actor.sleeping == true &&
+        (!view.show_sleeping ||
+         !visualization_scope_matches(view.sleeping_scope, selection_member)))
       return false;
-    return view.show_trigger || !s.flags.trigger;
+    return !s.flags.trigger ||
+           (view.show_trigger &&
+            visualization_scope_matches(view.trigger_scope, selection_member));
   }
   void apply_view(FrameState &next) const {
     next.bounds.reset();
@@ -779,9 +852,12 @@ struct Document::Impl {
     std::map<PickingKey, const render::ShapeInstance *> shapes;
     for (const auto &shape : next.render.instances)
       shapes.emplace(shape.picking_key(), &shape);
+    const auto selection = visualization_selected_attachments(
+        next, {inspected, selected}, false);
     for (auto &draw : next.draws) {
       const auto found = shapes.find(draw.key);
-      draw.visible = found != shapes.end() && shape_visible(*found->second);
+      draw.visible = found != shapes.end() &&
+                     shape_visible(*found->second, selection.count(draw.key) != 0);
       if (found != shapes.end())
         draw.color = display_color(*found->second, view);
       if (draw.visible) {
@@ -825,8 +901,14 @@ struct Document::Impl {
       auto found = std::find_if(
           frame->render.instances.begin(), frame->render.instances.end(),
           [&](const auto &s) { return s.picking_key() == *selected; });
-      if (found == frame->render.instances.end())
+      if (found == frame->render.instances.end()) {
+        // A shared PxShape may survive the selected actor attachment. Do not
+        // reinterpret that retired attachment as an explicit all-owner shape
+        // selection on the next refresh or reverse seek.
+        if (inspected == std::optional<ObjectKey>(selected->shape))
+          inspected.reset();
         selected.reset();
+      }
     }
     if (inspected) {
       auto object = frame->snapshot.instance(inspected->id);
@@ -907,6 +989,7 @@ struct Document::Impl {
         if (next->errors.size() < 256) next->errors.push_back("Scene query volume: " + message);
       };
       for (const auto &query : next->scene_queries.queries) {
+        if (query.coordinates_ambiguous) continue;
         if (volume_limit) break;
         auto source_snapshot = query_snapshots.find(query.source.snapshot_event_count);
         if (source_snapshot == query_snapshots.end())
@@ -1282,13 +1365,15 @@ bool Document::select_query(const render::SceneQuerySource &requested) {
   impl_->selected.reset();
   impl_->selected_deformable.reset();
   impl_->inspected.reset();
-  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
-  impl_->update_selection();
+  impl_->refresh_view();
   return true;
 }
 bool Document::fit_query(OrbitCamera &camera, double aspect) const {
   if (!impl_->selected_query) return false;
   const auto &source = *impl_->selected_query;
+  for (const auto &query : impl_->frame->scene_queries.queries)
+    if (same_query_source(query.source, source) && query.coordinates_ambiguous)
+      return false;
   std::optional<render::Bounds> bound;
   auto point = [&](Vec3 p) {
     include(bound, render::Bounds{p, p});
@@ -1318,8 +1403,7 @@ bool Document::select_deformable(const deformables::SelectionKey &requested) {
   impl_->selected_deformable = key;
   impl_->inspected =
       ObjectKey{key.object.owner.id, key.object.owner.generation};
-  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
-  impl_->update_selection();
+  impl_->refresh_view();
   return true;
 }
 std::optional<ObjectKey> Document::inspected_object() const noexcept {
@@ -1341,8 +1425,7 @@ bool Document::select(const PickingKey &key) {
   impl_->selected_query.reset();
   impl_->selected_deformable.reset();
   impl_->inspected = key.shape;
-  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
-  impl_->update_selection();
+  impl_->refresh_view();
   return true;
 }
 bool Document::inspect(std::uint64_t id) {
@@ -1395,8 +1478,7 @@ bool Document::inspect(std::uint64_t id) {
           break;
         }
   }
-  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
-  impl_->update_selection();
+  impl_->refresh_view();
   return true;
 }
 
@@ -1405,8 +1487,7 @@ void Document::clear_selection() {
   impl_->selected_query.reset();
   impl_->selected_deformable.reset();
   impl_->inspected.reset();
-  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
-  impl_->update_selection();
+  impl_->refresh_view();
 }
 std::vector<ActorNode> Document::actor_tree() const {
   std::vector<ActorNode> result;
@@ -1552,6 +1633,11 @@ void Document::set_view_options(ViewOptions options) {
       static_cast<int>(options.color_mode) >
           static_cast<int>(ColorMode::uniform))
     throw std::invalid_argument("unknown viewer color mode");
+  for (const auto scope : {options.sleeping_scope, options.trigger_scope})
+    if (scope != VisualizationScope::none && scope != VisualizationScope::all &&
+        scope != VisualizationScope::selected &&
+        scope != VisualizationScope::unselected)
+      throw std::invalid_argument("unknown viewer status scope");
   impl_->view = options;
   impl_->refresh_view();
 }
@@ -1680,7 +1766,7 @@ std::optional<Vec3> tracked_anchor(const Document &doc,
     if (object && object->generation == state.tracked_object->generation)
       if (auto *value = object->property("GlobalPose"))
         try {
-          if (auto pose = value->as_transform();
+          if (auto pose = coordinates::native_transform(*value);
               pose && finite(d(pose->position)))
             return pose->position;
         } catch (const std::exception &) {
@@ -1690,6 +1776,7 @@ std::optional<Vec3> tracked_anchor(const Document &doc,
 }
 } // namespace
 void stopTracking(SceneToolState &state) noexcept {
+  state.recorded_follow.reset();
   state.tracked_source = nullptr;
   state.tracked_shape.reset();
   state.tracked_object.reset();
@@ -1730,7 +1817,9 @@ bool trackSelected(const Document &doc, const OrbitCamera &camera,
 }
 bool updateTrackedCamera(const Document &doc, OrbitCamera &camera,
                          SceneToolState &state) {
-  if (!state.tracking())
+  if (state.recorded_follow.enabled)
+    return updateRecordedCameraFollow(doc, camera, state);
+  if (!state.tracking_object())
     return false;
   if (doc.session() != state.tracked_source || !doc.loaded()) {
     stopTracking(state);
@@ -1763,8 +1852,9 @@ bool applyRecordedCamera(const Document &doc, const std::string &name,
     state.message = "Open a capture before choosing a camera";
     return false;
   }
-  const auto found = doc.frame()->snapshot.cameras.find(name);
-  if (found == doc.frame()->snapshot.cameras.end()) {
+  const auto frame = doc.frame();
+  const auto found = frame->snapshot.cameras.find(name);
+  if (found == frame->snapshot.cameras.end()) {
     state.message = "Recorded camera is absent at this frame";
     return false;
   }

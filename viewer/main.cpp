@@ -2,6 +2,9 @@
 #include "display_panel.hpp"
 #include "ui_scale.hpp"
 #include "camera_panel.hpp"
+#include "recorded_camera.hpp"
+#include "clip_panel.hpp"
+#include "pvd/coordinate_frames.hpp"
 #include "pvd/body_overlays.hpp"
 #include "scene_query_panel.hpp"
 #include "export_panel.hpp"
@@ -40,6 +43,7 @@
 #include <fstream>
 #include <future>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -66,7 +70,7 @@ struct Options {
   bool dpi_smoke = false;
   std::optional<float> ui_scale;
   bool export_smoke = false, repx_smoke = false, allow_partial = false;
-  bool workspace_smoke = false, no_settings = false;
+  bool workspace_smoke = false, clip_smoke = false, no_settings = false;
   std::filesystem::path workspace_state;
   std::size_t crop_first = 0, crop_last = 0;
   int analysis_page = 0;
@@ -152,6 +156,9 @@ Options arguments() {
       } else if (a == L"--workspace-smoke") {
         result.workspace_smoke = true;
         result.capture = value();
+      } else if (a == L"--clip-smoke") {
+        result.clip_smoke = true;
+        result.capture = value();
       } else if (a == L"--workspace-state")
         result.workspace_state = value();
       else if (a == L"--size") {
@@ -231,15 +238,15 @@ Options arguments() {
   LocalFree(args);
   if (unsigned(result.smoke) + unsigned(result.live_smoke) +
           unsigned(result.analysis_smoke) + unsigned(result.export_smoke) +
-          unsigned(result.repx_smoke) + unsigned(result.workspace_smoke) +
+          unsigned(result.repx_smoke) + unsigned(result.workspace_smoke) + unsigned(result.clip_smoke) +
           unsigned(result.deformable_smoke) + unsigned(result.query_smoke) + unsigned(result.dpi_smoke) >
       1)
     throw std::runtime_error("Choose one smoke mode");
-  if (result.workspace_smoke && result.workspace_state.empty())
+  if ((result.workspace_smoke || result.clip_smoke) && result.workspace_state.empty())
     throw std::runtime_error("Workspace smoke requires --workspace-state");
   if (result.dpi_smoke && result.ui_scale)
     throw std::runtime_error("DPI transition smoke controls its own UI scale");
-  if ((result.export_smoke || result.repx_smoke) && result.output.empty())
+  if ((result.export_smoke || result.repx_smoke || result.clip_smoke) && result.output.empty())
     throw std::runtime_error("Export smoke requires --output");
   if (result.listen_port >= 0 && !result.capture.empty())
     throw std::runtime_error(
@@ -335,7 +342,7 @@ public:
 #endif
     if (!options_.capture.empty()) {
       if (options_.smoke || options_.analysis_smoke || options_.export_smoke ||
-          options_.repx_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke) {
+          options_.repx_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke || options_.clip_smoke) {
         auto incoming = std::make_unique<Document>();
         const auto path =
             std::filesystem::absolute(options_.capture).lexically_normal();
@@ -448,6 +455,8 @@ public:
         export_smoke_step();
       else if (options_.workspace_smoke)
         workspace_smoke_step();
+      else if (options_.clip_smoke)
+        clip_smoke_step();
 #ifdef PVD_VIEWER_HAS_REPX
       else if (options_.repx_smoke)
         repx_smoke_step();
@@ -493,6 +502,9 @@ private:
     SceneToolState scene_tools;
     CameraNavigationPreferences navigation;
     CameraPanelState camera_panel;
+    ClipPanelState clips;
+    std::uint64_t clips_revision = std::numeric_limits<std::uint64_t>::max();
+    bool clips_resync = false;
     DisplayPanelState display;
     SceneQueryPanelState scene_queries;
     ExportPanelState export_panel;
@@ -554,6 +566,9 @@ private:
   std::vector<std::array<unsigned,6>> dpi_smoke_samples_;
   std::string notice_;
   int workspace_smoke_phase_ = 0;
+  int clip_smoke_phase_ = 0;
+  std::size_t clip_smoke_end_prefix_ = 0;
+  std::optional<pvd::clips::Clip> clip_smoke_saved_;
   SlotId smoke_slot_a_ = 0, smoke_slot_b_ = 0;
   BookmarkId smoke_bookmark_ = 0;
   const pvd::Session *smoke_session_a_ = nullptr;
@@ -592,7 +607,7 @@ private:
   bool smoke_mode() const {
     return options_.smoke || options_.analysis_smoke || options_.live_smoke ||
            options_.export_smoke || options_.repx_smoke ||
-           options_.workspace_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke;
+           options_.workspace_smoke || options_.clip_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke;
   }
   WorkspaceSlot &active_slot() {
     if (!workspace_.active())
@@ -636,6 +651,111 @@ private:
     return *value;
   }
   SlotUiState &ui() { return ui_for(active_slot().id()); }
+  VisualizationSelection visualization_selection() {
+    return {document().inspected_object(),document().selected_key()};
+  }
+  void sync_clips(SlotId id) {
+    auto *slot=workspace_.find(id);
+    if(!slot)return;
+    auto &state=ui_for(id);
+    if(!state.clips_resync&&state.clips_revision==slot->clip_revision()&&
+        state.clips.observed_source==slot->document().session())return;
+    const auto selected=state.clips.active_catalog;
+    state.clips={};state.clips.catalogs=slot->clip_catalogs();
+    state.clips.source_slot=id;state.clips.observed_source=slot->document().session();
+    if(selected&&state.clips.catalogs.count(*selected))state.clips.active_catalog=selected;
+    else if(!state.clips.catalogs.empty())state.clips.active_catalog=state.clips.catalogs.begin()->first;
+    state.clips_revision=slot->clip_revision();state.clips_resync=false;
+  }
+  void persist_clips(ClipPanelChange change) {
+    auto *slot=workspace_.find(change.source_slot);
+    if(!slot)throw std::runtime_error("The original clip tab was closed.");
+    auto &state=ui_for(change.source_slot);
+    try {
+      if(change.kind==ClipPanelChangeKind::discarded)
+        workspace_.discard_pending_clip_states(change.source_slot);
+      std::vector<pvd::clips::State> values;
+      for(const auto &catalog:state.clips.catalogs)values.push_back(catalog.second.state());
+      std::vector<std::string> warnings;
+      if(!workspace_.set_clip_states(change.source_slot,std::move(values),&warnings))
+        throw std::runtime_error("This clip source is locked or no longer available.");
+      state.clips_revision=slot->clip_revision();
+      if(!warnings.empty())notice_=warnings.front();
+    }catch(...){state.clips_resync=true;throw;}
+  }
+  void save_clip(ClipSaveRequest command) {
+    auto *slot=workspace_.find(command.source_slot);
+    if(!slot||!slot->document().session())throw std::runtime_error("The original clip source is unavailable.");
+    const auto *source=slot->document().session();
+    pvd::clips::validate_clip(*source,command.clip);
+    auto filename=command.clip.name;
+    for(auto &c:filename)if(static_cast<unsigned char>(c)<32||
+        std::string("<>:\"/\\|?*").find(c)!=std::string::npos)c='_';
+    auto destination=options_.clip_smoke
+        ? std::optional<ExportDestination>{{utf8(options_.output.wstring()),false}}
+        : choose_export_path(("clip-"+filename+".pxd2").c_str());
+    if(!destination)return;
+    slot=workspace_.find(command.source_slot);
+    if(!slot||slot->document().session()!=source)
+      throw std::runtime_error("The clip source changed while choosing its output.");
+    pvd::clips::validate_clip(*source,command.clip);
+    ExportRequest request;
+    request.destination=std::move(destination->path);request.overwrite=destination->overwrite;
+    request.mode=ExportMode::native_frame_range;request.scene_id=command.clip.binding.scene.id;
+    request.first_native_frame=command.clip.frames.first;request.last_native_frame=command.clip.frames.last;
+    start_export(command.source_slot,std::move(request));
+    export_popup_slot_=command.source_slot;
+  }
+  enum class ClipEdit { split, trim_left, trim_right };
+  void edit_clip_at_playhead(ClipEdit command) {
+    const auto id=active_slot().id();
+    sync_clips(id);
+    auto &state=ui_for(id);
+    if(active_slot().lock_reason()&&active_slot().lock_reason()!=SlotLock::live)
+      throw std::runtime_error("Finish the source operation before editing clips.");
+    const auto frame=document().frame();
+    const auto scene=document().scene_id();
+    const auto *object=frame&&scene?frame->snapshot.instance(*scene):nullptr;
+    if(!object||document().sample_point()!=SamplePoint::native_frame)
+      throw std::runtime_error("Choose a scene's Frame end timeline before editing clips.");
+    const pvd::clips::SceneKey key{object->id,object->generation};
+    if(state.clips.active_catalog&&*state.clips.active_catalog!=key)
+      throw std::runtime_error("Choose the current scene lifetime in Clips before editing its playhead.");
+    const auto at=state.clips.catalogs.find(key);
+    auto candidate=at==state.clips.catalogs.end()
+        ? pvd::clips::Catalog::create(*document().session(),key):at->second;
+    if(command==ClipEdit::split)candidate.split(*document().session(),document().frame_index());
+    else if(command==ClipEdit::trim_left)candidate.trim_left(*document().session(),document().frame_index());
+    else candidate.trim_right(*document().session(),document().frame_index());
+    state.clips.catalogs.insert_or_assign(key,std::move(candidate));
+    state.clips.active_catalog=key;
+    state.clips.edited_clip.reset();
+    persist_clips({id,ClipPanelChangeKind::edited});
+  }
+  void draw_clips() {
+    const auto id=active_slot().id();sync_clips(id);
+    auto &state=ui_for(id);auto *slot=workspace_.find(id);
+    if(!slot)return;
+    if(!slot->pending_clip_states().empty()) {
+      ImGui::TextWrapped("%zu archived clip catalog(s) are unverified for this source; "
+                         "they remain saved until explicitly discarded.",slot->pending_clip_states().size());
+      if(ImGui::Button("Verify archived clips"))try {
+        std::vector<std::string> warnings;
+        if(!workspace_.verify_clip_states(id,&warnings))
+          throw std::runtime_error("Finish this source operation before verification.");
+        if(!warnings.empty())notice_=warnings.front();sync_clips(id);
+      }catch(const std::exception &e){state.clips.error=e.what();}
+      ImGui::SameLine();
+      if(ImGui::Button("Discard unverified clip archives")) {
+        workspace_.discard_pending_clip_states(id);sync_clips(id);
+      }
+    }
+    ClipPanelActions actions;
+    actions.busy=slot->lock_reason()&&slot->lock_reason()!=SlotLock::live;
+    actions.save_as=[&](ClipSaveRequest request){save_clip(std::move(request));};
+    actions.changed=[&](ClipPanelChange change){persist_clips(change);};
+    drawClipRanges(slot->document(),id,state.clips,actions);
+  }
   void update_title() {
     const auto &slot = active_slot();
     const auto label = std::filesystem::u8path(slot.title()).wstring();
@@ -1010,6 +1130,8 @@ private:
           "Space plays or pauses; Left/Right step; Home/End choose the "
           "first/last frame; F fits visible geometry. Shortcuts pause while "
           "editing or using a popup.");
+      ImGui::TextWrapped("Clips: Ctrl+Alt+Y splits at the native playhead; "
+                         "Ctrl+Alt+S trims left; Ctrl+Alt+E trims right.");
       ImGui::TextWrapped(
           "RMB look, MMB pan, wheel zoom; hover the viewport for WASD/QE, Shift 2x. "
           "View offers orbit/first-person controllers, speed, look-at and clipping. Click picks a visible shape. View "
@@ -1833,6 +1955,18 @@ private:
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
                                         ImGuiPopupFlags_AnyPopupLevel))
       return;
+    if(io.KeyCtrl&&io.KeyAlt&&document().loaded()) {
+      std::optional<ClipEdit> edit;
+      if(ImGui::IsKeyPressed(ImGuiKey_Y,false))edit=ClipEdit::split;
+      else if(ImGui::IsKeyPressed(ImGuiKey_S,false))edit=ClipEdit::trim_left;
+      else if(ImGui::IsKeyPressed(ImGuiKey_E,false))edit=ClipEdit::trim_right;
+      if(edit) {
+        ui().page=10;
+        try{edit_clip_at_playhead(*edit);}
+        catch(const std::exception &e){ui().clips.error=e.what();}
+        return;
+      }
+    }
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O, false)) {
       choose_file();
       return;
@@ -2124,6 +2258,94 @@ private:
     ImGui::EndPopup();
   }
 #endif
+  void clip_smoke_step() {
+    if(host_frames_<4)return;
+    const auto require=[](bool ok,const char *message) {
+      if(!ok)throw std::runtime_error(message);
+    };
+    if(clip_smoke_phase_==0) {
+      document().set_sample_point(SamplePoint::native_frame);
+      require(document().timeline().size()>12,"Clip smoke needs at least thirteen native frames");
+      smoke_slot_a_=active_slot().id();smoke_session_a_=document().session();
+      document().set_frame(10);
+      edit_clip_at_playhead(ClipEdit::split);
+      document().set_frame(2);
+      edit_clip_at_playhead(ClipEdit::trim_left);
+      document().set_frame(7);
+      edit_clip_at_playhead(ClipEdit::trim_right);
+      auto &state=ui().clips;
+      auto &catalog=state.catalogs.at(*state.active_catalog);
+      const auto selected=catalog.selected()->id;
+      catalog.rename(*document().session(),selected,u8"关键帧 / 3–8");
+      const auto temporary=catalog.add(*document().session(),"temporary",{3,4});
+      require(catalog.erase(*document().session(),temporary),"Temporary clip deletion failed");
+      require(catalog.select(*document().session(),selected),"Stable clip selection was lost");
+      persist_clips({smoke_slot_a_,ClipPanelChangeKind::edited});
+      clip_smoke_saved_=*catalog.selected();
+      require(clip_smoke_saved_->frames.first==2&&clip_smoke_saved_->frames.last==7&&
+              catalog.state().clips.size()==2,"Split/trim clip ranges are incorrect");
+      clip_smoke_end_prefix_=document().timeline()[7].event_count;
+      save_clip({smoke_slot_a_,*clip_smoke_saved_});
+      auto candidate=std::make_unique<Document>();
+      require(!workspace_.close(smoke_slot_a_)&&!workspace_.replace(smoke_slot_a_,candidate),
+              "Clip export failed to retain its source");
+      smoke_slot_b_=workspace_.create_empty("Other tab during clip export");
+      activate_slot(smoke_slot_b_);
+      clip_smoke_phase_=1;return;
+    }
+    if(clip_smoke_phase_==1) {
+      if(export_job_.running()||export_slot_id_)return;
+      const auto status=export_job_.status();
+      require(status.stage==ExportStage::completed,"Clip asynchronous export failed");
+      require(workspace_.active_id()==smoke_slot_b_&&last_export_slot_id_==smoke_slot_a_&&
+              workspace_.find(smoke_slot_a_)->document().session()==smoke_session_a_,
+              "Clip export retargeted the active tab");
+      Document replay;replay.open_file(utf8(options_.output.wstring()));
+      require(replay.set_scene(clip_smoke_saved_->binding.scene.id),"Exported clip lost its scene");
+      replay.set_sample_point(SamplePoint::native_frame);
+      require(replay.timeline().size()==6,"Exported clip native range is incorrect");
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+      const auto diff=pvd::analysis::diff_snapshots(
+          smoke_session_a_->snapshot_at_event(clip_smoke_end_prefix_),replay.session()->latest());
+      require(diff.complete&&diff.objects.empty()&&diff.cameras.empty()&&diff.origin_shifts.empty(),
+              "Exported clip end state differs from its original source");
+#endif
+      workspace_.save_file(utf8(options_.workspace_state.wstring()));
+      restore_workspace(options_.workspace_state);
+      clip_smoke_phase_=2;return;
+    }
+    if(clip_smoke_phase_==2) {
+      if(load_job_.running()||loading_slot_||!load_queue_.empty())return;
+      auto *slot=workspace_.find(smoke_slot_a_);
+      require(slot&&slot->document().loaded(),"Workspace did not reload the clip source");
+      require(slot->pending_clip_states().empty()&&slot->clip_catalogs().size()==1,
+              "Workspace did not verify the saved clip seal");
+      const auto &catalog=slot->clip_catalogs().begin()->second;
+      const auto *clip=catalog.find(clip_smoke_saved_->id);
+      require(catalog.state().clips.size()==2&&clip&&clip->name==clip_smoke_saved_->name&&
+              clip->frames.first==2&&clip->frames.last==7&&
+              clip->binding.source==clip_smoke_saved_->binding.source,
+              "Workspace changed a stable clip identity, name or native range");
+      activate_slot(smoke_slot_a_);ui().page=10;document().set_frame(7);
+      clip_smoke_phase_=3;return;
+    }
+    if(clip_smoke_phase_==3) {
+      // Two actual host draws allow the requested tab and list clipping to settle.
+      clip_smoke_phase_=4;return;
+    }
+    require(ui().clips.visible_rows==2&&ui().clips.error.empty(),
+            "Restored clip list did not draw both rows");
+    if(!options_.screenshot.empty())screenshot();
+    if(!options_.report.empty()) {
+      std::ofstream report(options_.report);
+      report<<"{\"passed\":true,\"split_trim\":true,\"stable_source\":true,"
+               "\"export_verified\":true,\"workspace_verified\":true,"
+               "\"visible_rows\":"<<ui().clips.visible_rows<<",\"native_frames\":6,"
+               "\"auto_settings_io\":"<<(automatic_settings_?"true":"false")<<"}\n";
+      if(!report)throw std::runtime_error("Cannot write clip workflow report");
+    }
+    quit_=true;
+  }
   void workspace_smoke_step() {
     auto require = [](bool condition, const char *message) {
       if (!condition)
@@ -2733,6 +2955,7 @@ private:
 #endif
       tab("Deformables", 8);
       tab("Scene queries", 9);
+      tab("Clips", 10);
       tab("Workspace", 6);
       ImGui::EndTabBar();
       ui().synchronized_page = requested;
@@ -2799,6 +3022,10 @@ private:
         ImGui::EndChild();
         ImGui::EndTable();
       }
+    } else if (ui().page == 10) {
+      ImGui::BeginChild("Named clip workspace", {0,body_height},ImGuiChildFlags_Borders);
+      draw_clips();
+      ImGui::EndChild();
     } else if (ui().page == 6) {
       ImGui::BeginChild("Workspace manager", {0, body_height},
                         ImGuiChildFlags_Borders);
@@ -2868,6 +3095,7 @@ private:
       ui().scene_tools.viewport_aspect =
           viewport_size_.x / std::max(1.f, viewport_size_.y);
       drawSceneTools(document(), camera(), ui().scene_tools);
+      if(ui().scene_tools.recorded_follow.enabled)set_fitted(true);
       ImGui::Separator();
       if (drawCameraControls(document(),camera(),ui().navigation,ui().camera_panel))
         set_fitted(true);
@@ -2902,6 +3130,12 @@ private:
               static_cast<unsigned long long>(diagnostic.source.key.actor.id),
               static_cast<unsigned long long>(diagnostic.source.key.actor.generation),
               diagnostic.property.c_str(), diagnostic.message.c_str());
+      }
+      const auto &frames=renderer_->coordinate_frames();
+      if(!frames.complete) {
+        ImGui::TextColored({1,.7f,.35f,1},"Coordinate frame diagnostics (%zu retained)",frames.diagnostics.size());
+        for(const auto &diagnostic:frames.diagnostics)
+          ImGui::TextWrapped("%s: %s",diagnostic.property.c_str(),diagnostic.message.c_str());
       }
       ImGui::EndPopup();
     }
@@ -2944,27 +3178,34 @@ private:
     const bool hovered = ImGui::IsItemHovered();
     const auto &io = ImGui::GetIO();
     try {
-      if(navigateCameraFromImGui(camera(),ui().navigation,hovered))set_fitted(true);
+      if(navigateCameraFromImGui(camera(),ui().navigation,hovered)) {
+        notifyManualCameraInput(ui().scene_tools);set_fitted(true);
+      }
     }catch(const std::exception &e){ui().camera_panel.error=e.what();}
-    if (hovered && io.MouseWheel != 0)
+    if (hovered && io.MouseWheel != 0) {
+      notifyManualCameraInput(ui().scene_tools);
       camera().zoom(io.MouseWheel);
+    }
     if (ImGui::IsItemActive()) {
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
           (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
         try {
           rotate_camera(camera(),-io.MouseDelta.x/ui_scale_->current().screen_scale,
                         -io.MouseDelta.y/ui_scale_->current().screen_scale,ui().navigation);
+          notifyManualCameraInput(ui().scene_tools);
           set_fitted(true);
         }catch(const std::exception &e){ui().camera_panel.error=e.what();}
-      if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
+      if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        notifyManualCameraInput(ui().scene_tools);
         camera().pan(io.MouseDelta.x, io.MouseDelta.y, viewport_size_.y);
+      }
     }
     if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
         !io.KeyAlt && io.MouseDragMaxDistanceSqr[0] < ui_pixels(4)*ui_pixels(4)) {
       const auto hit =
           (ui().render_options.show_solids ||
            ui().render_options.show_wireframe)
-              ? pick(frame->draws,
+              ? pick(visualization_pick_draws(*frame,ui().render_options,visualization_selection()),
                      camera().screen_ray(io.MousePos.x - viewport_origin_.x,
                                          io.MousePos.y - viewport_origin_.y,
                                          viewport_size_.x, viewport_size_.y))
@@ -2993,7 +3234,7 @@ private:
                                   viewport_size_.x / viewport_size_.y))
         set_fitted(true);
     }
-    renderer_->render(*document().frame(), camera(), ui().render_options);
+    renderer_->render(*document().frame(), camera(), ui().render_options,visualization_selection());
     ImGui::GetWindowDrawList()->AddImage(
         reinterpret_cast<ImTextureID>(renderer_->shader_resource_view()),
         viewport_origin_,
