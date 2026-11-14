@@ -41,9 +41,11 @@ use that mode only when that expansion is intended.
 
 This is a rigid-object collection, not a complete simulation checkpoint. RepX
 does not serialize a `PxScene` with its solver, callbacks, broadphase, contacts,
-debug rendering, profile/memory histories, or application state. Recorded poses
-are already native PhysX coordinates. Explicit PVD origin shifts are not applied
-a second time. `UpVector` is Y-up and the captured physics tolerance scale is
+debug rendering, profile/memory histories, or application state. World poses and
+world-side joint anchors use the explicit native coordinate view, including
+OriginShift effects on retained static/sleeping/link properties. Raw source
+properties are preserved; a cumulative offset is not subtracted a second time.
+See [origin-shift.md](origin-shift.md). `UpVector` is Y-up and the captured physics tolerance scale is
 written when available; SDK documentation describes those XML parameters as
 application metadata rather than changes to the physics instance.
 

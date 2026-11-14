@@ -78,6 +78,11 @@ struct PropertyValue {
   std::optional<std::string> text;
   std::optional<std::vector<std::uint64_t>> reference_ids;
   bool opaque = false;
+  // Explicit PhysX-native coordinate view. Original bytes and all as_* getters
+  // remain wire-exact. A bounded shadow is updated with each individual float
+  // OriginShift; a fresh write resets it, including same-byte cross-epoch writes.
+  std::shared_ptr<const Bytes> native_coordinate_bytes;
+  std::uint64_t coordinate_epoch = 0;
   PVD_CORE_API const Bytes &raw_bytes() const noexcept;
   PVD_CORE_API std::optional<std::uint64_t> as_uint(std::size_t item = 0) const;
   PVD_CORE_API std::optional<std::int64_t> as_int(std::size_t item = 0) const;
@@ -97,6 +102,7 @@ struct InstanceState {
   std::map<std::string, PropertyValue> properties;
   bool pickable = true, top_level = false;
   std::optional<Color> color;
+  std::uint64_t coordinate_epoch = 0;
   PVD_CORE_API const PropertyValue *
   property(const std::string &name) const noexcept;
 };
@@ -108,8 +114,8 @@ struct Snapshot {
   // Only live instances are present; generation distinguishes reuse of an ID.
   std::map<std::uint64_t, InstanceState> instances;
   std::map<std::string, CameraState> cameras;
-  // Origin shifts are explicit scene offsets, not a second mutation of pose
-  // bytes.
+  // Explicit scene offsets; raw property bytes are never rewritten. Use
+  // coordinates::native_* for retained native world-space values after shifts.
   std::map<std::uint64_t, Vec3> origin_shifts;
   PVD_CORE_API const InstanceState *instance(std::uint64_t id) const noexcept;
 };

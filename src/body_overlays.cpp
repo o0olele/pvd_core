@@ -1,4 +1,5 @@
 #include "pvd/body_overlays.hpp"
+#include "pvd/coordinates.hpp"
 #include <array>
 #include <cmath>
 #include <limits>
@@ -149,7 +150,7 @@ struct Builder {
               "byte order");
       return {};
     }
-    const auto pose = p->as_transform();
+    const auto pose = coordinates::native_transform(*p);
     if (!pose || p->item_count != 1 || !valid_pose(*pose)) {
       problem(BodyOverlayCode::invalid_property, source, "GlobalPose",
               "captured Actor.GlobalPose must be a finite typed transform with "

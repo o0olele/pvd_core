@@ -1,5 +1,6 @@
 #include "pvd/curves.hpp"
 #include <algorithm>
+#include "pvd/coordinates.hpp"
 #include <cmath>
 #include <cstring>
 #include <iomanip>
@@ -85,7 +86,8 @@ struct ReadResult {
 };
 ReadResult read_numeric(const PropertyValue &value,
                         const PropertyDefinition *definition,
-                        std::string component, std::size_t item) {
+                        std::string component, std::size_t item,
+                        CoordinateSpace space) {
   const auto &type = value.incoming_type;
   if (value.reference_ids ||
       (definition &&
@@ -200,7 +202,8 @@ ReadResult read_numeric(const PropertyValue &value,
   }
   if (!component_valid)
     return {{}, Gap::invalid_component};
-  const auto &bytes = value.raw_bytes();
+  const auto &bytes = space == CoordinateSpace::native
+                          ? coordinates::native_bytes(value) : value.raw_bytes();
   if (!width ||
       value.item_count > std::numeric_limits<std::size_t>::max() / width ||
       bytes.size() != value.item_count * width)
@@ -275,6 +278,8 @@ std::size_t retained_size(const PropertyValue &v) {
       return std::numeric_limits<std::size_t>::max();
     add(v.reference_ids->size() * 8);
   }
+  if (v.native_coordinate_bytes && v.native_coordinate_bytes != v.bytes)
+    add(v.native_coordinate_bytes->size());
   return size;
 }
 } // namespace
@@ -345,6 +350,9 @@ const char *gap_name(Gap g) noexcept {
 }
 Series sample_curve(const Session &s, CurveRequest request,
                     CurveOptions options) {
+  if (request.coordinate_space != CoordinateSpace::native &&
+      request.coordinate_space != CoordinateSpace::wire)
+    throw std::invalid_argument("unknown curve coordinate space");
   if (!options.max_samples || !request.stride ||
       request.first_frame > request.end_frame)
     throw std::invalid_argument("invalid curve sample budget/range/stride");
@@ -431,7 +439,7 @@ Series sample_curve(const Session &s, CurveRequest request,
     else if (auto value = object->property(q.property)) {
       auto numeric = read_numeric(
           *value, s.metadata().find_property(object->class_name, q.property),
-          q.component, q.item_index);
+          q.component, q.item_index, q.coordinate_space);
       sample.value = std::move(numeric.value);
       sample.gap = numeric.gap;
     } else
@@ -448,7 +456,7 @@ void write_curve_csv(std::ostream &out, const Series &series) {
          "seconds,elapsed_seconds,object_id,generation,property,component,item_"
          "index,value_kind,value,gap,break_before,sampling,series_complete,"
          "series_cancelled,"
-         "series_resampled,candidate_samples\r\n";
+         "series_resampled,candidate_samples,coordinate_space\r\n";
   for (const auto &sample : series.samples) {
     const auto &q = series.request;
     const auto &s = sample.source;
@@ -476,7 +484,9 @@ void write_curve_csv(std::ostream &out, const Series &series) {
                 ? "native_frame"
                 : "explicit_after_fetch")
         << ',' << series.complete << ',' << series.cancelled << ','
-        << series.resampled << ',' << series.candidate_samples << "\r\n";
+        << series.resampled << ',' << series.candidate_samples << ','
+        << (q.coordinate_space == CoordinateSpace::native ? "native" : "wire")
+        << "\r\n";
     out << row.str();
   }
   if (!out)
@@ -485,10 +495,14 @@ void write_curve_csv(std::ostream &out, const Series &series) {
 
 StateDiff diff_snapshots(const Snapshot &before, const Snapshot &after,
                          DiffOptions options) {
+  if (options.coordinate_space != CoordinateSpace::native &&
+      options.coordinate_space != CoordinateSpace::wire)
+    throw std::invalid_argument("unknown diff coordinate space");
   if (!options.max_objects || !options.max_properties ||
       !options.max_auxiliary_changes || !options.max_retained_value_bytes)
     throw std::invalid_argument("diff resource limits must be nonzero");
   StateDiff out;
+  out.coordinate_space = options.coordinate_space;
   out.before_event_count = before.event_count;
   out.after_event_count = after.event_count;
   std::size_t visited_objects = 0, visited_properties = 0, retained = 0,
@@ -539,7 +553,11 @@ StateDiff diff_snapshots(const Snapshot &before, const Snapshot &after,
            av->item_count != bv->item_count ||
            av->byte_order != bv->byte_order ||
            av->pointer_width != bv->pointer_width || av->opaque != bv->opaque);
-      bool data_changed = !av || !bv || av->raw_bytes() != bv->raw_bytes();
+      const bool wire_changed = !av || !bv || av->raw_bytes() != bv->raw_bytes();
+      const bool native_changed = !av || !bv ||
+          coordinates::native_bytes(*av) != coordinates::native_bytes(*bv);
+      bool data_changed = options.coordinate_space == CoordinateSpace::native
+                              ? native_changed : wire_changed;
       const std::optional<std::vector<std::uint64_t>> empty_refs;
       const std::optional<std::string> empty_text;
       const auto &ar = av ? av->reference_ids : empty_refs;
@@ -571,6 +589,8 @@ StateDiff diff_snapshots(const Snapshot &before, const Snapshot &after,
         p.after = *bv;
       p.type_changed = type_changed;
       p.data_changed = data_changed;
+      p.wire_data_changed = wire_changed;
+      p.coordinates_changed = native_changed && !wire_changed;
       p.references_changed = references_changed;
       p.text_changed = text_changed;
       change.properties.push_back(std::move(p));

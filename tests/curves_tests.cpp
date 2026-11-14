@@ -506,12 +506,47 @@ void real_curve(const char *path) {
   check(diff.complete && change(diff, object, a::ChangeKind::changed),
         "real frame property diff");
 }
+void origin_coordinates() {
+  Fixture f;
+  auto rigid=f.type("PxRigidStatic"),transform=f.type("PxTransform"),
+       refs=f.type("ObjectRef"),pointer=f.type("VoidPtr");
+  f.emit(CreateClass{rigid});
+  const auto global=f.text("GlobalPose"),scene=f.text("Scene");
+  f.emit(CreateProperty{rigid,global,0,transform,1,{}});
+  f.emit(CreateProperty{rigid,scene,0,refs,1,{}});
+  f.emit(CreateInstance{rigid,500});
+  f.emit(SetPropertyValue{500,scene,pointer,1,ints({1},f.header.pointer_width(),f.header.byte_order)});
+  f.emit(SetPropertyValue{500,global,transform,1,floats({0,0,0,1,100,20,30},f.header.byte_order)});
+  f.mark(true,500,"origin_test");f.mark(false,501,"origin_test");
+  const auto before=f.events.size();
+  f.emit(OriginShift{1,{10,2,-3}});
+  f.mark(true,510,"origin_test");f.mark(false,511,"origin_test");
+  Session s(f.header,f.events);
+  a::CurveRequest q;q.source.scene_id=1;q.source.sampling=a::Sampling::after_fetch;
+  q.source.after_fetch_section="origin_test";q.object={500,0};q.property="GlobalPose";q.component="position.x";
+  auto native=a::sample_curve(s,q);check(native.samples.size()==2,"origin curve count");
+  near(a::plot_value(*native.samples[0].value),100,"native origin baseline");
+  near(a::plot_value(*native.samples[1].value),90,"native origin movement absent");
+  q.coordinate_space=a::CoordinateSpace::wire;auto wire=a::sample_curve(s,q);
+  near(a::plot_value(*wire.samples[1].value),100,"wire curve must retain last payload");
+  std::ostringstream csv;a::write_curve_csv(csv,wire);
+  check(csv.str().find("coordinate_space")!=std::string::npos&&csv.str().find(",wire\r\n")!=std::string::npos,"CSV coordinate semantics missing");
+  auto native_diff=a::diff_events(s,before,f.events.size());
+  auto changed=std::find_if(native_diff.objects.begin(),native_diff.objects.end(),[](const auto&o){return o.object.id==500;});
+  check(changed!=native_diff.objects.end()&&changed->properties.size()==1&&changed->properties[0].coordinates_changed&&!changed->properties[0].wire_data_changed,"native diff raw/coordinate distinction");
+  a::DiffOptions opts;opts.coordinate_space=a::CoordinateSpace::wire;
+  auto raw_diff=a::diff_events(s,before,f.events.size(),opts);
+  check(std::none_of(raw_diff.objects.begin(),raw_diff.objects.end(),[](const auto&o){return o.object.id==500;}),"wire diff invents static setter");
+  opts={};opts.max_retained_value_bytes=56;
+  check(a::diff_events(s,before,f.events.size(),opts).truncated,"native shadow omitted from retained-value budget");
+}
 } // namespace
 int main(int argc, char **argv) {
   try {
     numeric_curves_and_gaps();
     endian_clock_and_limits();
     state_diff();
+    origin_coordinates();
     if (argc > 1)
       real_curve(argv[1]);
     std::cout << "curves tests passed\n";

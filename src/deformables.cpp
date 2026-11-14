@@ -1,4 +1,5 @@
 #include "pvd/deformables.hpp"
+#include "pvd/coordinates.hpp"
 #include "pvd/render.hpp"
 #include <algorithm>
 #include <cmath>
@@ -21,7 +22,7 @@ bool type(const PropertyValue &value, const char *name) {
 }
 std::uint64_t u(const PropertyValue &value, std::size_t at, std::size_t width,
                 const std::string &p) {
-  const auto &b = value.raw_bytes();
+  const auto &b = coordinates::native_bytes(value);
   if (at > b.size() || width > b.size() - at)
     fail(DiagnosticCode::malformed_payload, p, "truncated array field");
   std::uint64_t v = 0;
@@ -179,7 +180,7 @@ struct Build {
           pose->raw_bytes().size() != 28)
         fail(DiagnosticCode::invalid_type, "GlobalPose",
              "expected one complete PxTransform");
-      const auto t = pose->as_transform();
+      const auto t = coordinates::native_transform(*pose);
       const auto &q = t->rotation;
       const auto length = double(q.x) * q.x + double(q.y) * q.y +
                           double(q.z) * q.z + double(q.w) * q.w;

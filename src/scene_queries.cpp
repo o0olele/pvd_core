@@ -270,6 +270,8 @@ struct SceneQueryIndex::Impl {
     int property;
     std::size_t prefix;
     std::uint64_t stream, timestamp, offset;
+    bool coordinates_ambiguous = false;
+    std::uint64_t origin_epoch = 0;
   };
   struct Pending {
     ObjectKey scene;
@@ -283,6 +285,11 @@ struct SceneQueryIndex::Impl {
   std::map<std::uint64_t, std::uint64_t> generations, alive;
   std::map<std::uint64_t, Pending> pending;
   std::vector<Update> updates;
+  struct Epochs {
+    std::uint64_t current = 0;
+    std::array<std::uint64_t, 6> published{};
+  };
+  std::map<std::uint64_t, Epochs> origin_epochs;
   explicit Impl(SceneQueryOptions o) : options(o) {
     if (!std::isfinite(o.normal_length) || o.normal_length < 0 ||
         !o.max_diagnostics || !o.max_reference_string_bytes)
@@ -292,7 +299,7 @@ struct SceneQueryIndex::Impl {
   }
   std::size_t entries() const {
     return names.size() + generations.size() + alive.size() + pending.size() +
-           updates.size();
+           updates.size() + origin_epochs.size();
   }
   int name(std::uint64_t stream, std::uint32_t handle) const {
     const auto it = names.find({stream, handle});
@@ -303,13 +310,21 @@ struct SceneQueryIndex::Impl {
     if (property < 0)
       return;
     const auto it = alive.find(id);
-    if (it != alive.end())
+    if (it != alive.end()) {
+      bool ambiguous = false;
+      auto &epochs = origin_epochs[id];
+      if (property % 7 < 3) {
+        const auto slot = (property / 7) * 3 + property % 7;
+        ambiguous = epochs.published[slot] != epochs.current;
+        epochs.published[slot] = epochs.current;
+      }
       updates.push_back({{id, it->second},
                          property,
                          prefix,
                          e.stream_id,
                          e.timestamp,
-                         e.byte_offset});
+                         e.byte_offset, ambiguous, epochs.current});
+    }
   }
   void update(const Session &s, std::size_t end) {
     if (!bound_session)
@@ -335,10 +350,14 @@ struct SceneQueryIndex::Impl {
               const auto property = property_id(v.string);
               if (property >= 0)
                 names[{e.stream_id, v.handle}] = property;
-            } else if constexpr (std::is_same_v<T, CreateInstance>)
+            } else if constexpr (std::is_same_v<T, CreateInstance>) {
               alive[v.instance_id] = generations[v.instance_id]++;
-            else if constexpr (std::is_same_v<T, DestroyInstance>)
+              origin_epochs.erase(v.instance_id);
+            } else if constexpr (std::is_same_v<T, DestroyInstance>) {
               alive.erase(v.instance_id);
+              origin_epochs.erase(v.instance_id);
+            } else if constexpr (std::is_same_v<T, OriginShift>)
+              ++origin_epochs[v.instance_id].current;
             else if constexpr (std::is_same_v<T, SetPropertyValue>)
               record(v.instance_id, name(e.stream_id, v.property_name), e,
                      prefix);
@@ -706,6 +725,8 @@ struct SceneQueryIndex::Impl {
           item_source.sequence = i;
           const auto start = reader.position();
           auto q = read_query(reader, p, item_source, options);
+          q.coordinates_ambiguous = u.coordinates_ambiguous ||
+                                     u.origin_epoch != scene->coordinate_epoch;
           try {
             attach(q, snapshot, session.metadata(), *owner,
                    window.begin_event_count, total_hits, total_aux, out);
@@ -726,8 +747,14 @@ struct SceneQueryIndex::Impl {
         need(reader.remaining() == 0, SceneQueryCode::malformed,
              "query native array contains trailing bytes", reader.position());
         collection.query_count = staged.size();
+        if (!staged.empty() && staged.front().coordinates_ambiguous)
+          diagnostic(out, SceneQueryCode::ambiguous_coordinates, source_value,
+                     properties[u.property],
+                     "OriginShift overlaps the query collection/publication "
+                     "interval. PhysX 3.4 sends no per-query origin epoch; raw "
+                     "coordinates are retained and spatial previews suppressed.");
         for (auto &q : staged) {
-          if (q.complete)
+          if (q.complete && !q.coordinates_ambiguous)
             lines(out, q, line_limited);
           out.queries.push_back(std::move(q));
         }

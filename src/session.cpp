@@ -1,4 +1,5 @@
 #include "pvd/session.hpp"
+#include "coordinates_internal.hpp"
 #include <algorithm>
 #include <cstring>
 #include <fstream>
@@ -217,7 +218,7 @@ struct Session::Impl {
     Color color;
     std::string camera_name;
     CameraState camera;
-    Vec3 shift;
+    Vec3 shift, shift_delta;
   };
   struct Chunk {
     std::uint64_t id;
@@ -297,7 +298,7 @@ struct Session::Impl {
       fail("undefined property message " + n.str());
     return i->second;
   }
-  static void apply(Snapshot &s, const Operation &o) {
+  static void apply(Snapshot &s, const Operation &o, const Metadata &metadata) {
     switch (o.kind) {
     case Kind::create:
       s.instances.emplace(o.id, o.instance);
@@ -323,12 +324,16 @@ struct Session::Impl {
       s.cameras[o.camera_name] = o.camera;
       break;
     case Kind::origin:
+      coordinates::detail::apply_shift(metadata, s, o.id, o.shift_delta);
       s.origin_shifts[o.id] = o.shift;
       break;
     }
   }
   void commit(Operation o) {
     if (o.kind == Kind::assign) {
+      for (auto &p : o.assignments)
+        if (coordinates::detail::epoch_field(metadata, object(o.id), p.first))
+          p.second.coordinate_epoch = object(o.id).coordinate_epoch;
       const auto &properties = object(o.id).properties;
       auto changed = [&](const auto &assignment) {
         auto old = properties.find(assignment.first);
@@ -337,6 +342,7 @@ struct Session::Impl {
         return a.incoming_type != b.incoming_type || a.item_count != b.item_count ||
                a.byte_order != b.byte_order || a.pointer_width != b.pointer_width ||
                a.opaque != b.opaque || a.text != b.text ||
+               a.coordinate_epoch != b.coordinate_epoch ||
                a.reference_ids != b.reference_ids ||
                (a.bytes != b.bytes && a.raw_bytes() != b.raw_bytes());
       };
@@ -363,7 +369,7 @@ struct Session::Impl {
       }
     }
     o.event_count = index + 1;
-    apply(working, o);
+    apply(working, o, metadata);
     operations.push_back(std::move(o));
   }
   std::pair<std::string, std::size_t> cstring(const Bytes &b, std::size_t o) {
@@ -707,6 +713,7 @@ struct Session::Impl {
             Operation op;
             op.kind = Kind::origin;
             op.id = v.instance_id;
+            op.shift_delta = v.shift;
             op.shift = {prev.x + v.shift.x, prev.y + v.shift.y,
                         prev.z + v.shift.z};
             commit(std::move(op));
@@ -937,7 +944,7 @@ Snapshot Session::snapshot_at_event(std::size_t count) const {
                        });
   for (auto it = first;
        it != impl_->operations.end() && it->event_count <= count; ++it)
-    Impl::apply(state, *it);
+    Impl::apply(state, *it, impl_->metadata);
   state.event_count = count;
   return state;
 }

@@ -56,7 +56,7 @@ for (const auto& instance : frame.instances) {
 
 `world_bounds` 是解析基础几何或资源顶点的包围盒，不包含 SDK broadphase/contact offset 膨胀。包含未被三角引用的资源顶点时，包围盒也会包含这些顶点。不能将其直接视为 SDK 的 broadphase bounds。
 
-`origin_shifts` 保留捕获中的显式偏移。世界姿态已经是当前原生坐标，提取器不会再次减去累计偏移。
+`origin_shifts` 保留捕获中的显式偏移。提取器使用显式 native-coordinate 视图：SDK 不重发的 static/sleeping/cloth 世界属性由 Session shadow 逐次平移，后续属性消息自然切换到新值。原始 pose bytes 不被改写，提取器不会再次统一减去累计偏移。详见 [origin-shift.md](origin-shift.md)。
 
 ## 形状实例和资源缓存
 

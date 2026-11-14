@@ -13,6 +13,7 @@ struct ObjectKey {
   }
 };
 enum class Sampling { native_frame, after_fetch };
+enum class CoordinateSpace { native, wire };
 struct FrameSource {
   std::uint64_t scene_id = 0;
   std::optional<std::uint64_t> stream_id;
@@ -58,6 +59,7 @@ struct CurveRequest {
   std::size_t item_index = 0;
   std::size_t first_frame = 0,
               end_frame = std::numeric_limits<std::size_t>::max(), stride = 1;
+  CoordinateSpace coordinate_space = CoordinateSpace::native;
 };
 enum class Resampling {
   reject,
@@ -104,6 +106,7 @@ struct PropertyChange {
   std::optional<PropertyValue> before, after;
   bool type_changed = false, data_changed = false, references_changed = false,
        text_changed = false;
+  bool wire_data_changed = false, coordinates_changed = false;
 };
 enum class ChangeKind { created, destroyed, changed };
 struct ObjectChange {
@@ -129,6 +132,7 @@ struct DiffOptions {
   std::size_t max_retained_value_bytes = 64u * 1024u * 1024u;
   bool include_lifecycle_properties = false;
   std::function<bool()> cancelled;
+  CoordinateSpace coordinate_space = CoordinateSpace::native;
 };
 struct StateDiff {
   std::size_t before_event_count = 0, after_event_count = 0;
@@ -137,6 +141,7 @@ struct StateDiff {
   std::vector<OriginShiftChange> origin_shifts;
   bool complete = true, cancelled = false, truncated = false;
   std::vector<std::string> diagnostics;
+  CoordinateSpace coordinate_space = CoordinateSpace::native;
 };
 // Snapshot state only; metadata definition history is not fabricated. ID reuse
 // produces destroyed(old generation) plus created(new generation), never a

@@ -17,6 +17,8 @@ Object identity includes the original 64-bit ID and its generation. A destroyed 
 
 The property name is exact and separate from the numeric component. In particular, the reflected property `Scale.Scale` is a full property name; its `y` component is supplied separately. `item_index` chooses one original array item and defaults to zero. There is no implicit array averaging.
 
+`CurveRequest::coordinate_space` defaults to `CoordinateSpace::native`. Confirmed PhysX 3.4 world fields include the recorded `OriginShift` effects even when the SDK did not resend their property. This is protocol reconstruction, not estimated motion. Set `CoordinateSpace::wire` to sample the last transmitted bytes explicitly. Raw core `PropertyValue::as_*` getters and events remain unchanged. CSV includes `coordinate_space` so these two meanings cannot be confused; gaps and 64-bit integer precision are unchanged.
+
 Supported numeric source layouts:
 
 | Incoming type | Component |
@@ -64,7 +66,7 @@ auto frames = pvd::analysis::diff_frames(
 
 Endpoints may be in either time order. `diff_frames` accepts different scene/stream/sampling sources at its two endpoints, so native and explicitly post-fetch states can be compared directly. Unknown frame locations or event prefixes beyond the Session throw clear range errors. `diff_snapshots` also accepts standalone core snapshots.
 
-Diffs compare object lifetimes and class, pickable/top-level flags, optional color, property presence, incoming type/encoding/count, immutable raw payload bytes, decoded text and normalized references. Equal bytes held in different buffers are unchanged. ID reuse yields a destroyed row for the old generation and a created row for the new generation. Camera and explicit origin-shift changes are included. Raw property values are preserved; numerical equality or tolerance is not substituted for byte equality.
+Diffs compare object lifetimes and class, pickable/top-level flags, optional color, property presence, incoming type/encoding/count, decoded text and normalized references. `DiffOptions::coordinate_space` defaults to native coordinates; `data_changed` compares exact native-view bytes, while `wire_data_changed` separately reports source-payload changes and `coordinates_changed` identifies a native change with equal raw bytes. Set the space to `wire` for a last-transmitted-payload diff. Retained before/after values preserve both original bytes and the explicit native shadow. Equal bytes held in different buffers are unchanged; no tolerance is substituted for byte equality. ID reuse yields a destroyed row for the old generation and a created row for the new generation. Camera and explicit origin-shift changes are included.
 
 Lifecycle rows retain attributes by default. Set `include_lifecycle_properties` to retain their properties as well. Changed-property rows share immutable byte buffers, while their text and reference vectors remain independent values. The result does not fabricate historical metadata-definition differences, which the core Snapshot does not contain.
 

@@ -1,4 +1,5 @@
 #include "pvd/render.hpp"
+#include "pvd/coordinates.hpp"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -125,7 +126,7 @@ Transform pose(const InstanceState &o, const std::string &name) {
   if (!type(p, "PxTransform"))
     fail(DiagnosticCode::invalid_type, o, name, "expected PxTransform");
   size_is(o, name, p, 28);
-  auto t = *p.as_transform();
+  auto t = *coordinates::native_transform(p);
   if (!finite(t.position) || !unit(t.rotation))
     fail(DiagnosticCode::invalid_value, o, name,
          "transform is non-finite or quaternion is not unit length");

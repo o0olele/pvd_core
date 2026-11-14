@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(pvd_core VERSION 0.7.0 LANGUAGES CXX)
+project(pvd_core VERSION 0.8.0 LANGUAGES CXX)
 
 option(BUILD_SHARED_LIBS "Build pvd_core as a shared library" OFF)
 option(PVD_BUILD_TOOLS "Build the headless capture inspection tool" ON)
@@ -18,7 +18,7 @@ include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-add_library(pvd_core src/protocol.cpp src/session.cpp src/writer.cpp)
+add_library(pvd_core src/protocol.cpp src/session.cpp src/writer.cpp src/coordinates.cpp src/clips.cpp)
 add_library(pvd::core ALIAS pvd_core)
 set_target_properties(pvd_core PROPERTIES EXPORT_NAME core VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -61,7 +61,7 @@ endif()
 
 if(PVD_BUILD_RENDER)
     add_library(pvd_render src/render.cpp src/debug_render.cpp src/mesh_builder.cpp src/deformables.cpp
-        src/constraint_builder.cpp src/scene_queries.cpp src/body_overlays.cpp)
+        src/constraint_builder.cpp src/scene_queries.cpp src/body_overlays.cpp src/coordinate_frames.cpp)
     add_library(pvd::render ALIAS pvd_render)
     set_target_properties(pvd_render PROPERTIES EXPORT_NAME render VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -110,6 +110,29 @@ if(PVD_BUILD_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(pvd_clip_ranges_tests tests/clip_ranges_tests.cpp)
+    target_link_libraries(pvd_clip_ranges_tests PRIVATE pvd::core)
+    if(MSVC)
+        target_compile_options(pvd_clip_ranges_tests PRIVATE /W4 /utf-8)
+    endif()
+    add_test(NAME clip_ranges COMMAND pvd_clip_ranges_tests)
+    set_tests_properties(clip_ranges PROPERTIES TIMEOUT 30)
+    if(PVD_BUILD_RENDER)
+        add_executable(pvd_coordinate_frames_tests tests/coordinate_frames_tests.cpp)
+        target_link_libraries(pvd_coordinate_frames_tests PRIVATE pvd::render)
+        if(MSVC)
+            target_compile_options(pvd_coordinate_frames_tests PRIVATE /W4 /utf-8)
+        endif()
+        add_test(NAME coordinate_frames COMMAND pvd_coordinate_frames_tests)
+        set_tests_properties(coordinate_frames PROPERTIES TIMEOUT 30)
+    endif()
+    add_executable(pvd_coordinates_tests tests/coordinates_tests.cpp)
+    target_link_libraries(pvd_coordinates_tests PRIVATE pvd::core)
+    if(MSVC)
+        target_compile_options(pvd_coordinates_tests PRIVATE /W4 /utf-8)
+    endif()
+    add_test(NAME coordinates COMMAND pvd_coordinates_tests)
+    set_tests_properties(coordinates PROPERTIES TIMEOUT 30)
     add_executable(pvd_writer_tests tests/writer_tests.cpp)
     target_link_libraries(pvd_writer_tests PRIVATE pvd::core)
     add_test(NAME writer COMMAND pvd_writer_tests)
@@ -176,6 +199,38 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
         pvd_add_physx34_capture(pvd_physx34_constraints
             ${PROJECT_SOURCE_DIR}/tests/physx34_constraints.cpp)
+        pvd_add_physx34_capture(pvd_physx34_origin_shift_capture
+            ${PROJECT_SOURCE_DIR}/examples/physx34_origin_shift_capture.cpp)
+        set_property(TARGET pvd_physx34_origin_shift_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
+        target_compile_options(pvd_physx34_origin_shift_capture PRIVATE /utf-8)
+        target_link_libraries(pvd_physx34_origin_shift_capture PRIVATE
+            ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
+        if(BUILD_TESTING AND PVD_BUILD_REPX)
+            add_executable(pvd_physx34_origin_shift tests/physx34_origin_shift.cpp)
+            target_link_libraries(pvd_physx34_origin_shift PRIVATE pvd::core pvd::render pvd::repx)
+            if(PVD_BUILD_ANALYSIS)
+                target_link_libraries(pvd_physx34_origin_shift PRIVATE pvd::analysis)
+                target_compile_definitions(pvd_physx34_origin_shift PRIVATE PVD_ORIGIN_TEST_ANALYSIS=1)
+            endif()
+            target_compile_options(pvd_physx34_origin_shift PRIVATE /W4 /utf-8)
+            add_test(NAME physx34_origin_shift_generate COMMAND pvd_physx34_origin_shift_capture
+                ${PROJECT_BINARY_DIR}/fixtures/origin_shift)
+            set_tests_properties(physx34_origin_shift_generate PROPERTIES FIXTURES_SETUP physx34_origin_shift TIMEOUT 30)
+            add_test(NAME physx34_origin_shift COMMAND pvd_physx34_origin_shift
+                ${PROJECT_BINARY_DIR}/fixtures/origin_shift_capture.pxd2
+                ${PROJECT_BINARY_DIR}/fixtures/origin_shift_expected.csv
+                ${PROJECT_BINARY_DIR}/fixtures/origin_shift_export)
+            set_tests_properties(physx34_origin_shift PROPERTIES FIXTURES_REQUIRED physx34_origin_shift
+                FIXTURES_SETUP physx34_origin_shift_repx TIMEOUT 30)
+            foreach(suffix IN ITEMS "" _end _crop)
+                add_test(NAME physx34_origin_shift_repx${suffix} COMMAND pvd_physx34_repx_validate
+                    ${PROJECT_BINARY_DIR}/fixtures/origin_shift_export${suffix}.repx
+                    ${PROJECT_BINARY_DIR}/fixtures/origin_shift_export${suffix}_sdk_expected.csv
+                    --oracle ${PROJECT_BINARY_DIR}/fixtures/origin_shift_export${suffix}_official.repx)
+                set_tests_properties(physx34_origin_shift_repx${suffix} PROPERTIES
+                    FIXTURES_REQUIRED physx34_origin_shift_repx TIMEOUT 30)
+            endforeach()
+        endif()
         target_link_libraries(pvd_physx34_constraints PRIVATE pvd::render)
         target_include_directories(pvd_physx34_constraints SYSTEM PRIVATE
             ${PROJECT_SOURCE_DIR}/examples/physx34_compat
@@ -235,6 +290,10 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             add_test(NAME physx34_articulation COMMAND pvd_physx34_articulation
                 ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2 ${PROJECT_BINARY_DIR}/fixtures/articulation_expected.csv)
             set_tests_properties(physx34_articulation PROPERTIES FIXTURES_REQUIRED physx34_articulation TIMEOUT 30)
+            add_test(NAME coordinate_frames_physx34 COMMAND pvd_coordinate_frames_tests
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_expected.csv)
+            set_tests_properties(coordinate_frames_physx34 PROPERTIES FIXTURES_REQUIRED physx34_articulation TIMEOUT 30)
             add_test(NAME physx34_joints_generate COMMAND pvd_physx34_joints_capture
                 ${PROJECT_BINARY_DIR}/fixtures/joints)
             set_tests_properties(physx34_joints_generate PROPERTIES FIXTURES_SETUP physx34_joints TIMEOUT 30)

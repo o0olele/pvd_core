@@ -110,7 +110,7 @@ pvd::Session session(*decoder.header(), decoder.events());
 - 可追加会话及独立 TCP 接收器已提供；一个采集对象对应一个连接，重连需创建新会话。直接使用可变 Session 时由调用方同步，TcpCapture 则提供同步后的副本查询。
 - 事件和属性载荷保存在内存，检查点数量可配置；当前没有磁盘分页、压缩或大型录制性能承诺。
 - Profile / memory 的嵌套二级数据保持原始通道载荷和相关元数据，尚未完整转换为聚合统计；debug-render 解码已由独立渲染模块提供。
-- OriginShift 保留显式场景偏移，不重复修改已接收的 GlobalPose；渲染适配层需要采用一致坐标约定。
+- OriginShift 保留原始属性字节，并为已确认的 PhysX 3.4 世界字段维护逐次 float 平移的不可变 shadow。渲染或物理读取使用 `coordinates::native_transform/native_vec3/native_value`；`as_*` 仍表示 last-wire 值，不能在 shift 后直接当作当前世界坐标。详见 [origin-shift.md](origin-shift.md)。
 - 还没有旧保存容器写入、剪辑导出、RepX 导出或图形渲染器。
 - 已实现源协议大小端和32/64位字段处理；真实 SDK 集成首先验证本机 x64 little-endian 3.4，其他组合以合成协议测试覆盖。
 

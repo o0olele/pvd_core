@@ -1,4 +1,5 @@
 #include "pvd/repx.hpp"
+#include "pvd/coordinates.hpp"
 #include "pvd/render.hpp"
 #include "repx_articulation_fields.hpp"
 #include "repx_joint_fields.hpp"
@@ -60,7 +61,7 @@ Vec3 vector(const InstanceState &o, const std::string &p) {
   return *v;
 }
 Transform pose(const InstanceState &o, const std::string &p) {
-  auto v = need(o, p).as_transform();
+  auto v = coordinates::native_transform(need(o, p));
   if (!v)
     throw ExportError(context(o, p) + "expected transform");
   const auto &q = v->rotation;

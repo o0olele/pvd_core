@@ -1,6 +1,7 @@
 #pragma once
 // Internal, SDK-free schema for PhysX 3.4's six extension joint serializers.
 #include "pvd/repx.hpp"
+#include "pvd/coordinates.hpp"
 #include <array>
 #include <cmath>
 #include <initializer_list>
@@ -51,7 +52,7 @@ inline float nonnegative(const InstanceState &o, const std::string &p) {
   return v;
 }
 inline Transform pose(const InstanceState &o, const std::string &p) {
-  const auto v = need(o, p).as_transform();
+  const auto v = coordinates::native_transform(need(o, p));
   if (!v)
     throw ExportError(where(o, p) + "expected transform");
   const auto &q = v->rotation;

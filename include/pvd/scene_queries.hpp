@@ -63,6 +63,10 @@ struct SceneQuery {
   // Structural validity only. Recorded empty hits do not prove a successful
   // miss: batch queryStatus/hasBlock and exhaustive collection are not sent.
   bool complete = true;
+  // The SDK collects calls until fetchResults, without per-call origin epochs.
+  // A shift since the prior publication can mix old/new coordinate systems.
+  // Raw parameters/hits remain exact, but derived spatial previews are unsafe.
+  bool coordinates_ambiguous = false;
 };
 struct SceneQueryCollection {
   SceneQueryKind kind = SceneQueryKind::raycast;
@@ -82,7 +86,8 @@ enum class SceneQueryCode {
   unsupported_geometry,
   stale_array,
   multiple_publications,
-  limit_exceeded
+  limit_exceeded,
+  ambiguous_coordinates
 };
 struct SceneQueryDiagnostic {
   SceneQueryCode code = SceneQueryCode::malformed;

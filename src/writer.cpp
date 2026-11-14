@@ -1,4 +1,6 @@
 #include "pvd/writer.hpp"
+#include "pvd/coordinates.hpp"
+#include "coordinates_internal.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -692,10 +694,25 @@ CroppedStream crop_events(const Session &session, std::size_t begin,
          n = handle(stream, name.name);
     return WireName{ns, n};
   };
+  // Restore all ownership relationships before the retained scene offsets.
+  // World-space values are then explicitly rebased into current native space;
+  // applying an old accumulated shift after those values would double-shift.
+  for (unsigned pass = 0; pass < 3; ++pass) {
+    if (pass == 2)
+      for (const auto &shift : snapshot.origin_shifts)
+        emit(bootstrap_stream, OriginShift{shift.first, shift.second});
   for (const auto &instance : snapshot.instances) {
     const auto &state = instance.second;
     for (const auto &property : state.properties) {
       const auto &value = property.second;
+      const bool reference = bool(value.reference_ids);
+      const bool pending_query =
+          !reference && coordinates::detail::query_publication(session.metadata(), state,
+                                                  property.first) &&
+          value.coordinate_epoch != state.coordinate_epoch;
+      if ((pass == 0 && !reference) || (pass == 1 && !pending_query) ||
+          (pass == 2 && (reference || pending_query)))
+        continue;
       const auto *definition =
           session.metadata().find_property(state.class_name, property.first);
       if (definition && (definition->semantic == "profile event stream" ||
@@ -720,7 +737,7 @@ CroppedStream crop_events(const Session &session, std::size_t begin,
       }
       const auto prop = handle(stream, property.first);
       const auto type = wire_name(stream, value.incoming_type);
-      const auto &bytes = value.raw_bytes();
+      const auto &bytes = coordinates::native_bytes(value);
       if (bytes.size() <= 1024u * 1024u)
         emit(stream, SetPropertyValue{
                          state.id, prop, type,
@@ -742,10 +759,13 @@ CroppedStream crop_events(const Session &session, std::size_t begin,
         emit(stream, EndSetPropertyValue{});
       }
     }
-    emit(bootstrap_stream, SetPickable{state.id, state.pickable});
-    emit(bootstrap_stream, SetIsTopLevel{state.id, state.top_level});
-    if (state.color)
-      emit(bootstrap_stream, SetColor{state.id, *state.color});
+    if (pass == 2) {
+      emit(bootstrap_stream, SetPickable{state.id, state.pickable});
+      emit(bootstrap_stream, SetIsTopLevel{state.id, state.top_level});
+      if (state.color)
+        emit(bootstrap_stream, SetColor{state.id, *state.color});
+    }
+  }
   }
   auto existing_handle = [&](std::uint64_t stream, const std::string &text) {
     if (text.empty())
@@ -772,8 +792,6 @@ CroppedStream crop_events(const Session &session, std::size_t begin,
   for (const auto &camera : snapshot.cameras)
     emit(bootstrap_stream, SetCamera{camera.first, camera.second.position,
                                      camera.second.up, camera.second.target});
-  for (const auto &shift : snapshot.origin_shifts)
-    emit(bootstrap_stream, OriginShift{shift.first, shift.second});
   for (const auto &section : open_sections)
     crop.events.push_back(section.second);
   crop.bootstrap_event_count = crop.events.size();
