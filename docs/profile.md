@@ -199,3 +199,14 @@ zone-pointer reuse with generation preservation, corruption/GPU/limit rejection,
 and writer/crop/reload continuation. Four real SDK packet-boundary cuts include
 the open start on one side of a flush and its stop on the other; their resulting
 intervals match the original ticks, calibrated duration and source identity.
+
+## PhysX 3.4 versus obsolete CUDA payloads
+
+The supplied SDK's `PxShared/src/pvd/src/PxProfileEvents.h`, `EventTypes`, marks
+`CUDAProfileBuffer` as an obsolete placeholder for skipping data from SDKs
+before 3.4. The native 3.4 profile event families are full/relative CPU starts
+and stops plus values; all are decoded and SDK-oracle validated here. Encountering
+the older CUDA placeholder preserves its bounded metadata and emits an explicit
+unsupported diagnostic. It is not presented as CPU time or silently accepted by
+crop bootstrap. Decoding those older GPU payloads belongs to the older-SDK
+compatibility work deferred by the selected scope.
