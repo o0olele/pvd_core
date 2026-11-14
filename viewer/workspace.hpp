@@ -9,7 +9,7 @@
 namespace pvd::viewer {
 using SlotId = std::uint64_t;
 using BookmarkId = std::uint64_t;
-inline constexpr std::uint32_t workspace_format_version = 4;
+inline constexpr std::uint32_t workspace_format_version = 5;
 enum class SlotLock { loading, live, exporting };
 struct SourceIdentity {
   std::uint32_t algorithm =
@@ -68,6 +68,7 @@ struct WorkspaceSettings {
   std::vector<CaptureSettings> captures;
   std::vector<std::string> recent_files;
   ViewPreferences default_preferences;
+  ViewOptions default_view_options;
 };
 struct WorkspaceLimits {
   std::size_t max_slots = 32, max_captures = 256, max_recent_files = 32;
@@ -176,6 +177,8 @@ public:
   // Applies only to future empty/source slots without a verified saved view.
   // Invalid values throw before changing defaults or any existing slot.
   void set_default_preferences(ViewPreferences);
+  const ViewOptions &default_view_options() const noexcept;
+  void set_default_view_options(ViewOptions);
   void remember_recent(std::string utf8_path);
   BookmarkId add_bookmark(SlotId, std::string name, bool include_camera = true);
   bool remove_bookmark(SlotId, BookmarkId);

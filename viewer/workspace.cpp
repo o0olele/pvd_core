@@ -136,6 +136,12 @@ void view_options(const ViewOptions &v) {
   };
   require(valid_scope(v.sleeping_scope) && valid_scope(v.trigger_scope),
           "workspace category scope is unsupported");
+  require(valid_geometry_scale(v.geometry_scale),
+          "workspace geometry display scale is invalid");
+  for (auto scale : {v.joint_frame_scale, v.joint_limit_scale})
+    require(std::isfinite(scale) && scale >= 0 && scale <= 10000,
+            "workspace joint display scale is invalid");
+  require(valid_color_palette(v.palette), "workspace palette is invalid");
 }
 void view(const StoredView &v) {
   sample(v.sample_point);
@@ -197,6 +203,7 @@ void valid(const WorkspaceSettings &s, const WorkspaceLimits &l) {
           "unsupported workspace version");
   require(valid_view_preferences(s.default_preferences),
           "workspace default preferences are invalid");
+  view_options(s.default_view_options);
   require(s.slots.size() <= l.max_slots, "workspace slot count exceeds budget");
   require(s.captures.size() <= l.max_captures,
           "workspace capture-state count exceeds budget");
@@ -340,6 +347,8 @@ struct Encoder {
     f(v.rendering.coordinate_frame_scale);
     f(v.rendering.transparent_opacity);
     u(v.inspection.integer_hex, 1);
+    u(static_cast<unsigned>(v.rendering.face_culling), 1);
+    u(v.rendering.show_orbit_target, 1);
   }
   void clip_binding(const clips::Binding &b) {
     u(b.source.algorithm, 4);
@@ -366,6 +375,28 @@ struct Encoder {
       u(clip.frames.last, 8);
     }
   }
+  void options(const ViewOptions &v) {
+    u(v.show_static, 1);
+    u(v.show_dynamic, 1);
+    u(v.show_kinematic, 1);
+    u(v.show_sleeping, 1);
+    u(v.show_trigger, 1);
+    u(static_cast<unsigned>(v.color_mode), 1);
+    u(v.uniform_color.r, 1);
+    u(v.uniform_color.g, 1);
+    u(v.uniform_color.b, 1);
+    u(v.uniform_color.a, 1);
+    u(static_cast<unsigned>(v.sleeping_scope), 1);
+    u(static_cast<unsigned>(v.trigger_scope), 1);
+    f(v.geometry_scale);
+    u(v.show_planes, 1);
+    f(v.joint_frame_scale);
+    f(v.joint_limit_scale);
+    for (auto role : color_palette_roles)
+      for (auto component : palette_color(v.palette, role))
+        f(component);
+    u(v.palette.profile_by_event, 1);
+  }
   void view(const StoredView &v) {
     u(v.scene_id.has_value(), 1);
     if (v.scene_id)
@@ -373,18 +404,7 @@ struct Encoder {
     u(static_cast<unsigned>(v.sample_point), 1);
     u(v.frame_index, 8);
     camera(v.camera);
-    u(v.options.show_static, 1);
-    u(v.options.show_dynamic, 1);
-    u(v.options.show_kinematic, 1);
-    u(v.options.show_sleeping, 1);
-    u(v.options.show_trigger, 1);
-    u(static_cast<unsigned>(v.options.color_mode), 1);
-    u(v.options.uniform_color.r, 1);
-    u(v.options.uniform_color.g, 1);
-    u(v.options.uniform_color.b, 1);
-    u(v.options.uniform_color.a, 1);
-    u(static_cast<unsigned>(v.options.sleeping_scope), 1);
-    u(static_cast<unsigned>(v.options.trigger_scope), 1);
+    options(v.options);
     preferences(v.preferences);
   }
 };
@@ -530,6 +550,37 @@ struct Decoder {
       v.rendering.transparent_opacity = f();
       v.inspection.integer_hex = boolean();
     }
+    if (version >= 5) {
+      v.rendering.face_culling = static_cast<FaceCulling>(u(1));
+      v.rendering.show_orbit_target = boolean();
+    }
+    return v;
+  }
+  ViewOptions options() {
+    ViewOptions v;
+    v.show_static = boolean();
+    v.show_dynamic = boolean();
+    v.show_kinematic = boolean();
+    v.show_sleeping = boolean();
+    v.show_trigger = boolean();
+    v.color_mode = static_cast<ColorMode>(u(1));
+    v.uniform_color = {
+        static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1)),
+        static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1))};
+    if (version >= 4) {
+      v.sleeping_scope = static_cast<VisualizationScope>(u(1));
+      v.trigger_scope = static_cast<VisualizationScope>(u(1));
+    }
+    if (version >= 5) {
+      v.geometry_scale = f();
+      v.show_planes = boolean();
+      v.joint_frame_scale = f();
+      v.joint_limit_scale = f();
+      for (auto role : color_palette_roles)
+        for (auto &component : palette_color(v.palette, role))
+          component = f();
+      v.palette.profile_by_event = boolean();
+    }
     return v;
   }
   StoredView view() {
@@ -539,19 +590,7 @@ struct Decoder {
     v.sample_point = static_cast<SamplePoint>(u(1));
     v.frame_index = u(8);
     v.camera = camera();
-    v.options.show_static = boolean();
-    v.options.show_dynamic = boolean();
-    v.options.show_kinematic = boolean();
-    v.options.show_sleeping = boolean();
-    v.options.show_trigger = boolean();
-    v.options.color_mode = static_cast<ColorMode>(u(1));
-    v.options.uniform_color = {
-        static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1)),
-        static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1))};
-    if (version >= 4) {
-      v.options.sleeping_scope = static_cast<VisualizationScope>(u(1));
-      v.options.trigger_scope = static_cast<VisualizationScope>(u(1));
-    }
+    v.options = options();
     if (version >= 2)
       v.preferences = preferences();
     return v;
@@ -880,6 +919,7 @@ Bytes encode_workspace(const WorkspaceSettings &s,
   for (const auto &r : s.recent_files)
     p.str(r);
   p.preferences(s.default_preferences);
+  p.options(s.default_view_options);
   Encoder out{{}, limits.max_file_bytes};
   out.bytes.insert(out.bytes.end(), std::begin(magic), std::end(magic));
   out.u(s.version, 4);
@@ -965,6 +1005,8 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
     s.recent_files.push_back(p.str());
   if (version >= 2)
     s.default_preferences = p.preferences();
+  if (version >= 5)
+    s.default_view_options = p.options();
   require(p.at == bytes.size(), "workspace file contains trailing payload");
   valid(s, limits);
   return s;
@@ -1186,6 +1228,7 @@ struct Workspace::Impl {
   std::map<std::string, std::shared_ptr<CaptureData>> captures;
   std::vector<std::string> recent;
   ViewPreferences default_preferences;
+  ViewOptions default_view_options;
   std::optional<SlotId> active;
   SlotId next_slot = 1;
   BookmarkId next_bookmark = 1;
@@ -1317,6 +1360,7 @@ SlotId Workspace::add(std::unique_ptr<Document> document, std::string path,
   p->path = path;
   p->document = std::move(document);
   p->preferences = impl_->default_preferences;
+  p->document->set_view_options(impl_->default_view_options);
   if (!path.empty() && p->document->loaded()) {
     if (precomputed) {
       require(precomputed->event_count == p->document->session()->event_count(),
@@ -1432,6 +1476,8 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
       warning = "Saved source identity/view is unverified or changed; saved "
                 "view was not applied.";
   }
+  if (!ready)
+    incoming->set_view_options(impl_->default_view_options);
   if (actual && std::any_of(data->bookmarks.begin(), data->bookmarks.end(),
                             [&](const auto &b) {
                               return !b.identity || *b.identity != *actual;
@@ -1653,6 +1699,13 @@ void Workspace::set_default_preferences(ViewPreferences value) {
           "workspace default preferences are invalid");
   impl_->default_preferences = value;
 }
+const ViewOptions &Workspace::default_view_options() const noexcept {
+  return impl_->default_view_options;
+}
+void Workspace::set_default_view_options(ViewOptions value) {
+  view_options(value);
+  impl_->default_view_options = std::move(value);
+}
 
 void Workspace::remember_recent(std::string path) {
   utf8(path, impl_->limits.max_string_bytes, true);
@@ -1834,6 +1887,7 @@ bool Workspace::discard_pending_clip_states(SlotId id) {
 WorkspaceSettings Workspace::settings() const {
   WorkspaceSettings result;
   result.default_preferences = impl_->default_preferences;
+  result.default_view_options = impl_->default_view_options;
   result.recent_files = impl_->recent;
   std::map<std::string, CaptureSettings> captures;
   for (const auto &c : impl_->captures)
@@ -1872,6 +1926,7 @@ WorkspaceRestore Workspace::restore(const WorkspaceSettings &settings) {
   valid(settings, impl_->limits);
   auto next = std::make_unique<Impl>(impl_->model, impl_->limits);
   next->default_preferences = settings.default_preferences;
+  next->default_view_options = settings.default_view_options;
   WorkspaceRestore result;
   for (const auto &c : settings.captures) {
     auto data = std::make_shared<CaptureData>();

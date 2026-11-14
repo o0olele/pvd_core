@@ -68,10 +68,38 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
       "Up controls the orbit/grid plane. Left-handed display mirrors the view "
       "horizontally; picking and camera controls follow it. Source physics "
       "coordinates, world poses and exports stay unchanged.");
+  auto view = doc.view_options();
+  bool view_changed = false;
+  ImGui::SetNextItemWidth(ui_pixels(180));
+  view_changed |= ImGui::DragFloat("Geometry display scale", &view.geometry_scale,
+      .01f, .01f, 10000.f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
+  view_changed |= ImGui::Checkbox("Show planes", &view.show_planes);
+  ImGui::SetNextItemWidth(ui_pixels(180));
+  int culling = static_cast<int>(options.face_culling);
+  if (ImGui::Combo("Face culling", &culling, "None\0Front\0Back\0"))
+    options.face_culling = static_cast<FaceCulling>(culling);
+  ImGui::Checkbox("Orbit target marker", &options.show_orbit_target);
+  ImGui::TextWrapped("Geometry scale changes each shape about its local origin; "
+      "it does not move its recorded pose. Picking, fit, transparency sorting "
+      "and display bounds follow the scaled mesh. Plane visibility affects "
+      "native shape geometry. Contacts, debug data, deformables and exports "
+      "retain source coordinates. Culling applies to shape faces, including "
+      "wireframe and picking, in both display hands.");
   ImGui::Checkbox("Joint frames", &options.show_joint_frames);
   ImGui::SameLine();
   ImGui::Checkbox("Joint limits", &options.show_joint_limits);
-  ImGui::Checkbox("Tight geometry bounds", &options.show_bounds);
+  ImGui::SetNextItemWidth(ui_pixels(180));
+  view_changed |= ImGui::DragFloat("Joint frame scale", &view.joint_frame_scale,
+      .01f, 0, 10000.f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
+  ImGui::SetNextItemWidth(ui_pixels(180));
+  view_changed |= ImGui::DragFloat("Joint limit scale", &view.joint_limit_scale,
+      .01f, 0, 10000.f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
+  ImGui::TextWrapped("Joint scales rebuild the recorded typed display primitives "
+      "about their own joint frames. Zero disables that derived family; it "
+      "does not rescale captured body poses or joint parameters.");
+  if (view_changed)
+    action(state, [&] { doc.set_view_options(view); });
+  ImGui::Checkbox("Display geometry bounds", &options.show_bounds);
   scope("Bounds scope", options.bounds_scope);
   ImGui::Checkbox("Linear velocity", &options.show_linear_velocity);
   ImGui::SameLine();
@@ -83,7 +111,8 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
                      .01f, 0.f, 1e6f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
   }
   ImGui::TextWrapped(
-      "Bounds use tight captured geometry, not broadphase inflation. "
+      "Display bounds follow geometry scale, not broadphase inflation; the "
+      "Inspector retains physical source bounds. "
       "Velocity arrows use recorded world-space values at the actor pose.");
   scope("Scene query scope", options.scene_query_scope);
   ImGui::TextWrapped(

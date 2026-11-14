@@ -4,6 +4,7 @@
 #include "workspace_v1_fixture.hpp"
 #include "workspace_v2_fixture.hpp"
 #include "workspace_v3_fixture.hpp"
+#include "workspace_v4_fixture.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -153,7 +154,7 @@ bool preferences_equal(const ViewPreferences &a, const ViewPreferences &b) {
         r.bounds_scope, r.velocity_scope, r.scene_query_scope,
         r.coordinate_frame_scope, r.transparent_scope, r.show_actor_frames,
         r.show_shape_frames, r.show_mass_frames, r.coordinate_frame_scale,
-        r.transparent_opacity);
+        r.transparent_opacity, r.face_culling, r.show_orbit_target);
   };
   return rendering(a.rendering) == rendering(b.rendering) &&
          std::tie(a.inspection.number_format, a.inspection.float_precision,
@@ -167,6 +168,19 @@ bool preferences_equal(const ViewPreferences &a, const ViewPreferences &b) {
                       b.show_debug_text,
                       b.navigation.mode, b.navigation.movement_speed,
                       b.navigation.look_sensitivity);
+}
+bool view_options_equal(const ViewOptions &a,const ViewOptions &b) {
+  if(std::tie(a.show_static,a.show_dynamic,a.show_kinematic,a.show_sleeping,a.show_trigger,
+      a.color_mode,a.uniform_color.r,a.uniform_color.g,a.uniform_color.b,a.uniform_color.a,
+      a.sleeping_scope,a.trigger_scope,a.geometry_scale,a.show_planes,a.joint_frame_scale,
+      a.joint_limit_scale,a.palette.profile_by_event)!=
+     std::tie(b.show_static,b.show_dynamic,b.show_kinematic,b.show_sleeping,b.show_trigger,
+      b.color_mode,b.uniform_color.r,b.uniform_color.g,b.uniform_color.b,b.uniform_color.a,
+      b.sleeping_scope,b.trigger_scope,b.geometry_scale,b.show_planes,b.joint_frame_scale,
+      b.joint_limit_scale,b.palette.profile_by_event))return false;
+  for(auto role:color_palette_roles)
+    if(palette_color(a.palette,role)!=palette_color(b.palette,role))return false;
+  return true;
 }
 ViewPreferences distinct_preferences(bool second = false) {
   ViewPreferences v;
@@ -202,6 +216,8 @@ ViewPreferences distinct_preferences(bool second = false) {
   r.show_shape_frames = second;
   r.coordinate_frame_scale = second ? 1000000.f : std::nextafter(.5f, 1.f);
   r.transparent_opacity = second ? 1.f : std::nextafter(.25f, 1.f);
+  r.face_culling = second ? FaceCulling::front : FaceCulling::back;
+  r.show_orbit_target = !second;
   v.inspection.number_format =
       second ? NumberFormat::fixed : NumberFormat::scientific;
   v.inspection.float_precision = second ? 17 : 3;
@@ -570,6 +586,12 @@ WorkspaceSettings minimal() {
   options.uniform_color = {1, 2, 3, 4};
   options.sleeping_scope = VisualizationScope::selected;
   options.trigger_scope = VisualizationScope::unselected;
+  options.geometry_scale = 2;
+  options.show_planes = false;
+  options.joint_frame_scale = .25f;
+  options.joint_limit_scale = 3;
+  options.palette.active = {.1f,.2f,.3f,.4f};
+  options.palette.profile_by_event = false;
   s->document().set_view_options(options);
   w.add_bookmark(id, u8"\u6d4b\u8bd5, \"quoted\"", true);
   return w.settings();
@@ -628,6 +650,7 @@ void invalid_preferences_are_atomic() {
   bad([](auto &v) { v.inspection.float_precision = 0; });
   bad([](auto &v) { v.inspection.double_precision = 18; });
   bad([](auto &v) { v.inspection.array_page_size = 33; });
+  bad([](auto &v) { v.rendering.face_culling = static_cast<FaceCulling>(99); });
   bad([](auto &v) {
     v.inspection.array_page_size = std::numeric_limits<std::size_t>::max();
   });
@@ -689,9 +712,10 @@ void invalid_preferences_are_atomic() {
           "preferences bypassed encode byte budget");
 
   // Hostile but correctly checksummed v4 defaults. The v2/v3 prefix is intact;
-  // v4 appends 16 visualization bytes and one hex boolean to the v3 record.
+  // v5 preferences retain the v4 96-byte prefix, then culling and marker.
+  // A complete 186-byte default ViewOptions value follows the preferences.
   const auto empty = encode_workspace(WorkspaceSettings{});
-  const auto base = empty.size() - 96;
+  const auto base = empty.size() - 284;
   auto wire = empty;
   wire[base + 16] = 99;
   fix_crc(wire);
@@ -734,6 +758,14 @@ void invalid_preferences_are_atomic() {
   fix_crc(wire);
   rejects([&] { decode_workspace(wire); },
           "wire integer hexadecimal boolean accepted 2");
+  for (auto offset : {std::size_t(96),std::size_t(97),std::size_t(114),std::size_t(283)}) {
+    wire=empty;wire[base+offset]=99;fix_crc(wire);
+    rejects([&] { decode_workspace(wire); }, "invalid v5 cull/marker/plane/palette flag accepted");
+  }
+  for (auto offset : {std::size_t(110),std::size_t(115),std::size_t(119),std::size_t(123)}) {
+    wire=empty;wire[base+offset+2]=0xC0;wire[base+offset+3]=0x7F;fix_crc(wire);
+    rejects([&] { decode_workspace(wire); }, "nonfinite v5 scale/palette accepted");
+  }
   wire = empty;
   wire[base + 89] = 0xC0;
   wire[base + 90] = 0x7F;
@@ -781,6 +813,12 @@ void codec_and_corruption() {
                 VisualizationScope::selected &&
             decoded.slots[0].view.options.trigger_scope ==
                 VisualizationScope::unselected &&
+            decoded.slots[0].view.options.geometry_scale == 2 &&
+            !decoded.slots[0].view.options.show_planes &&
+            decoded.slots[0].view.options.joint_frame_scale == .25f &&
+            decoded.slots[0].view.options.joint_limit_scale == 3 &&
+            decoded.slots[0].view.options.palette.active[3] == .4f &&
+            !decoded.slots[0].view.options.palette.profile_by_event &&
             decoded.slots[0].view.options.uniform_color.a == 4,
         "display options lost");
   check(encode_workspace(decoded) == bytes,
@@ -947,7 +985,7 @@ void clip_archives_and_pending() {
         "command did not synchronize duplicate-tab cached clip values");
   auto bytes = encode_workspace(workspace.settings());
   auto decoded = decode_workspace(bytes);
-  check(decoded.version == 4 && decoded.captures[0].clip_states.size() == 1 &&
+  check(decoded.version == workspace_format_version && decoded.captures[0].clip_states.size() == 1 &&
             decoded.captures[0].clip_states[0].clips.size() == 2 &&
             encode_workspace(decoded) == bytes,
         "v4 codec did not exactly preserve named catalog values");
@@ -1203,13 +1241,88 @@ void clip_placeholder_limits_and_corruption() {
   }
   std::cout << "Workspace pending/clip budgets/corruption passed\n";
 }
+void global_display_defaults() {
+  Fixture f;
+  Workspace workspace;
+  ViewOptions first;
+  first.geometry_scale=2;first.joint_frame_scale=.5f;first.joint_limit_scale=3;
+  first.show_planes=false;first.palette.active={.1f,.2f,.3f,.4f};
+  first.palette.profile_by_event=false;
+  workspace.set_default_view_options(first);
+  const auto saved=workspace.add(f.document(),"display-defaults.pxd2");
+  check(view_options_equal(workspace.find(saved)->document().view_options(),first),
+        "new source did not inherit complete global display defaults");
+  ViewOptions second;
+  second.geometry_scale=.25f;second.joint_frame_scale=4;
+  second.palette.cloth={.8f,.7f,.6f,.5f};
+  workspace.set_default_view_options(second);
+  const auto empty=workspace.create_empty();
+  check(view_options_equal(workspace.find(empty)->document().view_options(),second) &&
+        view_options_equal(workspace.find(saved)->document().view_options(),first),
+        "global display changes retroactively modified an existing source");
+  workspace.find(empty)->document().begin_live(f.header);
+  workspace.find(empty)->document().append_live(f.events);
+  check(view_options_equal(workspace.find(empty)->document().view_options(),second) &&
+        workspace.find(empty)->document().frame()->draws[0].geometry_scale==.25f,
+        "live initialization lost inherited global display defaults");
+  workspace.find(empty)->document().finish_live();
+  workspace.close(empty);workspace.close(saved);
+  const auto reopened=workspace.add(f.document(),"display-defaults.pxd2");
+  check(view_options_equal(workspace.find(reopened)->document().view_options(),first),
+        "identity-matched archived display did not override global defaults");
+  Fixture changed(true);auto incoming=changed.document();
+  check(workspace.replace(reopened,incoming,"display-defaults.pxd2") &&
+        view_options_equal(workspace.find(reopened)->document().view_options(),second),
+        "changed source received a foreign palette/geometry view");
+  const auto state=workspace.settings();const auto wire=encode_workspace(state);
+  const auto decoded=decode_workspace(wire);
+  check(view_options_equal(decoded.default_view_options,second) &&
+        view_options_equal(decoded.slots[0].view.options,second),
+        "v5 defaults and per-source display values did not roundtrip");
+  Workspace restored;restored.restore(decoded);
+  check(view_options_equal(restored.default_view_options(),second) &&
+        view_options_equal(restored.find(reopened)->document().view_options(),second),
+        "v5 placeholder/default display restoration lost values");
+  for(unsigned variant=0;variant<4;++variant) {
+    auto bad=second;
+    if(variant==0)bad.geometry_scale=.001f;
+    if(variant==1)bad.joint_limit_scale=std::numeric_limits<float>::infinity();
+    if(variant==2)bad.palette.particle_fluid[3]=1.1f;
+    if(variant==3)bad.palette.profile_bar[0]=std::numeric_limits<float>::quiet_NaN();
+    rejects([&]{workspace.set_default_view_options(bad);},"invalid display default accepted");
+    auto corrupt=state;corrupt.default_view_options=bad;
+    rejects([&]{encode_workspace(corrupt);},"invalid default display encoded");
+    rejects([&]{workspace.restore(corrupt);},"invalid default display replaced workspace");
+    corrupt=state;corrupt.slots[0].view.options=bad;
+    rejects([&]{encode_workspace(corrupt);},"invalid source display encoded");
+    check(view_options_equal(workspace.default_view_options(),second) &&
+          encode_workspace(workspace.settings())==wire,
+          "invalid display settings changed existing workspace");
+  }
+  std::cout<<"Workspace v5 display defaults/archives/live/palette validation passed\n";
+}
 } // namespace
 int main() {
   try {
+    const Bytes v4(workspace_v4_fixture.begin(),workspace_v4_fixture.end());
+    const auto restored_v4=decode_workspace(v4);
+    check(restored_v4.version==workspace_format_version &&
+          restored_v4.slots.size()==1 &&
+          restored_v4.captures[0].clip_states[0].clips[0].name=="Version 4 sealed clip" &&
+          restored_v4.default_preferences.inspection.integer_hex &&
+          restored_v4.slots[0].view.options.sleeping_scope==VisualizationScope::selected &&
+          restored_v4.slots[0].view.options.trigger_scope==VisualizationScope::unselected &&
+          restored_v4.slots[0].view.options.geometry_scale==1 &&
+          restored_v4.slots[0].view.options.show_planes &&
+          restored_v4.slots[0].view.preferences.rendering.face_culling==FaceCulling::none &&
+          !restored_v4.slots[0].view.preferences.rendering.show_orbit_target &&
+          view_options_equal(restored_v4.default_view_options,ViewOptions{}) &&
+          restored_v4.slots[0].view.options.palette.active==ColorPalette{}.active,
+          "actual v4 writer fixture lost clips/hex/scopes or fabricated v5 preferences");
     const Bytes v3(workspace_v3_fixture.begin(), workspace_v3_fixture.end());
     const auto restored_v3 = decode_workspace(v3);
     check(
-        restored_v3.version == 4 && restored_v3.slots.size() == 1 &&
+        restored_v3.version == workspace_format_version && restored_v3.slots.size() == 1 &&
             restored_v3.slots[0].view.preferences.navigation.mode ==
                 CameraNavigationMode::first_person &&
             restored_v3.slots[0].view.preferences.navigation.movement_speed ==
@@ -1282,6 +1395,7 @@ int main() {
     clip_archives_and_pending();
     clip_live_binding_and_merge();
     clip_pending_shared_source_edits();
+    global_display_defaults();
     clip_placeholder_limits_and_corruption();
     std::cout << "workspace tests passed\n";
     return 0;

@@ -424,8 +424,12 @@ public:
         continue;
       }
       auto now = std::chrono::steady_clock::now();
-      document().advance(
-          std::min(0.1, std::chrono::duration<double>(now - previous).count()));
+      try {
+        document().advance(std::min(0.1, std::chrono::duration<double>(now - previous).count()));
+      }catch(const std::exception &e) {
+        if(smoke_mode())throw;
+        document().set_playing(false);error_=e.what();
+      }
       previous = now;
       if (smoke_mode() &&
           std::chrono::duration<double>(now - started).count() > 30)
@@ -505,6 +509,7 @@ private:
     ClipPanelState clips;
     std::uint64_t clips_revision = std::numeric_limits<std::uint64_t>::max();
     bool clips_resync = false;
+    bool view_popup_requested = false;
     DisplayPanelState display;
     SceneQueryPanelState scene_queries;
     ExportPanelState export_panel;
@@ -638,7 +643,20 @@ private:
     preferences.navigation = cached->second->navigation;
     if (!valid_view_preferences(preferences)) return;
     slot->preferences() = preferences;
-    if (workspace_.active_id() == id) workspace_.set_default_preferences(preferences);
+    if (workspace_.active_id() == id) {
+      workspace_.set_default_preferences(preferences);
+      workspace_.set_default_view_options(slot->document().view_options());
+    }
+  }
+  void restore_default_preferences() {
+    auto &state=ui();
+    document().set_view_options(ViewOptions{});
+    state.render_options={};state.panels.inspector_preferences={};
+    state.navigation={};state.show_debug_text=true;
+    const OrbitCamera defaults;
+    set_camera_projection(camera(),defaults.near_plane,defaults.far_plane,defaults.vertical_fov);
+    store_preferences(active_slot().id());
+    notice_="Built-in display, navigation and property preferences restored.";
   }
   SlotUiState &ui_for(SlotId id) {
     auto &value = slot_ui_[id];
@@ -1122,7 +1140,7 @@ private:
     ImGui::SetNextWindowSize({ui_pixels(560), 0}, ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("Help and shortcuts", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
-      ImGui::TextUnformatted("PVD Studio / PhysX 3.4 raw captures");
+      ImGui::TextUnformatted("PVD Studio " PVD_VIEWER_VERSION " / PhysX 3.4 raw captures");
       ImGui::TextWrapped(
           "Ctrl+O opens a capture in a tab. Ctrl+S saves or crops the current "
           "tab. Ctrl+B bookmarks the current frame and camera.");
@@ -1132,6 +1150,7 @@ private:
           "editing or using a popup.");
       ImGui::TextWrapped("Clips: Ctrl+Alt+Y splits at the native playhead; "
                          "Ctrl+Alt+S trims left; Ctrl+Alt+E trims right.");
+      ImGui::TextWrapped("Ctrl+Shift+S opens view preferences; Ctrl+Shift+R restores built-in preferences.");
       ImGui::TextWrapped(
           "RMB look, MMB pan, wheel zoom; hover the viewport for WASD/QE, Shift 2x. "
           "View offers orbit/first-person controllers, speed, look-at and clipping. Click picks a visible shape. View "
@@ -1380,9 +1399,17 @@ private:
           atlas.AddFontFromFileTTF(segoe.string().c_str(),pixels,&font):nullptr;
       const std::filesystem::path cjk=L"C:/Windows/Fonts/msyh.ttc";
       if(primary&&std::filesystem::exists(cjk)) {
+        // The bundled common-character subset omits the debugging term 帧.
+        // Keep this bounded fallback range alive across all atlas rebuilds.
+        static ImVector<ImWchar> ranges;
+        if(ranges.empty()) {
+          ImFontGlyphRangesBuilder builder;
+          builder.AddRanges(atlas.GetGlyphRangesChineseSimplifiedCommon());
+          builder.AddText(u8"帧");builder.BuildRanges(&ranges);
+        }
         ImFontConfig merge;merge.MergeMode=true;merge.PixelSnapH=true;
         atlas.AddFontFromFileTTF(cjk.string().c_str(),pixels,&merge,
-            atlas.GetGlyphRangesChineseSimplifiedCommon());
+            ranges.Data);
       }
       return primary;
     });
@@ -1841,6 +1868,14 @@ private:
           static_cast<unsigned long long>(status.discarded_tail_bytes));
     if (!status.errors.empty())
       ImGui::TextWrapped("%s", status.errors.front().c_str());
+    if(live_slot_id_)if(const auto *slot=workspace_.find(*live_slot_id_)) {
+      const auto frame=slot->document().frame();
+      if(!slot->document().follow_live()&&frame&&!frame->errors.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text,{1,.72f,.38f,1});
+        ImGui::TextWrapped("Paused view: %s",frame->errors.back().c_str());
+        ImGui::PopStyleColor();
+      }
+    }
     ImGui::Separator();
   }
   void live_smoke_step() {
@@ -1955,6 +1990,13 @@ private:
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
                                         ImGuiPopupFlags_AnyPopupLevel))
       return;
+    if(io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_R,false)) {
+      try{restore_default_preferences();}catch(const std::exception &e){error_=e.what();}
+      return;
+    }
+    if(io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_S,false)) {
+      ui().page=0;ui().view_popup_requested=true;return;
+    }
     if(io.KeyCtrl&&io.KeyAlt&&document().loaded()) {
       std::optional<ClipEdit> edit;
       if(ImGui::IsKeyPressed(ImGuiKey_Y,false))edit=ClipEdit::split;
@@ -2335,6 +2377,10 @@ private:
     }
     require(ui().clips.visible_rows==2&&ui().clips.error.empty(),
             "Restored clip list did not draw both rows");
+    if(std::filesystem::exists(L"C:/Windows/Fonts/msyh.ttc")&&
+        std::filesystem::exists(L"C:/Windows/Fonts/segoeui.ttf"))
+      require(ImGui::GetFont()->FindGlyphNoFallback(0x5e27)!=nullptr,
+              "The native-frame glyph is missing from the clip-name font");
     if(!options_.screenshot.empty())screenshot();
     if(!options_.report.empty()) {
       std::ofstream report(options_.report);
@@ -2421,9 +2467,15 @@ private:
       auto view = document().view_options();
       view.color_mode = ColorMode::uniform;
       view.uniform_color = {42, 177, 160, 255};
+      view.geometry_scale=1.25f;view.show_planes=false;
+      view.joint_frame_scale=.75f;view.joint_limit_scale=1.5f;
+      view.palette.active={.17f,.31f,.57f,.9f};
+      view.palette.profile_by_event=false;view.palette.profile_bar={.73f,.19f,.27f,1};
       document().set_view_options(view);
       ui().render_options.antialiasing = Antialiasing::msaa4x;
       ui().render_options.background_color = {.12f, .08f, .17f, 1};
+      ui().render_options.face_culling=FaceCulling::back;
+      ui().render_options.show_orbit_target=true;
       ui().panels.inspector_preferences.number_format = NumberFormat::scientific;
       ui().panels.inspector_preferences.array_page_size = 512;
       store_preferences(smoke_slot_b_);
@@ -2492,6 +2544,24 @@ private:
                   ui_for(smoke_slot_b_).panels.inspector_preferences.number_format == NumberFormat::scientific &&
                   ui_for(smoke_slot_b_).panels.inspector_preferences.array_page_size == 512,
               "Workspace did not restore display and inspector preferences");
+      const auto restored=b->document().view_options();
+      require(restored.geometry_scale==1.25f&&!restored.show_planes&&
+              restored.joint_frame_scale==.75f&&restored.joint_limit_scale==1.5f&&
+              restored.palette.active==PaletteRgba{.17f,.31f,.57f,.9f}&&
+              !restored.palette.profile_by_event&&restored.palette.profile_bar==PaletteRgba{.73f,.19f,.27f,1}&&
+              ui_for(smoke_slot_b_).render_options.face_culling==FaceCulling::back&&
+              ui_for(smoke_slot_b_).render_options.show_orbit_target,
+              "Workspace did not restore the visual geometry, palette or raster preferences");
+      const auto *reset_source=b->document().session();
+      const auto reset_identity=workspace_source_identity(*reset_source);
+      restore_default_preferences();
+      require(document().session()==reset_source&&document().frame_index()==4&&
+              workspace_source_identity(*reset_source)==reset_identity&&camera_equal(camera(),smoke_camera_b_)&&
+              document().view_options().geometry_scale==1&&document().view_options().show_planes&&
+              document().view_options().palette.active==ColorPalette{}.active&&
+              ui().render_options.face_culling==FaceCulling::none&&!ui().render_options.show_orbit_target&&
+              ui().panels.inspector_preferences.number_format==NumberFormat::general,
+              "Restoring built-in preferences changed source/playhead/pose or failed to reset display settings");
       require(a->bookmark_verified(smoke_bookmark_),
               "Restored bookmark source identity was not verified");
       workspace_actions().jump_bookmark(smoke_slot_a_, smoke_bookmark_);
@@ -2513,7 +2583,7 @@ private:
         std::ofstream report(options_.report);
         report << "{\"passed\":true,\"stable_loading_target\":true,"
                   "\"independent_state\":true,\"locks_protected\":true,"
-                  "\"inactive_export_verified\":true,\"persistence\":true,"
+                  "\"inactive_export_verified\":true,\"persistence\":true,\"preferences_reset\":true,"
                   "\"identity_verified\":true,\"curves_retained\":"
                << (smoke_workspace_curves_ ? "true" : "false")
                << ",\"auto_settings_io\":"
@@ -2801,7 +2871,11 @@ private:
   }
   void draw() {
     const UiPixelScope pixel_scope(ui_scale_->current().screen_scale);
-    shortcuts();
+    try{shortcuts();}
+    catch(const std::exception &e) {
+      if(smoke_mode())throw;
+      document().set_playing(false);error_=e.what();
+    }
     const auto *main = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(main->Pos);
     ImGui::SetNextWindowSize(main->Size);
@@ -3087,11 +3161,20 @@ private:
     ImGui::SameLine();
     if (ImGui::SmallButton("View..."))
       ImGui::OpenPopup("Scene view tools");
+    if(ui().view_popup_requested) {
+      ImGui::OpenPopup("Scene view tools");ui().view_popup_requested=false;
+    }
     ImGui::SetNextWindowSize({ui_pixels(520), 0}, ImGuiCond_Appearing);
     ImGui::SetNextWindowSizeConstraints(
         {ui_pixels(380), ui_pixels(180)},
         {ui_pixels(620), std::max(ui_pixels(250), ImGui::GetMainViewport()->Size.y - ui_pixels(80))});
     if (ImGui::BeginPopup("Scene view tools")) {
+      if(ImGui::Button("Restore built-in preferences")) {
+        try{restore_default_preferences();}
+        catch(const std::exception &e){ui().display.error=e.what();}
+      }
+      ImGui::TextWrapped("Changes are saved as defaults for new captures. Matching saved source views take precedence.");
+      ImGui::Separator();
       ui().scene_tools.viewport_aspect =
           viewport_size_.x / std::max(1.f, viewport_size_.y);
       drawSceneTools(document(), camera(), ui().scene_tools);

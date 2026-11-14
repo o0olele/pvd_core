@@ -1,4 +1,5 @@
 #include "scene_tools.hpp"
+#include "palette_editor.hpp"
 #include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
@@ -126,6 +127,13 @@ void drawSceneTools(Document &doc, OrbitCamera &camera, SceneToolState &state) {
                                       .5f)};
         doc.set_view_options(options);
       });
+  }
+  if (ImGui::CollapsingHeader("Object palette")) {
+    const auto edited = draw_object_palette_editor(options.palette);
+    if (!edited.error.empty())
+      state.error = edited.error;
+    if (edited.changed)
+      action(state, [&] { doc.set_view_options(options); });
   }
   ImGui::PushID("color-legend");
   for (const auto &entry : view_legend(options)) {

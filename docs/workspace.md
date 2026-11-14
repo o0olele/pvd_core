@@ -12,6 +12,15 @@ Each slot has its own `OrbitCamera` and `camera_ready` flag. The host can fit an
 
 `set_default_preferences(value)` validates before replacing global defaults. Existing slots retain their preferences; new empty/source slots inherit the defaults unless an identity-verified saved view applies. Matching reloads and archived reopenings restore the saved per-slot value. Changed or unverifiable capture content falls back to the current global defaults, without applying the previous file's preferences. Restore placeholders display their pending preferences, and the actual source identity is checked again before retaining them after asynchronous load. A stopped recording's `bind_source` archives its current preferences without replacing its Document or adopting an unrelated path archive's view.
 
+Version 5 also keeps `default_view_options()` / `set_default_view_options(value)`
+for the complete Document display policy: categories, scopes, color mode,
+geometry and joint sizes, planes, and the single `ColorPalette` value. New
+file/empty/live slots inherit it; a verified source's stored view takes priority.
+Updating defaults leaves current slots unchanged. Restored global settings and
+per-source values are validated independently. The host's **Use current as
+defaults** and reset actions copy/reset both the `ViewPreferences` and
+`ViewOptions` values. There is no duplicate palette in RenderOptions.
+
 Mutable slot preferences are host-owned, like the camera. `valid_view_preferences` is available without ImGui, Win32 or a D3D device. Persistence/restoration and source binding validate them: AA and numeric-format enums must be known, background channels finite in `[0,1]`, point size in `[1,64]`, contact-normal length finite/nonnegative, and particle/rigid velocity scales finite in `[0,1000000]`. Inspector precision is 1–17 and array pages are 32, 128, 512 or 2048. Invalid defaults, restored settings or file payloads leave the existing workspace unchanged. Rejected identity or preference validation happens before reserving a new capture archive.
 
 Locks are exclusive and have `loading`, `live`, or `exporting` owners. They prevent close, replacement, and whole-workspace restore. Only the matching reason can unlock a slot. Activation of another slot remains allowed. These locks express ownership; they are not an internal mutex around Document methods. Workspace commands run on one owner/UI thread.
@@ -128,22 +137,28 @@ Loading validates the complete sidecar before replacing workspace state. It crea
 The sidecar contains open file-source slots, their current view/camera/category options/render and inspector preferences/identity, per-path bookmark archives and latest matching views, recent files, global default preferences, and the active persisted slot. It embeds no raw capture, resource mesh, receiver state, export job, credentials, or hidden-object state. Transient slots are omitted; the host can explain this when saving a workspace containing unrecorded live data.
 
 The app-owned format uses an eight-byte magic, u32 version, u64 payload size,
-CRC-32 and a reserved zero field. The current writer produces version 4. Its
+CRC-32 and a reserved zero field. The current writer produces version 5. Its
 preference record retains the 62-byte v2 prefix and the 17-byte v3 navigation
 record, then appends visualization scopes, actor/shape/mass-frame switches,
 coordinate-frame scale, transparency opacity and the Inspector integer-hex
 boolean. Each stored view also appends sleeping/trigger scopes before its
-preference record. Each capture archive appends
+preference record. V5 retains that v4 prefix, appends face-culling and marker
+preferences, and adds geometry/plane/joint-size fields plus ten RGBA palette
+entries and the profile event-color flag to ViewOptions. A complete global
+ViewOptions follows global ViewPreferences. Each capture archive appends
 its bounded catalog list after bookmarks. Clip bindings and ranges use exact
 fixed-width u64 IDs, generations, event counts and frame ordinals. Native
 padding is never serialized.
 
-Versions 1/2/3 remain readable. V1 gets right-handed display and default
+Versions 1/2/3/4 remain readable. V1 gets right-handed display and default
 preferences; v1/v2 receive built-in navigation defaults. Older versions get
 default All scopes for existing master switches, no new coordinate frames,
-transparency None and integer hex off. They do not invent clip lists. Fixed independent
+transparency None and integer hex off (v1–v3); pre-v5 files get geometry/joint
+scale 1, planes on, culling None, marker off and the original palette. No older
+version invents clips absent from that format. Fixed independent
 524-byte v1, actual old-writer 491-byte v2 and actual 04c3055 v3-writer 558-byte
-fixtures are retained. Integers and IEEE float bits are little endian; strings
+fixtures and actual frozen 0.8 v4-writer 1,018-byte output are retained.
+Integers and IEEE float bits are little endian; strings
 are length-prefixed validated UTF-8 without NUL. Booleans, enums, IDs, counts,
 identities, navigation, visualization domains and camera math are validated.
 Integers never pass through JSON/double. CRC detects accidental damage, not

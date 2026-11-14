@@ -237,6 +237,26 @@ measured range endpoints: an interval ending at begin or starting at end is
 excluded, while one exactly matching the range is included. Copied
 `profile_controls()` widget rectangles permit these real mouse interactions
 without exposing ImGui pointers or changing filters directly.
+
+## Timeline bar colors
+
+Expand **Profile bar colors** in the Profiler to choose event-ID hues or a
+uniform RGBA color. **Color bars by event ID** keeps the original HSV mapping;
+editing any **Uniform bar RGBA** component selects the custom color, including
+its alpha. Switching back to event colors retains the custom value for later
+reuse. **Restore Profile colors** restores only these two Profile preferences,
+preserving every object-color slot.
+
+The page reads the current document's `ViewOptions::palette`; it keeps no
+second color override in the analysis index or panel. Colors affect timeline
+fills and never change raw events, durations, source-generation filters or CSV
+values. Selection outlines and text retain their independent colors.
+
+`profile_palette_tests` drives real ImGui RGB/alpha fields, mode controls and
+restore at 1x/1.5x/2x and 420/1060 logical widths, with LE/BE profile packets.
+It checks actual timeline-child DrawList vertex colors, excluding editor
+preview swatches, and verifies default HSV, custom RGBA/alpha, CSV/raw-byte
+invariance, zone-generation filtering and document/source color isolation.
 Physical mouse coordinates select the native tick represented by that pixel;
 the display does not claim subpixel input resolution.
 

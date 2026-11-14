@@ -41,6 +41,43 @@ Vec3 f(D3 v) {
     throw std::overflow_error("viewer coordinate exceeds float range");
   return out;
 }
+class DisplayOverflow final : public std::overflow_error {
+public:
+  DisplayOverflow() : std::overflow_error("scaled display coordinates exceed float range") {}
+};
+Vec3 display_f(D3 value) {
+  try { return f(value); }
+  catch (const std::overflow_error &) { throw DisplayOverflow(); }
+}
+std::optional<D3> ray_clip_forward(const Ray &ray) {
+  if (!std::isfinite(ray.min_distance) || ray.min_distance < 0 ||
+      !(ray.max_distance >= ray.min_distance))
+    throw std::invalid_argument("invalid ray distance interval");
+  if (!ray.view_clip) return {};
+  const auto &clip = *ray.view_clip;
+  if (!finite(d(clip.forward)) || !std::isfinite(clip.near_depth) ||
+      clip.near_depth < 0 || !(clip.far_depth >= clip.near_depth))
+    throw std::invalid_argument("invalid ray view clipping policy");
+  return normal(d(clip.forward));
+}
+std::optional<std::pair<double, double>> ray_interval(
+    const Ray &ray, D3 direction, const std::optional<D3> &forward) {
+  double minimum = ray.min_distance, maximum = ray.max_distance;
+  if (forward) {
+    const auto rate = dot(direction, *forward);
+    if (rate == 0) {
+      if (ray.view_clip->near_depth > 0) return {};
+    } else {
+      auto first = ray.view_clip->near_depth / rate;
+      auto last = ray.view_clip->far_depth / rate;
+      if (last < first) std::swap(first, last);
+      minimum = std::max(minimum, first);
+      maximum = std::min(maximum, last);
+    }
+  }
+  if (minimum > maximum) return {};
+  return std::make_pair(minimum, maximum);
+}
 void camera_valid(const OrbitCamera &c) {
   if (!finite(d(c.target)) || !finite(d(c.reference_up)) ||
       dot(d(c.reference_up), d(c.reference_up)) <= 0 || !std::isfinite(c.yaw) ||
@@ -94,11 +131,7 @@ void include(std::optional<render::Bounds> &b, const render::Bounds &x) {
   include(b, x.maximum);
 }
 std::optional<render::Bounds> draw_bounds(const DrawItem &item) {
-  std::optional<render::Bounds> b;
-  if (item.mesh)
-    for (auto p : item.mesh->positions)
-      include(b, render::transform_point(item.world_pose, p));
-  return b;
+  return display_bounds(item);
 }
 std::string name(const InstanceState &o) {
   for (const auto *n : {"Name", "name"})
@@ -115,19 +148,6 @@ bool is_a(const Metadata &m, const InstanceState &o, const char *n) {
   QualifiedName q{"physx3", n};
   return o.class_name == q || m.is_a(o.class_name, q);
 }
-Color color(const render::ShapeInstance &s) {
-  if (s.color)
-    return *s.color;
-  if (s.flags.trigger)
-    return {190, 100, 220, 255};
-  if (s.actor.kinematic)
-    return {70, 135, 245, 255};
-  if (s.actor.kind == render::ActorKind::rigid_static)
-    return {220, 100, 100, 255};
-  if (s.actor.sleeping == true)
-    return {230, 170, 70, 255};
-  return {95, 205, 125, 255};
-}
 constexpr Color geometry_colors[] = {{225, 135, 75, 255},  {100, 195, 235, 255},
                                      {185, 120, 230, 255}, {150, 155, 165, 255},
                                      {100, 210, 140, 255}, {225, 185, 85, 255},
@@ -136,20 +156,14 @@ Color display_color(const render::ShapeInstance &shape,
                     const ViewOptions &view) {
   switch (view.color_mode) {
   case ColorMode::recorded_status:
-    return color(shape);
+    return status_color(shape, view.palette);
   case ColorMode::uniform:
     return view.uniform_color;
   case ColorMode::geometry:
     return geometry_colors[static_cast<std::size_t>(
         render::geometry_kind(shape.geometry))];
   case ColorMode::actor_kind:
-    if (shape.actor.kinematic)
-      return {70, 135, 245, 255};
-    if (shape.actor.kind == render::ActorKind::rigid_static)
-      return {220, 100, 100, 255};
-    if (shape.actor.kind == render::ActorKind::articulation_link)
-      return {65, 195, 200, 255};
-    return {95, 205, 125, 255};
+    return actor_kind_color(shape, view.palette);
   case ColorMode::actor_identity: {
     std::uint64_t h = shape.scene_id;
     for (const auto v :
@@ -171,6 +185,7 @@ void enable_categories(ViewOptions &v) {
   v.show_static = v.show_dynamic = v.show_kinematic = v.show_sleeping =
       v.show_trigger = true;
   v.sleeping_scope = v.trigger_scope = VisualizationScope::all;
+  v.show_planes = true;
 }
 
 const deformables::ClothSurface *cloth_owner(const FrameState &frame,
@@ -363,6 +378,35 @@ Mat4 pose_matrix(const Transform &p) {
               z.x, z.y, z.z, 0, p.position.x, p.position.y, p.position.z, 1};
   return m;
 }
+bool valid_geometry_scale(float value) noexcept {
+  return std::isfinite(value) && value >= .01f && value <= 10000.f;
+}
+Mat4 display_matrix(const DrawItem &item) {
+  if (!valid_geometry_scale(item.geometry_scale))
+    throw std::invalid_argument("geometry display scale must be in [.01,10000]");
+  auto matrix = pose_matrix(item.world_pose);
+  for (unsigned column = 0; column < 3; ++column)
+    for (unsigned row = 0; row < 3; ++row)
+      matrix.values[column * 4 + row] *= item.geometry_scale;
+  return matrix;
+}
+Vec3 display_point(const DrawItem &item, Vec3 local) {
+  if (!valid_geometry_scale(item.geometry_scale))
+    throw std::invalid_argument("geometry display scale must be in [.01,10000]");
+  const auto rotated = render::rotate(item.world_pose.rotation, local);
+  return display_f(d(item.world_pose.position) + d(rotated) * item.geometry_scale);
+}
+std::optional<render::Bounds> display_bounds(const DrawItem &item) {
+  if (!valid_geometry_scale(item.geometry_scale))
+    throw std::invalid_argument("geometry display scale must be in [.01,10000]");
+  if (item.display_world_bounds)
+    return item.display_world_bounds;
+  std::optional<render::Bounds> result;
+  if (item.mesh)
+    for (auto p : item.mesh->positions)
+      include(result, display_point(item, p));
+  return result;
+}
 Vec3 OrbitCamera::position() const { return f(basis(*this).eye); }
 Mat4 OrbitCamera::view_matrix() const {
   auto b = basis(*this);
@@ -407,12 +451,17 @@ Ray OrbitCamera::screen_ray(double x, double y, double width,
   if (!std::isfinite(x) || !std::isfinite(y) || !(width > 0) || !(height > 0) ||
       !std::isfinite(width) || !std::isfinite(height))
     throw std::invalid_argument("invalid viewport dimensions");
+  if (!std::isfinite(near_plane) || !std::isfinite(far_plane) ||
+      near_plane <= 0 || far_plane <= near_plane)
+    throw std::invalid_argument("invalid camera projection");
   auto b = basis(*this);
   auto t = std::tan(vertical_fov / 2);
   auto ray =
       normal(b.forward + b.right * ((2 * x / width - 1) * t * width / height) +
              b.up * ((1 - 2 * y / height) * t));
-  return {f(b.eye), f(ray)};
+  Ray result{f(b.eye), f(ray)};
+  result.view_clip = RayViewClip{f(b.forward), near_plane, far_plane};
+  return result;
 }
 void OrbitCamera::orbit(double dx, double dy) {
   if (!std::isfinite(dx) || !std::isfinite(dy))
@@ -515,10 +564,17 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &items,
       dot(d(input.direction), d(input.direction)) <= 0)
     return {};
   auto direction = normal(d(input.direction));
+  const auto interval = ray_interval(input, direction, ray_clip_forward(input));
+  if (!interval) return {};
   std::optional<PickHit> best;
   for (const auto &item : items) {
     if (!item.visible || !item.pickable || !item.mesh)
       continue;
+    if (!valid_geometry_scale(item.geometry_scale) ||
+        (item.face_culling != FaceCulling::none &&
+         item.face_culling != FaceCulling::front &&
+         item.face_culling != FaceCulling::back))
+      throw std::invalid_argument("invalid shape display pick policy");
     auto q = item.world_pose.rotation;
     Quat inverse{-q.x, -q.y, -q.z, q.w};
     auto rotate_double = [](Quat q, D3 p) {
@@ -536,14 +592,18 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &items,
       if (ia >= mesh.positions.size() || ib >= mesh.positions.size() ||
           ic >= mesh.positions.size())
         continue;
-      auto a = d(mesh.positions[ia]), e1 = d(mesh.positions[ib]) - a,
-           e2 = d(mesh.positions[ic]) - a;
+      auto a = d(mesh.positions[ia]) * item.geometry_scale,
+           e1 = d(mesh.positions[ib]) * item.geometry_scale - a,
+           e2 = d(mesh.positions[ic]) * item.geometry_scale - a;
       auto p = cross(dir, e2);
       auto determinant = dot(e1, p);
       auto scale = std::sqrt(dot(e1, e1) * dot(e2, e2));
       if (!std::isfinite(determinant) || !(scale > 0) ||
           std::abs(determinant) <=
               scale * std::numeric_limits<double>::epsilon() * 16)
+        continue;
+      if ((item.face_culling == FaceCulling::back && determinant < 0) ||
+          (item.face_culling == FaceCulling::front && determinant > 0))
         continue;
       auto inv = 1 / determinant;
       auto tvec = origin - a;
@@ -554,7 +614,8 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &items,
       if (v < -1e-9 || u + v > 1 + 1e-9)
         continue;
       auto t = dot(e2, cross(tvec, e1)) * inv;
-      if (t < 0 || !std::isfinite(t) || (best && t >= best->distance))
+      if (!std::isfinite(t) || t < interval->first || t > interval->second ||
+          (best && t >= best->distance))
         continue;
       best = PickHit{item.key, t, f(d(input.origin) + direction * t), i / 3};
     }
@@ -573,6 +634,7 @@ pick_deformable(const FrameState &frame, const Ray &input,
       dot(d(input.direction), d(input.direction)) <= 0)
     return {};
   const auto direction = normal(d(input.direction));
+  const auto clip_forward = ray_clip_forward(input);
   std::optional<DeformablePickHit> best;
   const auto visible = [&](deformables::OwnerKey key) {
     return std::any_of(
@@ -584,9 +646,17 @@ pick_deformable(const FrameState &frame, const Ray &input,
                              Vec3 position) {
     const auto delta = d(position) - d(input.origin);
     const auto along = dot(delta, direction);
-    if (!finite(delta) || !std::isfinite(along) || along < 0 ||
+    if (!finite(delta) || !std::isfinite(along) || along < input.min_distance ||
+        along > input.max_distance ||
         (best && along >= best->distance))
       return;
+    if (clip_forward) {
+      const auto depth = dot(delta, *clip_forward);
+      // Native markers are camera-facing quads at their center view-depth.
+      // Their angular pick tolerance must not admit centers outside clipping.
+      if (depth <= input.view_clip->near_depth || depth > input.view_clip->far_depth)
+        return;
+    }
     const auto radius =
         std::max(options.world_radius, along * options.angular_radius);
     const auto perpendicular = delta - direction * along;
@@ -597,13 +667,15 @@ pick_deformable(const FrameState &frame, const Ray &input,
   };
   if (options.cloth)
     for (const auto &owner : frame.deformables.cloths)
-      if (owner.pickable && visible(owner.key))
+      if (owner.pickable && visible(owner.key) &&
+          cloth_color(owner, frame.palette)[3] > 0)
         for (std::size_t i = 0; i < owner.world_positions.size(); ++i)
           candidate(owner.key, deformables::ElementKind::cloth_vertex,
                     static_cast<std::uint32_t>(i), owner.world_positions[i]);
   if (options.particles)
     for (const auto &owner : frame.deformables.particle_clouds)
-      if (owner.pickable && visible(owner.key))
+      if (owner.pickable && visible(owner.key) &&
+          particle_color(owner, frame.palette)[3] > 0)
         for (const auto &particle : owner.particles)
           if (particle.position)
             candidate(owner.key, deformables::ElementKind::particle,
@@ -651,6 +723,56 @@ struct Document::Impl {
   std::uint64_t clock = 0;
   explicit Impl(ModelOptions o) : options(o), extractor(o.extractor), query_index(o.scene_queries) {
     frame->label = "No recording";
+  }
+  // Derived display work can reject a valid source sample (for example scaled
+  // coordinates beyond float range). Publish cursor/selection together with
+  // its immutable FrameState. Accepted live Session data is never rolled back.
+  struct CursorGuard {
+    Impl &owner;
+    std::optional<std::uint64_t> scene;
+    SamplePoint sample;
+    std::size_t index;
+    Playback playback;
+    double remainder;
+    bool follow, with_timeline, committed = false;
+    std::optional<PickingKey> selected;
+    std::optional<deformables::SelectionKey> selected_deformable;
+    std::optional<render::SceneQuerySource> selected_query;
+    std::optional<ObjectKey> inspected;
+    std::shared_ptr<FrameState> frame;
+    std::vector<TimelineEntry> timeline;
+    explicit CursorGuard(Impl &value, bool save_timeline = false)
+        : owner(value), scene(value.scene), sample(value.sample), index(value.index),
+          playback(value.playback), remainder(value.remainder), follow(value.follow),
+          with_timeline(save_timeline), selected(value.selected),
+          selected_deformable(value.selected_deformable), selected_query(value.selected_query),
+          inspected(value.inspected), frame(value.frame) {
+      if (with_timeline) timeline.swap(value.timeline);
+    }
+    ~CursorGuard() noexcept { if (!committed) rollback(); }
+    void rollback() noexcept {
+      owner.scene = scene; owner.sample = sample; owner.index = index;
+      owner.playback = playback; owner.remainder = remainder; owner.follow = follow;
+      owner.selected = selected; owner.selected_deformable = selected_deformable;
+      owner.selected_query = selected_query; owner.inspected = inspected;
+      owner.frame = std::move(frame);
+      if (with_timeline) owner.timeline.swap(timeline);
+      committed = true;
+    }
+    void commit() noexcept { committed = true; }
+  };
+  void pause_live_display(const char *reason) {
+    auto next = std::make_shared<FrameState>(*frame);
+    const std::string prefix = "Live display paused: ";
+    next->errors.erase(std::remove_if(next->errors.begin(), next->errors.end(),
+        [&](const auto &error) { return error.rfind(prefix, 0) == 0; }), next->errors.end());
+    next->errors.push_back(prefix + reason + ". Source events through " +
+        std::to_string(session->event_count()) + " remain accepted; lower geometry "
+        "display scale and enable Follow to show the latest sample.");
+    frame = std::move(next);
+    follow = false;
+    playback.playing = false;
+    remainder = 0;
   }
   std::vector<std::uint64_t> signature(const render::Geometry &g) {
     std::vector<std::uint64_t> key{g.index()};
@@ -801,6 +923,9 @@ struct Document::Impl {
   }
 
   bool shape_visible(const render::ShapeInstance &s, bool selection_member) const {
+    if (!view.show_planes &&
+        render::geometry_kind(s.geometry) == render::GeometryKind::plane)
+      return false;
     if (isolated_deformable)
       return false;
     const auto key = s.picking_key();
@@ -827,7 +952,60 @@ struct Document::Impl {
            (view.show_trigger &&
             visualization_scope_matches(view.trigger_scope, selection_member));
   }
+  void build_joint_display(FrameState &state) const {
+    auto *next = &state;
+    next->errors.erase(std::remove_if(next->errors.begin(), next->errors.end(),
+        [](const auto &error) { return error.rfind("Joint display channel ", 0) == 0; }),
+        next->errors.end());
+    std::vector<render::DebugConstraint> frames, limits;
+    for (const auto &constraint : next->debug.constraints)
+      (std::holds_alternative<render::DebugJointFrames>(constraint.payload)
+           ? frames : limits).push_back(constraint);
+    using DebugLocation = std::tuple<std::size_t, std::size_t, std::uint64_t>;
+    std::set<DebugLocation> handled;
+    bool complete = true;
+    auto request = options.constraints;
+    request.frame_scale *= view.joint_frame_scale;
+    request.limit_scale *= view.joint_limit_scale;
+    const auto build = [&](const auto &input, auto &output) {
+      auto built = render::build_constraint_lines(input, request);
+      complete &= built.complete;
+      std::set<std::size_t> rejected;
+      for (const auto &diagnostic : built.diagnostics) {
+        rejected.insert(diagnostic.constraint_index);
+        next->errors.push_back("Joint display channel " +
+            std::to_string(diagnostic.source.channel_instance_id) + " event " +
+            std::to_string(diagnostic.source.event_index) + " offset " +
+            std::to_string(diagnostic.source.payload_offset) + ": " + diagnostic.message);
+      }
+      for (std::size_t i = 0; i < built.constraints_processed; ++i)
+        if (!rejected.count(i)) {
+          const auto &source = input[i].source;
+          handled.emplace(source.event_index, source.payload_offset,
+                          source.channel_instance_id);
+        }
+      request.max_lines -= built.lines.size();
+      request.max_constraints -= std::min(request.max_constraints,
+                                          built.constraints_processed);
+      output = std::move(built.lines);
+    };
+    build(frames, next->joint_frame_lines);
+    build(limits, next->joint_limit_lines);
+    next->debug.diagnostics.erase(std::remove_if(next->debug.diagnostics.begin(),
+        next->debug.diagnostics.end(), [&](const auto &diagnostic) {
+          return diagnostic.code == render::DebugCode::constraint_not_tessellated &&
+              handled.count({diagnostic.event_index, diagnostic.payload_offset,
+                              diagnostic.channel_instance_id});
+        }), next->debug.diagnostics.end());
+    next->debug.complete = next->debug.diagnostics.empty() && complete;
+    next->joint_frame_scale = view.joint_frame_scale;
+    next->joint_limit_scale = view.joint_limit_scale;
+  }
   void apply_view(FrameState &next) const {
+    next.palette = view.palette;
+    if (next.joint_frame_scale != view.joint_frame_scale ||
+        next.joint_limit_scale != view.joint_limit_scale)
+      build_joint_display(next);
     next.bounds.reset();
     for (const auto &p : next.debug.points)
       include(next.bounds, p.position);
@@ -860,10 +1038,17 @@ struct Document::Impl {
                      shape_visible(*found->second, selection.count(draw.key) != 0);
       if (found != shapes.end())
         draw.color = display_color(*found->second, view);
+      draw.geometry_scale = view.geometry_scale;
+      draw.display_world_bounds.reset();
+      if (found != shapes.end() && found->second->world_bounds) {
+        const auto pivot = d(draw.world_pose.position);
+        const auto &raw = *found->second->world_bounds;
+        draw.display_world_bounds = view.geometry_scale == 1 ? raw : render::Bounds{
+            display_f(pivot + (d(raw.minimum) - pivot) * view.geometry_scale),
+            display_f(pivot + (d(raw.maximum) - pivot) * view.geometry_scale)};
+      }
       if (draw.visible) {
-        if (found->second->world_bounds)
-          include(next.bounds, *found->second->world_bounds);
-        else if (auto bounds = draw_bounds(draw))
+        if (auto bounds = draw_bounds(draw))
           include(next.bounds, *bounds);
       }
     }
@@ -1036,70 +1221,13 @@ struct Document::Impl {
     next->debug =
         render::extract_debug(next->snapshot, session->metadata(),
                               session->channels(), range, debug_options);
-    std::vector<render::DebugConstraint> frames, limits;
-    for (const auto &constraint : next->debug.constraints)
-      (std::holds_alternative<render::DebugJointFrames>(constraint.payload)
-           ? frames
-           : limits)
-          .push_back(constraint);
-    using DebugLocation = std::tuple<std::size_t, std::size_t, std::uint64_t>;
-    std::set<DebugLocation> handled;
-    bool constraint_display_complete = true;
-    auto constraint_options = options.constraints;
-    const auto build_constraints = [&](const auto &input, auto &output) {
-      auto built = render::build_constraint_lines(input, constraint_options);
-      constraint_display_complete =
-          constraint_display_complete && built.complete;
-      std::set<std::size_t> rejected;
-      for (const auto &diagnostic : built.diagnostics) {
-        rejected.insert(diagnostic.constraint_index);
-        next->errors.push_back(
-            "Joint display channel " +
-            std::to_string(diagnostic.source.channel_instance_id) + " event " +
-            std::to_string(diagnostic.source.event_index) + " offset " +
-            std::to_string(diagnostic.source.payload_offset) + ": " +
-            diagnostic.message);
-      }
-      for (std::size_t i = 0; i < built.constraints_processed; ++i) {
-        const auto &constraint = input[i];
-        const auto scale =
-            std::holds_alternative<render::DebugJointFrames>(constraint.payload)
-                ? constraint_options.frame_scale
-                : constraint_options.limit_scale;
-        if (scale > 0 && !rejected.count(i))
-          handled.emplace(constraint.source.event_index,
-                          constraint.source.payload_offset,
-                          constraint.source.channel_instance_id);
-      }
-      constraint_options.max_lines -= built.lines.size();
-      constraint_options.max_constraints -= std::min(
-          constraint_options.max_constraints, built.constraints_processed);
-      output = std::move(built.lines);
-    };
-    build_constraints(frames, next->joint_frame_lines);
-    build_constraints(limits, next->joint_limit_lines);
-    next->debug.diagnostics.erase(
-        std::remove_if(
-            next->debug.diagnostics.begin(), next->debug.diagnostics.end(),
-            [&](const auto &diagnostic) {
-              return diagnostic.code ==
-                         render::DebugCode::constraint_not_tessellated &&
-                     handled.count({diagnostic.event_index,
-                                    diagnostic.payload_offset,
-                                    diagnostic.channel_instance_id});
-            }),
-        next->debug.diagnostics.end());
-    // Extraction failures retain diagnostics; only successfully handled
-    // constraint placeholders were removed. Include builder limits/failures in
-    // this viewer's displayed-data completeness as well.
-    next->debug.complete =
-        next->debug.diagnostics.empty() && constraint_display_complete;
+    build_joint_display(*next);
     for (const auto &s : next->render.instances) {
       try {
         DrawItem item{triangles(s.geometry),
                       s.world_pose,
                       s.picking_key(),
-                      color(s),
+                      display_color(s, view),
                       s.pickable,
                       s.selected};
         next->draws.push_back(std::move(item));
@@ -1156,6 +1284,7 @@ void Document::adopt(std::unique_ptr<Session> s, std::string label) {
 void Document::begin_live(StreamHeader header, std::string label,
                           SessionOptions options) {
   auto next = std::make_unique<Impl>(impl_->options);
+  next->view = impl_->view;
   next->session = std::make_unique<Session>(header, options);
   next->source = std::move(label);
   next->live_ingestion = true;
@@ -1173,7 +1302,8 @@ bool Document::append_live(std::vector<Event> events) {
   impl_->index_new();
   if (!impl_->session->at_transaction_boundary())
     return false;
-  if (impl_->follow) {
+  Impl::CursorGuard cursor(*impl_);
+  try { if (impl_->follow) {
     if (!impl_->timeline.empty()) {
       impl_->index = impl_->timeline.size() - 1;
       const auto &marker = impl_->timeline.back();
@@ -1184,10 +1314,15 @@ bool Document::append_live(std::vector<Event> events) {
         impl_->build_frame();
     } else if (previous->snapshot.event_count != impl_->session->event_count())
       impl_->build_frame();
+  } } catch (const DisplayOverflow &error) {
+    cursor.rollback();
+    impl_->pause_live_display(error.what());
+    return true;
   }
   // Paused historical FrameState is immutable and is not rebuilt on polling.
   // timeline()/scenes() expose current counts independently of that
   // publication.
+  cursor.commit();
   return impl_->frame != previous;
 }
 void Document::finish_live() {
@@ -1203,6 +1338,8 @@ std::size_t Document::live_event_count() const noexcept {
 }
 bool Document::follow_live() const noexcept { return impl_->follow; }
 void Document::set_follow_live(bool follow) {
+  Impl::CursorGuard cursor(*impl_);
+  try {
   impl_->follow = follow && impl_->live_ingestion;
   if (impl_->follow) {
     impl_->playback.playing = false;
@@ -1213,6 +1350,12 @@ void Document::set_follow_live(bool follow) {
       impl_->build_frame();
     }
   }
+  } catch (const DisplayOverflow &error) {
+    cursor.rollback();
+    impl_->pause_live_display(error.what());
+    return;
+  }
+  cursor.commit();
 }
 bool Document::loaded() const noexcept { return bool(impl_->session); }
 const Session *Document::session() const noexcept {
@@ -1236,6 +1379,7 @@ bool Document::set_scene(std::uint64_t id) {
     return false;
   if (impl_->scene == id)
     return true;
+  Impl::CursorGuard cursor(*impl_, true);
   impl_->scene = id;
   if (impl_->sample == SamplePoint::after_fetch &&
       impl_->after_timelines[id].empty())
@@ -1245,18 +1389,23 @@ bool Document::set_scene(std::uint64_t id) {
   impl_->inspected.reset();
   impl_->make_timeline();
   impl_->build_frame();
+  cursor.commit();
   return true;
 }
 SamplePoint Document::sample_point() const noexcept { return impl_->sample; }
 bool Document::set_sample_point(SamplePoint s) {
+  if (s != SamplePoint::native_frame && s != SamplePoint::after_fetch)
+    throw std::invalid_argument("unknown sample point");
   if (!loaded())
     return false;
   if (s == SamplePoint::after_fetch &&
       (!impl_->scene || impl_->after_timelines[*impl_->scene].empty()))
     return false;
+  Impl::CursorGuard cursor(*impl_, true);
   impl_->sample = s;
   impl_->make_timeline();
   impl_->build_frame();
+  cursor.commit();
   return true;
 }
 const std::vector<TimelineEntry> &Document::timeline() const noexcept {
@@ -1266,13 +1415,17 @@ std::size_t Document::frame_index() const noexcept { return impl_->index; }
 bool Document::set_frame(std::size_t i) {
   if (i >= impl_->timeline.size())
     return false;
+  Impl::CursorGuard cursor(*impl_);
   impl_->playback.playing = false;
   impl_->follow = false;
   impl_->remainder = 0;
-  if (i == impl_->index)
+  if (i == impl_->index) {
+    cursor.commit();
     return true;
+  }
   impl_->index = i;
   impl_->build_frame();
+  cursor.commit();
   return true;
 }
 bool Document::step(std::ptrdiff_t delta) {
@@ -1314,14 +1467,17 @@ bool Document::advance(double elapsed) {
     throw std::invalid_argument("invalid elapsed playback time");
   if (!impl_->playback.playing || impl_->timeline.empty())
     return false;
+  Impl::CursorGuard cursor(*impl_);
   auto frames =
       impl_->remainder + elapsed * std::abs(impl_->playback.frames_per_second);
   if (!std::isfinite(frames))
     throw std::overflow_error("elapsed playback time overflow");
   auto whole = std::floor(frames);
   impl_->remainder = frames - whole;
-  if (whole < 1)
+  if (whole < 1) {
+    cursor.commit();
     return false;
+  }
   auto n = impl_->timeline.size(), old = impl_->index;
   bool forward = impl_->playback.frames_per_second > 0;
   if (impl_->playback.loop) {
@@ -1338,9 +1494,12 @@ bool Document::advance(double elapsed) {
       impl_->index = forward ? old + amount : old - amount;
     }
   }
-  if (impl_->index == old)
+  if (impl_->index == old) {
+    cursor.commit();
     return false;
+  }
   impl_->build_frame();
+  cursor.commit();
   return true;
 }
 std::shared_ptr<const FrameState> Document::frame() const noexcept {
@@ -1583,17 +1742,18 @@ std::size_t Document::tessellation_cache_entries() const noexcept {
 
 std::vector<ColorLegendEntry> view_legend(const ViewOptions &v) {
   switch (v.color_mode) {
-  case ColorMode::recorded_status:
-    return {{"Trigger", {190, 100, 220, 255}},
-            {"Kinematic", {70, 135, 245, 255}},
-            {"Static", {220, 100, 100, 255}},
-            {"Sleeping", {230, 170, 70, 255}},
-            {"Dynamic", {95, 205, 125, 255}}};
-  case ColorMode::actor_kind:
-    return {{"Static", {220, 100, 100, 255}},
-            {"Dynamic", {95, 205, 125, 255}},
-            {"Kinematic", {70, 135, 245, 255}},
-            {"Articulation link", {65, 195, 200, 255}}};
+  case ColorMode::recorded_status: {
+    std::vector<ColorLegendEntry> result;
+    for (const auto &entry : status_palette_legend(v.palette))
+      result.push_back({entry.label, entry.color});
+    return result;
+  }
+  case ColorMode::actor_kind: {
+    std::vector<ColorLegendEntry> result;
+    for (const auto &entry : actor_kind_palette_legend(v.palette))
+      result.push_back({entry.label, entry.color});
+    return result;
+  }
   case ColorMode::geometry: {
     const char *labels[] = {"Box",         "Sphere",      "Capsule (X axis)",
                             "Plane (X=0)", "Convex mesh", "Triangle mesh",
@@ -1629,6 +1789,8 @@ const ViewOptions &Document::view_options() const noexcept {
   return impl_->view;
 }
 void Document::set_view_options(ViewOptions options) {
+  if (!valid_color_palette(options.palette))
+    throw std::invalid_argument("palette RGBA components must be finite in [0,1]");
   if (static_cast<int>(options.color_mode) < 0 ||
       static_cast<int>(options.color_mode) >
           static_cast<int>(ColorMode::uniform))
@@ -1638,8 +1800,19 @@ void Document::set_view_options(ViewOptions options) {
         scope != VisualizationScope::selected &&
         scope != VisualizationScope::unselected)
       throw std::invalid_argument("unknown viewer status scope");
+  if (!valid_geometry_scale(options.geometry_scale))
+    throw std::invalid_argument("geometry display scale must be in [.01,10000]");
+  for (const auto scale : {options.joint_frame_scale, options.joint_limit_scale})
+    if (!std::isfinite(scale) || scale < 0 || scale > 10000)
+      throw std::invalid_argument("joint display scale must be in [0,10000]");
+  auto previous = impl_->view;
   impl_->view = options;
-  impl_->refresh_view();
+  try {
+    impl_->refresh_view();
+  } catch (...) {
+    impl_->view = previous;
+    throw;
+  }
 }
 bool Document::visible(const PickingKey &key) const noexcept {
   for (const auto &item : impl_->frame->draws)

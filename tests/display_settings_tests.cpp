@@ -599,7 +599,7 @@ void widgets(float width) {
   auto output = draw(doc, camera, options, stats, panel, width);
   check(output.text.find("actual 1x") != std::string::npos &&
             output.text.find("exports stay unchanged") != std::string::npos &&
-            output.text.find("Tight geometry bounds") != std::string::npos &&
+            output.text.find("Display geometry bounds") != std::string::npos &&
             output.text.find("Angular velocity") != std::string::npos,
         "real ImGui displays actual mode and source/display contract");
   options.antialiasing = Antialiasing::msaa4x;

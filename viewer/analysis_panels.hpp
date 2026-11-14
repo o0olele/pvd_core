@@ -23,6 +23,8 @@ struct ProfileControlRect {
 };
 struct ProfilePanelControls {
   ProfileControlRect zone_combo, csv, measured_csv;
+  ProfileControlRect palette_header, palette_by_event, palette_rgba,
+      palette_restore;
 };
 class AnalysisPanels {
 public:

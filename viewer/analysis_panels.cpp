@@ -171,6 +171,30 @@ struct AnalysisPanels::Impl {
     }
     same_line_if_fits(button_width("Export CSV..."));const bool export_csv=ImGui::Button("Export CSV...");controls.csv=control_rect();
     if(export_csv)save("profile.csv",[&](std::ostream& out){profile->write_csv(out,q);});
+    const bool palette_open=ImGui::CollapsingHeader("Profile bar colors");
+    controls.palette_header=control_rect();
+    if(palette_open) {
+      auto candidate=doc.view_options();
+      bool palette_changed=ImGui::Checkbox("Color bars by event ID",&candidate.palette.profile_by_event);
+      controls.palette_by_event=control_rect();
+      ImGui::TextUnformatted("Uniform bar RGBA");
+      ImGui::SetNextItemWidth(std::min(ui_pixels(300),ImGui::GetContentRegionAvail().x));
+      if(ImGui::ColorEdit4("##profile-bar-rgba",candidate.palette.profile_bar.data(),
+                          ImGuiColorEditFlags_Float|ImGuiColorEditFlags_AlphaPreviewHalf|
+                          ImGuiColorEditFlags_AlphaBar)) {
+        candidate.palette.profile_by_event=false;
+        palette_changed=true;
+      }
+      controls.palette_rgba=control_rect();
+      if(ImGui::Button("Restore Profile colors")) {
+        const auto defaults=default_color_palette();
+        candidate.palette.profile_bar=defaults.profile_bar;
+        candidate.palette.profile_by_event=defaults.profile_by_event;
+        palette_changed=true;
+      }
+      controls.palette_restore=control_rect();
+      if(palette_changed)doc.set_view_options(std::move(candidate));
+    }
     const auto statistics=profile->statistics();
     ImGui::TextDisabled("%zu packets  |  %zu completed intervals  |  %zu open scopes%s",statistics.profile_packets,intervals.size(),statistics.open_scopes,statistics.complete?"":statistics.malformed_packets||statistics.saturated||statistics.skipped_gpu_events?"  |  INCOMPLETE DATA":"  |  Has diagnostics");
     if(!statistics.profile_packets){ImGui::TextWrapped("This capture has no profile channel. Enable PhysX PVD ePROFILE instrumentation in the producer.");return;}
@@ -249,7 +273,8 @@ struct AnalysisPanels::Impl {
       const float y=origin.y+lanes[lane(e)]+float(std::min<std::size_t>(e.depth,15))*ui_pixels(19);
       if(y+ui_pixels(17)<ImGui::GetWindowPos().y||y>ImGui::GetWindowPos().y+ImGui::GetWindowHeight())continue;
       const ImVec2 a{std::clamp(x(e.begin_ticks),origin.x+gutter,origin.x+width),y},b{std::clamp(std::max(x(e.end_ticks),a.x+ui_pixels(2)),a.x+ui_pixels(2),origin.x+width+ui_pixels(2)),y+ui_pixels(17)};
-      const auto color=ImColor::HSV(float((e.event_id*37u)%255u)/255.0f,.50f,.68f);
+      const auto rgba=profile_bar_color(e.event_id,doc.view_options().palette);
+      const auto color=ImGui::ColorConvertFloat4ToU32({rgba[0],rgba[1],rgba[2],rgba[3]});
       draw->AddRectFilled(a,b,color,ui_pixels(2));
       if(selected_interval&&*selected_interval==i)draw->AddRect(a,b,IM_COL32(255,218,90,255),ui_pixels(2),0,ui_pixels(2));
       if(b.x-a.x>ui_pixels(45)){const auto label=profile->event_name(e.start_source.zone,e.event_id);draw->PushClipRect(a,b,true);draw->AddText({a.x+ui_pixels(3),a.y},IM_COL32(245,248,250,255),label.c_str());draw->PopClipRect();}

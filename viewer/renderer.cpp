@@ -103,16 +103,21 @@ float mesh_opacity(const DrawItem& draw,const RenderOptions& options,bool select
 bool scope_valid(VisualizationScope scope) {
     return scope==VisualizationScope::none||scope==VisualizationScope::all||scope==VisualizationScope::selected||scope==VisualizationScope::unselected;
 }
+bool culling_valid(FaceCulling value) {
+    return value==FaceCulling::none||value==FaceCulling::front||value==FaceCulling::back;
+}
 } // namespace
 
 std::vector<DrawItem> visualization_pick_draws(const FrameState& frame,const RenderOptions& options,const VisualizationSelection& selection) {
     need(scope_valid(options.transparent_scope),"unknown transparency scope");
     need(std::isfinite(options.transparent_opacity)&&options.transparent_opacity>=0&&options.transparent_opacity<=1,"viewer opacity must be finite in [0,1]");
+    need(culling_valid(options.face_culling),"unknown face culling mode");
     std::vector<DrawItem> result;
     if(!options.show_solids&&!options.show_wireframe)return result;
     const auto selected=visualization_selected_attachments(frame,selection);
-    for(const auto& draw:frame.draws)if(draw.visible&&draw.pickable&&draw.mesh&&mesh_opacity(draw,options,selected.count(draw.key)!=0)>0)
-        result.push_back(draw);
+    for(const auto& draw:frame.draws)if(draw.visible&&draw.pickable&&draw.mesh&&mesh_opacity(draw,options,selected.count(draw.key)!=0)>0) {
+        result.push_back(draw);result.back().face_culling=options.face_culling;
+    }
     return result;
 }
 
@@ -133,8 +138,8 @@ struct Renderer::Impl {
     ComPtr<ID3D11PixelShader> ps;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11Buffer> constants,dynamic_vertices;
-    ComPtr<ID3D11RasterizerState> solid,wire,solid_mirrored,wire_mirrored;
-    ComPtr<ID3D11DepthStencilState> depth_write,depth_read;
+    std::array<ComPtr<ID3D11RasterizerState>,3> solid,wire,solid_mirrored,wire_mirrored;
+    ComPtr<ID3D11DepthStencilState> depth_write,depth_read,depth_overlay;
     ComPtr<ID3D11BlendState> blend;
     std::uint32_t width=0,height=0;
     std::size_t max_cache=256,dynamic_capacity=0;
@@ -167,21 +172,25 @@ struct Renderer::Impl {
         hr(d->CreateInputLayout(elements,3,vertex->GetBufferPointer(),vertex->GetBufferSize(),&layout),"CreateInputLayout");
         D3D11_BUFFER_DESC buffer{};buffer.ByteWidth=sizeof(Constants);buffer.Usage=D3D11_USAGE_DEFAULT;buffer.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         hr(d->CreateBuffer(&buffer,nullptr,&constants),"CreateBuffer draw constants");
-        D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;
-        raster.FrontCounterClockwise=TRUE;raster.DepthClipEnable=TRUE;raster.MultisampleEnable=TRUE;
-        hr(d->CreateRasterizerState(&raster,&solid),"CreateRasterizerState solid");
-        raster.FrontCounterClockwise=FALSE;
-        hr(d->CreateRasterizerState(&raster,&solid_mirrored),"CreateRasterizerState mirrored solid");
-        raster.FrontCounterClockwise=TRUE;
-        raster.FillMode=D3D11_FILL_WIREFRAME;raster.DepthBias=-1;
-        hr(d->CreateRasterizerState(&raster,&wire),"CreateRasterizerState selection wireframe");
-        raster.FrontCounterClockwise=FALSE;
-        hr(d->CreateRasterizerState(&raster,&wire_mirrored),"CreateRasterizerState mirrored wireframe");
+        for(std::size_t mode=0;mode<3;++mode) {
+            D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;
+            raster.CullMode=mode==0?D3D11_CULL_NONE:mode==1?D3D11_CULL_FRONT:D3D11_CULL_BACK;
+            raster.FrontCounterClockwise=TRUE;raster.DepthClipEnable=TRUE;raster.MultisampleEnable=TRUE;
+            hr(d->CreateRasterizerState(&raster,&solid[mode]),"CreateRasterizerState solid/cull");
+            raster.FrontCounterClockwise=FALSE;
+            hr(d->CreateRasterizerState(&raster,&solid_mirrored[mode]),"CreateRasterizerState mirrored solid/cull");
+            raster.FrontCounterClockwise=TRUE;raster.FillMode=D3D11_FILL_WIREFRAME;raster.DepthBias=-1;
+            hr(d->CreateRasterizerState(&raster,&wire[mode]),"CreateRasterizerState wireframe/cull");
+            raster.FrontCounterClockwise=FALSE;
+            hr(d->CreateRasterizerState(&raster,&wire_mirrored[mode]),"CreateRasterizerState mirrored wireframe/cull");
+        }
         D3D11_DEPTH_STENCIL_DESC depth_desc{};depth_desc.DepthEnable=TRUE;depth_desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
         depth_desc.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
         hr(d->CreateDepthStencilState(&depth_desc,&depth_write),"CreateDepthStencilState write");
         depth_desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
         hr(d->CreateDepthStencilState(&depth_desc,&depth_read),"CreateDepthStencilState read");
+        depth_desc.DepthEnable=FALSE;
+        hr(d->CreateDepthStencilState(&depth_desc,&depth_overlay),"CreateDepthStencilState orbit-target overlay");
         D3D11_BLEND_DESC blending{};auto& b=blending.RenderTarget[0];b.BlendEnable=TRUE;
         b.SrcBlend=D3D11_BLEND_SRC_ALPHA;b.DestBlend=D3D11_BLEND_INV_SRC_ALPHA;b.BlendOp=D3D11_BLEND_OP_ADD;
         b.SrcBlendAlpha=D3D11_BLEND_ONE;b.DestBlendAlpha=D3D11_BLEND_INV_SRC_ALPHA;b.BlendOpAlpha=D3D11_BLEND_OP_ADD;
@@ -261,15 +270,16 @@ struct Renderer::Impl {
         Constants data{projection.values,world.values,tint,{lit?1.0f:0.0f,depth_bias,0,0}};
         context->UpdateSubresource(constants.Get(),0,nullptr,&data,0,0);
     }
-    void indexed(Mesh& mesh,const Mat4& projection,const Mat4& world,std::array<float,4> color,bool lines,bool transparent=false) {
+    void indexed(Mesh& mesh,const Mat4& projection,const Mat4& world,std::array<float,4> color,bool lines,bool transparent=false,FaceCulling culling=FaceCulling::none) {
         const UINT stride=sizeof(Vertex),offset=0;auto* vb=mesh.vertices.Get();
         context->IASetVertexBuffers(0,1,&vb,&stride,&offset);context->IASetIndexBuffer(mesh.indices.Get(),DXGI_FORMAT_R32_UINT,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context->RSSetState(lines?(mirrored?wire_mirrored.Get():wire.Get()):(mirrored?solid_mirrored.Get():solid.Get()));context->OMSetDepthStencilState(lines||transparent?depth_read.Get():depth_write.Get(),0);
+        const auto mode=static_cast<std::size_t>(culling);
+        context->RSSetState(lines?(mirrored?wire_mirrored[mode].Get():wire[mode].Get()):(mirrored?solid_mirrored[mode].Get():solid[mode].Get()));context->OMSetDepthStencilState(lines||transparent?depth_read.Get():depth_write.Get(),0);
         update(projection,world,color,!lines,lines?3e-7f:0);context->DrawIndexed(mesh.index_count,0,0);
         ++stats.draw_calls;stats.triangles+=mesh.index_count/3;
     }
-    void draw_dynamic(const std::vector<Vertex>& triangles,const std::vector<Vertex>& lines,const Mat4& projection) {
+    void draw_dynamic(const std::vector<Vertex>& triangles,const std::vector<Vertex>& lines,const Mat4& projection,bool overlay=false) {
         const auto count=triangles.size()+lines.size();if(!count)return;
         need(count<=max_dynamic_vertices,"viewer combined debug/grid vertex budget exceeded");
         if(count>dynamic_capacity) {
@@ -284,7 +294,7 @@ struct Renderer::Impl {
         if(!lines.empty())std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+triangles.size()*sizeof(Vertex),lines.data(),lines.size()*sizeof(Vertex));
         context->Unmap(dynamic_vertices.Get(),0);
         const UINT stride=sizeof(Vertex),offset=0;auto* buffer=dynamic_vertices.Get();context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
-        context->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context->RSSetState(mirrored?solid_mirrored.Get():solid.Get());context->OMSetDepthStencilState(depth_read.Get(),0);
+        context->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context->RSSetState(mirrored?solid_mirrored[0].Get():solid[0].Get());context->OMSetDepthStencilState(overlay?depth_overlay.Get():depth_read.Get(),0);
         if(!triangles.empty()) {
             update(projection,pose_matrix(Transform{}),{1,1,1,1},false,2e-7f);
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context->Draw(static_cast<UINT>(triangles.size()),0);
@@ -306,6 +316,8 @@ struct Renderer::Impl {
         need(std::isfinite(options.rigid_velocity_scale)&&options.rigid_velocity_scale>=0&&options.rigid_velocity_scale<=1e6f,"viewer rigid velocity scale must be finite and in [0,1000000]");
         need(std::isfinite(options.coordinate_frame_scale)&&options.coordinate_frame_scale>=0&&options.coordinate_frame_scale<=1e6f,"viewer coordinate frame scale must be finite in [0,1000000]");
         need(std::isfinite(options.transparent_opacity)&&options.transparent_opacity>=0&&options.transparent_opacity<=1,"viewer opacity must be finite in [0,1]");
+        need(culling_valid(options.face_culling),"unknown face culling mode");
+        need(valid_color_palette(frame.palette),"viewer palette RGBA must be finite in [0,1]");
         for(const auto scope:{options.bounds_scope,options.velocity_scope,options.scene_query_scope,options.coordinate_frame_scope,options.transparent_scope})need(scope_valid(scope),"unknown visualization scope");
         const auto selected_keys=visualization_selected_attachments(frame,selection);
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
@@ -350,7 +362,7 @@ struct Renderer::Impl {
             const auto color=tint(item);if(color[3]<=0)continue;
             if(options.show_solids&&!trigger) {
                 if(color[3]<1)transparent.push_back(&item);
-                else indexed(upload(item.mesh),projection,pose_matrix(item.world_pose),color,false);
+                else indexed(upload(item.mesh),projection,display_matrix(item),color,false,false,options.face_culling);
             }
             if(options.show_wireframe||trigger||selected_keys.count(item.key))wire_items.push_back(&item);
         }
@@ -362,12 +374,10 @@ struct Renderer::Impl {
                 need(finite(p),"viewer sorted draw has nonfinite center");
                 return -(double(view.values[2])*p.x+double(view.values[6])*p.y+double(view.values[10])*p.z+view.values[14]);
             };
-            for(const auto* list:{&transparent,&wire_items})for(const auto* item:*list)
-                depths.emplace(item->key,depth_of(item->world_pose.position));
-            for(const auto& shape:frame.render.instances)if(shape.world_bounds) {
-                const auto found=depths.find(shape.picking_key());if(found==depths.end())continue;
-                const auto& b=*shape.world_bounds;
-                found->second=depth_of({b.minimum.x*.5f+b.maximum.x*.5f,b.minimum.y*.5f+b.maximum.y*.5f,b.minimum.z*.5f+b.maximum.z*.5f});
+            for(const auto* list:{&transparent,&wire_items})for(const auto* item:*list) {
+                auto center=item->world_pose.position;
+                if(const auto bounds=display_bounds(*item))center={bounds->minimum.x*.5f+bounds->maximum.x*.5f,bounds->minimum.y*.5f+bounds->maximum.y*.5f,bounds->minimum.z*.5f+bounds->maximum.z*.5f};
+                depths.emplace(item->key,depth_of(center));
             }
         }
         const auto far_first=[&](const DrawItem* a,const DrawItem* b) {
@@ -376,7 +386,7 @@ struct Renderer::Impl {
         };
         if(transparent.size()>1)std::stable_sort(transparent.begin(),transparent.end(),far_first);
         for(const auto* item:transparent) {
-            indexed(upload(item->mesh),projection,pose_matrix(item->world_pose),tint(*item),false,true);
+            indexed(upload(item->mesh),projection,display_matrix(*item),tint(*item),false,true,options.face_culling);
             ++stats.transparent_draws;
         }
         if(wire_items.size()>1)std::stable_sort(wire_items.begin(),wire_items.end(),far_first);
@@ -385,7 +395,7 @@ struct Renderer::Impl {
             auto color=selected?std::array<float,4>{1,.81f,.29f,1}:
                        trigger?std::array<float,4>{.91f,.64f,.28f,.9f}:std::array<float,4>{.25f,.40f,.48f,.7f};
             color[3]*=mesh_opacity(*item,options,selected);
-            indexed(upload(item->mesh),projection,pose_matrix(item->world_pose),color,true,true);
+            indexed(upload(item->mesh),projection,display_matrix(*item),color,true,true,options.face_culling);
         }
         std::vector<Vertex> lines,triangles;lines.reserve(512);
         if(options.show_axes) {
@@ -396,7 +406,7 @@ struct Renderer::Impl {
         const Vec3 right{view.values[0],view.values[4],view.values[8]},up{view.values[1],view.values[5],view.values[9]};
         auto point=[&](Vec3 center,std::array<float,4> color,float pixels) {
             const double depth=-(double(view.values[2])*center.x+double(view.values[6])*center.y+double(view.values[10])*center.z+view.values[14]);
-            if(depth<=camera.near_plane)return;
+            if(depth<=camera.near_plane||depth>camera.far_plane)return;
             const auto half=static_cast<float>(pixels*depth*std::tan(camera.vertical_fov/2)/height);
             const auto x=scale(right,half),y=scale(up,half);
             const Vec3 corners[]={add(add(center,scale(x,-1)),scale(y,-1)),add(add(center,x),scale(y,-1)),add(add(center,x),y),add(add(center,scale(x,-1)),y)};
@@ -407,6 +417,15 @@ struct Renderer::Impl {
         if(options.show_joint_frames)for(const auto& l:frame.joint_frame_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_joint_limits)for(const auto& l:frame.joint_limit_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_bounds||options.show_linear_velocity||options.show_angular_velocity) {
+            auto displayed_geometry=frame.render;
+            if(options.show_bounds) {
+                std::map<PickingKey,const DrawItem*> displayed_draws;
+                for(const auto& draw:frame.draws)displayed_draws.emplace(draw.key,&draw);
+                for(auto& shape:displayed_geometry.instances) {
+                    const auto found=displayed_draws.find(shape.picking_key());
+                    if(found!=displayed_draws.end())shape.world_bounds=display_bounds(*found->second);
+                }
+            }
             std::size_t remaining=262144;
             for(bool bounds_pass:{true,false}) {
                 if(bounds_pass?!options.show_bounds:!options.show_linear_velocity&&!options.show_angular_velocity)continue;
@@ -418,7 +437,7 @@ struct Renderer::Impl {
                 request.max_diagnostics=256-overlays.diagnostics.size();request.visible_attachments.emplace();
                 const auto scope=bounds_pass?options.bounds_scope:options.velocity_scope;
                 for(const auto& draw:frame.draws)if(draw.visible&&visualization_scope_matches(scope,selected_keys.count(draw.key)!=0))request.visible_attachments->push_back(draw.key);
-                auto part=render::build_body_overlays(frame.render,frame.snapshot,request);
+                auto part=render::build_body_overlays(bounds_pass?displayed_geometry:frame.render,frame.snapshot,request);
                 remaining-=part.bounds.size()+part.linear_velocity.size()+part.angular_velocity.size();
                 overlays.bounds.insert(overlays.bounds.end(),part.bounds.begin(),part.bounds.end());
                 overlays.linear_velocity.insert(overlays.linear_velocity.end(),part.linear_velocity.begin(),part.linear_velocity.end());
@@ -496,37 +515,47 @@ struct Renderer::Impl {
         };
         if(options.show_cloth)for(const auto& cloth:frame.deformables.cloths) {
             if(!visible_owner(cloth.key))continue;
-            const auto base=cloth.color?rgba(*cloth.color):std::array<float,4>{.43f,.69f,.82f,1};
+            const auto base=cloth_color(cloth,frame.palette);
+            if(base[3]<=0)continue;
             for(std::size_t i=0;i<cloth.world_positions.size();++i) {
                 const bool pin=i<cloth.inverse_masses.size()&&cloth.inverse_masses[i]==0;
                 const bool active=selected(cloth.key,deformables::ElementKind::cloth_vertex,static_cast<std::uint32_t>(i));
-                point(cloth.world_positions[i],active?std::array<float,4>{1,.82f,.23f,1}:
-                    pin&&options.show_cloth_pins?std::array<float,4>{1,.48f,.22f,1}:base,
+                point(cloth.world_positions[i],active?std::array<float,4>{1,.82f,.23f,base[3]}:
+                    pin&&options.show_cloth_pins?std::array<float,4>{1,.48f,.22f,base[3]}:base,
                     options.point_size+(active?4.f:pin&&options.show_cloth_pins?2.f:0.f));
                 ++stats.cloth_points;
             }
             if(options.show_cloth_constraints)for(const auto& edge:cloth.constraints) {
                 if(edge.particle0>=cloth.world_positions.size()||edge.particle1>=cloth.world_positions.size())continue;
                 const auto color=selected(cloth.key,deformables::ElementKind::cloth_constraint,edge.index)?
-                    std::array<float,4>{.15f,.93f,.81f,1}:std::array<float,4>{base[0]*.85f,base[1]*.85f,base[2]*.85f,.8f};
+                    std::array<float,4>{.15f,.93f,.81f,base[3]}:std::array<float,4>{base[0]*.85f,base[1]*.85f,base[2]*.85f,.8f*base[3]};
                 line(lines,cloth.world_positions[edge.particle0],cloth.world_positions[edge.particle1],color,color);++stats.cloth_constraints;
             }
         }
         if(options.show_particles)for(const auto& cloud:frame.deformables.particle_clouds) {
             if(!visible_owner(cloud.key))continue;
-            const auto base=cloud.color?rgba(*cloud.color):cloud.kind==deformables::ParticleKind::fluid?
-                std::array<float,4>{.26f,.68f,.97f,1}:std::array<float,4>{.91f,.72f,.32f,1};
+            const auto base=particle_color(cloud,frame.palette);
+            if(base[3]<=0)continue;
             for(const auto& particle:cloud.particles)if(particle.position) {
                 const bool active=selected(cloud.key,deformables::ElementKind::particle,particle.index);
-                point(*particle.position,active?std::array<float,4>{1,.82f,.23f,1}:base,options.point_size+(active?4.f:0.f));++stats.particle_points;
+                point(*particle.position,active?std::array<float,4>{1,.82f,.23f,base[3]}:base,options.point_size+(active?4.f:0.f));++stats.particle_points;
                 if(options.show_particle_velocity&&particle.velocity) {
-                    const auto color=std::array<float,4>{.38f,.87f,.72f,.9f};
+                    const auto color=std::array<float,4>{.38f,.87f,.72f,.9f*base[3]};
                     line(lines,*particle.position,add(*particle.position,scale(*particle.velocity,options.particle_velocity_scale)),color,color);
                     ++stats.particle_velocity_vectors;
                 }
             }
         }
         draw_dynamic(triangles,lines,projection);
+        if(options.show_orbit_target) {
+            const auto half=static_cast<float>(7*camera.distance*std::tan(camera.vertical_fov/2)/height);
+            const auto x=scale(right,half),y=scale(up,half);
+            std::vector<Vertex> marker;
+            const std::array<float,4> color{.2f,.95f,.85f,1};
+            line(marker,add(camera.target,scale(x,-1)),add(camera.target,x),color,color);
+            line(marker,add(camera.target,scale(y,-1)),add(camera.target,y),color,color);
+            draw_dynamic({},marker,projection,true);stats.orbit_target_markers=1;
+        }
         // Avoid retaining the viewport as an output when the host samples its SRV.
         context->OMSetRenderTargets(0,nullptr,nullptr);
         if(multisample_target)context->ResolveSubresource(target.Get(),0,multisample_target.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);

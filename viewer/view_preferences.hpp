@@ -17,6 +17,9 @@ inline bool valid_view_preferences(const ViewPreferences &v) noexcept {
   const auto &r = v.rendering;
   if ((r.antialiasing != Antialiasing::off &&
        r.antialiasing != Antialiasing::msaa4x) ||
+      (r.face_culling != FaceCulling::none &&
+       r.face_culling != FaceCulling::front &&
+       r.face_culling != FaceCulling::back) ||
       !valid_inspector_preferences(v.inspection) ||
       !valid_camera_navigation(v.navigation))
     return false;

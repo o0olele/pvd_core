@@ -1,10 +1,12 @@
 #pragma once
+#include "palette.hpp"
 #include "pvd/constraint_builder.hpp"
 #include "pvd/debug_render.hpp"
 #include "pvd/deformables.hpp"
 #include "pvd/mesh_builder.hpp"
 #include "pvd/scene_queries.hpp"
 #include <array>
+#include <limits>
 #include <memory>
 #include <set>
 
@@ -28,9 +30,18 @@ struct Mat4 {
 };
 Mat4 multiply(const Mat4 &, const Mat4 &);
 Mat4 pose_matrix(const Transform &);
+struct RayViewClip {
+  Vec3 forward{0, 0, -1};
+  // Camera view-depth from Ray::origin, not distance along an off-axis ray.
+  double near_depth = 0, far_depth = std::numeric_limits<double>::infinity();
+};
 struct Ray {
   Vec3 origin, direction;
+  // Manual world-distance constraints. Existing two-field rays stay infinite.
+  double min_distance = 0, max_distance = std::numeric_limits<double>::infinity();
+  std::optional<RayViewClip> view_clip;
 }; // Direction normalized by camera helpers.
+enum class FaceCulling { none, front, back };
 struct DrawItem {
   std::shared_ptr<const render::TriangleBuffer> mesh;
   Transform world_pose;
@@ -39,7 +50,16 @@ struct DrawItem {
   bool pickable = true, selected = false;
   bool visible =
       true; // Viewer state only; hidden draws are never CPU-pickable.
+  // Positive uniform display-only scale about world_pose.position. Geometry
+  // resources and recorded poses remain unchanged; cache identity is retained.
+  float geometry_scale = 1;
+  std::optional<render::Bounds> display_world_bounds;
+  FaceCulling face_culling = FaceCulling::none; // CPU-pick policy supplied by host.
 };
+bool valid_geometry_scale(float) noexcept;
+Mat4 display_matrix(const DrawItem &);
+Vec3 display_point(const DrawItem &, Vec3 local_position);
+std::optional<render::Bounds> display_bounds(const DrawItem &);
 struct PickHit {
   PickingKey key;
   double distance = 0;
@@ -103,6 +123,10 @@ struct ViewOptions {
   // Awake/unknown-sleep and non-trigger shapes remain governed by categories.
   VisualizationScope sleeping_scope = VisualizationScope::all;
   VisualizationScope trigger_scope = VisualizationScope::all;
+  float geometry_scale = 1; // [.01,10000], shape local-origin display scale.
+  bool show_planes = true;
+  float joint_frame_scale = 1, joint_limit_scale = 1; // [0,10000], display only.
+  ColorPalette palette;
 };
 struct ColorLegendEntry {
   std::string label;
@@ -142,9 +166,11 @@ struct ActorNode {
 };
 struct FrameState {
   Snapshot snapshot;
+  ColorPalette palette; // Derived from ViewOptions, not a second preference.
   render::Frame render;
   render::DebugResult debug;
   std::vector<render::DebugLine> joint_frame_lines, joint_limit_lines;
+  float joint_frame_scale = 1, joint_limit_scale = 1; // Current derived line scales.
   render::SceneQueries scene_queries;
   struct QueryVolume {
     render::SceneQuerySource source;

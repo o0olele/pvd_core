@@ -55,6 +55,8 @@ struct RenderOptions {
     float coordinate_frame_scale = 0.5f;
     VisualizationScope transparent_scope = VisualizationScope::none;
     float transparent_opacity = 0.35f;
+    FaceCulling face_culling = FaceCulling::none;
+    bool show_orbit_target = false;
 };
 struct RenderStats {
     std::uint64_t draw_calls = 0, triangles = 0, line_segments = 0, points = 0;
@@ -70,6 +72,7 @@ struct RenderStats {
                   transparent_draws = 0;
     std::size_t coordinate_frame_diagnostics = 0;
     bool coordinate_frames_complete = true;
+    std::uint64_t orbit_target_markers = 0;
 };
 struct RgbaImage {
     std::uint32_t width = 0, height = 0;

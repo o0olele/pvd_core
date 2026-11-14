@@ -19,7 +19,7 @@ def run(viewer: Path, capture: Path, fixtures: Path) -> None:
     result = json.loads(report.read_text(encoding="utf-8"))
     assert completed.returncode == 0 and result["passed"], result
     for flag in ("stable_loading_target", "independent_state", "locks_protected",
-                 "inactive_export_verified", "persistence", "identity_verified", "curves_retained"):
+                 "inactive_export_verified", "persistence", "preferences_reset", "identity_verified", "curves_retained"):
         assert result[flag], (flag, result)
     assert not result["auto_settings_io"] and result["slots"] == 2 and result["bookmarks"] == 1, result
     assert state.stat().st_size > 100 and Path(str(state) + ".capture.pxd2").stat().st_size > 1000
