@@ -1,6 +1,6 @@
 # Analysis is independent of transport, rendering, ImGui, Windows and the SDK.
 add_library(pvd_analysis src/profile.cpp src/memory.cpp src/errors.cpp src/curves.cpp
-    src/memory_bootstrap.cpp src/profile_bootstrap.cpp)
+    src/memory_bootstrap.cpp src/profile_bootstrap.cpp src/profile_curves.cpp)
 add_library(pvd::analysis ALIAS pvd_analysis)
 set_target_properties(pvd_analysis PROPERTIES EXPORT_NAME analysis VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -18,7 +18,7 @@ endif()
 list(APPEND PVD_INSTALL_TARGETS pvd_analysis)
 
 if(BUILD_TESTING)
-    foreach(kind IN ITEMS profile memory error curves memory_bootstrap profile_bootstrap)
+    foreach(kind IN ITEMS profile memory error curves memory_bootstrap profile_bootstrap profile_curves)
         add_executable(pvd_${kind}_tests tests/${kind}_tests.cpp)
         target_link_libraries(pvd_${kind}_tests PRIVATE pvd::analysis)
         add_test(NAME ${kind} COMMAND pvd_${kind}_tests)
@@ -34,6 +34,12 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         ${PROJECT_SOURCE_DIR}/examples/physx34_compat
         ${PHYSX34_ROOT}/PxShared/src/foundation/include
         ${PHYSX34_ROOT}/PxShared/src/pvd/src)
+    pvd_add_physx34_capture(pvd_physx34_profile_frames_capture
+        ${PROJECT_SOURCE_DIR}/examples/physx34_profile_frames_capture.cpp)
+    target_include_directories(pvd_physx34_profile_frames_capture SYSTEM PRIVATE
+        ${PROJECT_SOURCE_DIR}/examples/physx34_compat
+        ${PHYSX34_ROOT}/PxShared/src/foundation/include
+        ${PHYSX34_ROOT}/PxShared/src/pvd/src)
     pvd_add_physx34_capture(pvd_physx34_memory_capture
         ${PROJECT_SOURCE_DIR}/examples/physx34_memory_capture.cpp)
     target_include_directories(pvd_physx34_memory_capture SYSTEM PRIVATE
@@ -41,6 +47,15 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         ${PHYSX34_ROOT}/PxShared/src/foundation/include)
     if(BUILD_TESTING)
         file(MAKE_DIRECTORY ${PROJECT_BINARY_DIR}/fixtures)
+        add_test(NAME physx34_profile_frames_generate COMMAND pvd_physx34_profile_frames_capture
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames)
+        set_tests_properties(physx34_profile_frames_generate PROPERTIES FIXTURES_SETUP physx34_profile_frames TIMEOUT 30)
+        add_test(NAME physx34_profile_curves COMMAND pvd_profile_curves_tests
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_capture.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_expected.csv
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_windows.csv
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_scopes.csv)
+        set_tests_properties(physx34_profile_curves PROPERTIES FIXTURES_REQUIRED physx34_profile_frames TIMEOUT 30)
         add_test(NAME physx34_profile_generate COMMAND pvd_physx34_profile_capture
             ${PROJECT_BINARY_DIR}/fixtures/profile)
         set_tests_properties(physx34_profile_generate PROPERTIES FIXTURES_SETUP physx34_profile TIMEOUT 30)
