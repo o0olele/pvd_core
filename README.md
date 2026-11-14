@@ -14,6 +14,8 @@
 
 可选 `pvd::analysis` 提供与 UI、GPU、PhysX SDK 无关的 CPU profile 索引、时间/线程/名称查询、内存分配/释放历史、峰值/分组、错误筛选和 CSV 导出。支持 LE/BE 和增量 Session，详见 [性能分析](docs/profile.md) 和 [内存与错误分析](docs/memory.md)。
 
+0.6 版在 ImGui 中接入 Profiler、Memory 和 Errors 工作区，包含按线程/context 的可缩放 CPU 时间线、时长聚合、历史内存分组、错误定位及筛选后的 CSV。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

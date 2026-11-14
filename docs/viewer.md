@@ -45,6 +45,21 @@ cmake --build build-physx34 --config Debug --parallel 4
 
 关闭 `PVD_BUILD_TRANSPORT` 时仍可构建完整离线查看器，界面不会显示实时采集入口。
 
+## 工程分析工作区
+
+顶部 **Scene / Profiler / Memory / Errors** 切换工作区。分析通过可选的 `pvd::analysis` 库提供；关闭 `PVD_BUILD_ANALYSIS` 时仍可使用场景查看及实时采集。
+
+- **Profiler** 按 zone、thread、context 分开绘制 CPU 区间，可搜索事件名、过滤线程/zone、限制在当前帧接收到的 profile 包；滚轮缩放时间范围、中键平移。选择区间可查看原生 tick 和校准时长，双击定位接收该包的场景帧。Summary 为包含嵌套时间的 inclusive 聚合，Intervals 为可虚拟滚动的明细。CSV 使用同样的筛选，保留原始计数。GPU、丢失配对、损坏包及 SDK value 事件的时间/截断限制均会报告。
+- **Memory** 在当前帧或整份录制的事件前缀查询分配历史与累计/峰值，保留原始地址、generation、类型、文件和行号。History 可按文本、active-only 筛选并分页；Groups 按类型、文件及行号分组。页头总量和 Groups 覆盖选中前缀的全部分配，历史筛选仅作用于 History 及其 CSV；两种 CSV 入口分别导出相应范围。不完整采集（例如启用监听前已发生的分配在录制中释放）明确显示诊断。
+- **Errors** 保留代码数值、消息、文件、行号及源事件，支持筛选、分页和 CSV。双击消息可定位接收它的场景帧。未知代码保留原始数值。
+
+Profile / memory 流未采集时会说明应启用的 SDK instrumentation 标志，不会显示伪造的零耗时或零内存。实时分析只解析新 Session 前缀；历史查询和过滤不重置解析器的跨包状态。若录制仅含分析通道而没有场景帧，可直接分析全部捕获数据。
+
+```powershell
+& .\build-physx34\viewer\Debug\pvd_viewer.exe .\build-physx34\fixtures\profile_capture.pxd2 --page profile
+& .\build-physx34\viewer\Debug\pvd_viewer.exe .\build-physx34\fixtures\allocations_memory.pxd2 --page memory
+```
+
 ## 验证
 
 ```powershell
@@ -58,6 +73,8 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 `viewer_model` 验证相机、矩阵、射线拾取和文档状态，`viewer_physx34` 读取真实 SDK 录制。`viewer_gpu` 使用 D3D11 WARP 实际光栅化，执行逐帧/播放、CPU 三角形拾取与属性联动，并从 GPU 读回图像，检查同一相机下不同捕获帧的图像变化，以及选择高亮改变像素。PNG 来自包含 ImGui 界面的真实交换链 backbuffer。`--warp` 可省略以使用本机硬件；硬件设备创建失败时自动回退 WARP。
 
 `viewer_live` 验证安全增量、暂停和跟随、事务中间状态及取消；`viewer_live_physx34` 用真实 SDK 验证双场景、中文录制路径、载荷预算和重开后的状态一致；`viewer_live_gpu` 启动真实 SDK 客户端连接运行中的查看器，验证接收期间的 D3D11 画面更新、完整录制和离线重开。
+
+`analysis_panels` 通过真实 ImGui widget 验证历史前缀切换、分页、错误过滤及 1440/1060 宽度布局。`analysis_panels_physx34` 读取真实 memory/error 捕获。`viewer_profile_gpu`、`viewer_memory_gpu`、`viewer_errors_gpu` 渲染实际分析工作区并保存 GPU backbuffer 截图，路径为 `build-physx34/fixtures/viewer-{profile,memory,errors}.png`；JSON 同名。
 
 这些是程序内模型及渲染验证，未替代系统鼠标、文件对话框及高 DPI 多显示器的人工交互验收。性能、内存、曲线、工程剪辑和旧版容器等完整应用功能按 [实施清单](application-roadmap.md) 继续建设。
 

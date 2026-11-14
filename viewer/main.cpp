@@ -1,6 +1,9 @@
 #include "model.hpp"
 #include "panels.hpp"
 #include "renderer.hpp"
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+#include "analysis_panels.hpp"
+#endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
 #include "live_session.hpp"
 #endif
@@ -33,6 +36,8 @@ struct Options {
     std::filesystem::path recording, ready;
     bool smoke = false, warp = false, hidden = false;
     bool live_smoke = false;
+    bool analysis_smoke = false;
+    int analysis_page = 0;
     int listen_port = -1;
 };
 std::string utf8(const std::wstring& s) {
@@ -70,6 +75,14 @@ Options arguments() {
                 return args[i];
             };
             if (a == L"--smoke") { result.smoke = true; result.capture = value(); }
+            else if (a == L"--analysis-smoke") { result.analysis_smoke=true; result.capture=value(); result.analysis_page=1; }
+            else if (a == L"--page") {
+                const auto page=value().wstring();
+                if(page==L"profile")result.analysis_page=1;
+                else if(page==L"memory")result.analysis_page=2;
+                else if(page==L"errors")result.analysis_page=3;
+                else throw std::runtime_error("Analysis page must be profile, memory or errors");
+            }
             else if (a == L"--screenshot") result.screenshot = value();
             else if (a == L"--report") result.report = value();
             else if (a == L"--warp") result.warp = true;
@@ -93,6 +106,9 @@ Options arguments() {
     if (result.live_smoke && (result.listen_port<0 || result.recording.empty())) throw std::runtime_error("Live smoke requires --listen and --record");
 #ifndef PVD_VIEWER_HAS_TRANSPORT
     if (result.listen_port>=0 || result.live_smoke) throw std::runtime_error("This viewer was built without the transport module");
+#endif
+#ifndef PVD_VIEWER_HAS_ANALYSIS
+    if(result.analysis_smoke||result.analysis_page)throw std::runtime_error("This viewer was built without the analysis module");
 #endif
     return result;
 }
@@ -133,7 +149,7 @@ public:
         }
 #endif
         if (!options_.capture.empty()) {
-            if (options_.smoke) { document_.open_file(utf8(options_.capture.wstring())); loaded(); }
+            if (options_.smoke || options_.analysis_smoke) { document_.open_file(utf8(options_.capture.wstring())); loaded(); }
             else open(options_.capture);
         }
         const auto started = std::chrono::steady_clock::now();
@@ -157,7 +173,7 @@ public:
             if (IsIconic(window_)) { std::this_thread::sleep_for(std::chrono::milliseconds(16)); continue; }
             auto now = std::chrono::steady_clock::now();
             document_.advance(std::min(0.1, std::chrono::duration<double>(now - previous).count())); previous = now;
-            if ((options_.smoke || options_.live_smoke) && std::chrono::duration<double>(now - started).count() > 30)
+            if ((options_.smoke || options_.live_smoke || options_.analysis_smoke) && std::chrono::duration<double>(now - started).count() > 30)
                 throw std::runtime_error("Viewer smoke test timed out");
             ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
             draw();
@@ -169,13 +185,16 @@ public:
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             ++host_frames_;
             if (options_.smoke) smoke_step();
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+            else if(options_.analysis_smoke) analysis_smoke_step();
+#endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
             else if (options_.live_smoke) live_smoke_step();
 #endif
             else if (!options_.screenshot.empty() && document_.loaded() && host_frames_ > 8) {
                 screenshot(); options_.screenshot.clear();
             }
-            const HRESULT present = swapchain_->Present((options_.smoke || options_.live_smoke) ? 0 : 1, 0);
+            const HRESULT present = swapchain_->Present((options_.smoke || options_.live_smoke || options_.analysis_smoke) ? 0 : 1, 0);
             if (FAILED(present)) check(present, "Present frame");
             if (options_.live_smoke || present==DXGI_STATUS_OCCLUDED) std::this_thread::sleep_for(std::chrono::milliseconds(8));
         }
@@ -205,6 +224,10 @@ private:
     std::size_t selection_pixels_ = 0;
     std::size_t motion_pixels_ = 0;
     std::optional<std::uint64_t> displayed_scene_;
+    int workspace_page_=0;
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+    AnalysisPanels analysis_;
+#endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
     LiveSession live_;
     std::array<char,64> capture_address_{'1','2','7','.','0','.','0','.','1'};
@@ -323,6 +346,10 @@ private:
         c[ImGuiCol_Separator] = c[ImGuiCol_Border];
         c[ImGuiCol_TableHeaderBg] = {0.08f,0.12f,0.16f,1};
         c[ImGuiCol_TableRowBgAlt] = {0.12f,0.16f,0.21f,0.35f};
+        c[ImGuiCol_Tab] = {0.08f,0.16f,0.20f,1};
+        c[ImGuiCol_TabHovered] = {0.12f,0.33f,0.35f,1};
+        c[ImGuiCol_TabSelected] = {0.10f,0.28f,0.30f,1};
+        c[ImGuiCol_TabSelectedOverline] = {0.24f,0.82f,0.72f,1};
     }
     void choose_file() {
         std::wstring buffer(32768, L'\0');
@@ -352,6 +379,9 @@ private:
     }
     void loaded() {
         fitted_ = false; panels_ = {}; renderer_->clear_mesh_cache();
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+        analysis_.reset();
+#endif
         std::wstring title = L"PVD Studio  |  " + std::filesystem::u8path(document_.source_label()).filename().wstring();
         SetWindowTextW(window_, title.c_str());
     }
@@ -498,6 +528,32 @@ private:
         if (ImGui::IsKeyPressed(ImGuiKey_End) && !document_.timeline().empty()) document_.set_frame(document_.timeline().size()-1);
         if (ImGui::IsKeyPressed(ImGuiKey_F)) document_.fit_scene(camera_, viewport_size_.x / std::max(1.0f, viewport_size_.y));
     }
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+    void export_csv(const char* name,const std::function<void(std::ostream&)>& writer) {
+        try {
+            std::wstring buffer(32768,L'\0');
+            const auto initial=std::filesystem::u8path(name).wstring();std::copy(initial.begin(),initial.end(),buffer.begin());
+            OPENFILENAMEW dialog{sizeof(OPENFILENAMEW)};dialog.hwndOwner=window_;dialog.lpstrFile=buffer.data();dialog.nMaxFile=static_cast<DWORD>(buffer.size());
+            dialog.lpstrFilter=L"CSV file (*.csv)\0*.csv\0All files\0*.*\0";dialog.lpstrDefExt=L"csv";dialog.lpstrTitle=L"Export analysis CSV";
+            dialog.Flags=OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR;
+            if(!GetSaveFileNameW(&dialog))return;
+            buffer.resize(wcslen(buffer.c_str()));std::ofstream output(std::filesystem::path(buffer),std::ios::binary|std::ios::trunc);
+            if(!output)throw std::runtime_error("Cannot create CSV file");writer(output);output.flush();
+            if(!output)throw std::runtime_error("Cannot finish CSV export");
+        }catch(const std::exception& e){error_=e.what();}
+    }
+    void analysis_smoke_step() {
+        if(host_frames_<6)return;
+        const auto page=static_cast<AnalysisPage>(workspace_page_-1);
+        const auto rows=analysis_.row_count(page),visible=analysis_.visible_row_count(page);
+        if(workspace_page_!=options_.analysis_page||!rows||!visible)throw std::runtime_error("Analysis workspace did not show actual capture data");
+        if(!options_.screenshot.empty())screenshot();
+        if(!options_.report.empty()){
+            std::ofstream report(options_.report);report<<"{\"passed\":true,\"page\":"<<workspace_page_<<",\"rows\":"<<rows<<",\"visible_rows\":"<<visible<<"}\n";
+            if(!report)throw std::runtime_error("Cannot write analysis GPU report");
+        }quit_=true;
+    }
+#endif
     void draw() {
         shortcuts();
         const auto* main = ImGui::GetMainViewport();
@@ -528,9 +584,18 @@ private:
             ImGui::TextWrapped("%s", error_.c_str());
             if (ImGui::SmallButton("Dismiss")) error_.clear();
         }
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+        if(ImGui::BeginTabBar("Workspace views")){
+            const char* names[]={"Scene","Profiler","Memory","Errors"};
+            for(int page=0;page<4;++page){
+                const auto flags=(host_frames_==0&&options_.analysis_page==page)?ImGuiTabItemFlags_SetSelected:ImGuiTabItemFlags_None;
+                if(ImGui::BeginTabItem(names[page],nullptr,flags)){workspace_page_=page;ImGui::EndTabItem();}
+            }ImGui::EndTabBar();
+        }
+#endif
         const float timeline_height = 130, status_height = 24;
         const float body_height = std::max(100.0f, ImGui::GetContentRegionAvail().y - timeline_height - status_height - 16);
-        if (ImGui::BeginTable("workspace", 3, ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
+        if (workspace_page_==0 && ImGui::BeginTable("workspace", 3, ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
             ImGui::TableSetupColumn("Hierarchy", ImGuiTableColumnFlags_WidthFixed, 246);
             ImGui::TableSetupColumn("Viewport", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Inspector", ImGuiTableColumnFlags_WidthFixed, 310);
@@ -545,6 +610,13 @@ private:
             if (diagnostics_) drawDiagnostics(document_, panels_); else drawInspector(document_, panels_);
             ImGui::EndChild(); ImGui::EndTable();
         }
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+        if(workspace_page_>0){
+            ImGui::BeginChild("Analysis workspace",{0,body_height},ImGuiChildFlags_Borders);
+            analysis_.draw(document_,static_cast<AnalysisPage>(workspace_page_-1),[&](const char* name,const auto& writer){export_csv(name,writer);});
+            ImGui::EndChild();
+        }
+#endif
         ImGui::BeginChild("Timeline", {0,timeline_height}, ImGuiChildFlags_Borders);
         drawTimeline(document_, panels_); ImGui::EndChild();
         const auto frame = document_.frame(); const auto stats = renderer_->stats();
