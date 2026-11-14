@@ -1,0 +1,485 @@
+// Isolated /MTd SDK process. No pvd_core or pvd::repx linkage: files are the
+// only boundary between the independent exporter and the SDK XML loader.
+#include <PxPhysicsAPI.h>
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <vector>
+
+namespace {
+using namespace physx;
+void need(bool b, const std::string &message) {
+  if (!b)
+    throw std::runtime_error(message);
+}
+struct Assertions : PxAssertHandler {
+  void operator()(const char *e, const char *f, int l, bool &) override {
+    std::fprintf(stderr, "PhysX assertion: %s (%s:%d)\n", e, f, l);
+    std::fflush(nullptr);
+    std::_Exit(3);
+  }
+};
+struct Errors : PxErrorCallback {
+  unsigned failures = 0;
+  void reportError(PxErrorCode::Enum code, const char *text, const char *file,
+                   int line) override {
+    std::fprintf(stderr, "PhysX [%u] %s (%s:%d)\n", unsigned(code), text, file,
+                 line);
+    if (code != PxErrorCode::eDEBUG_INFO && code != PxErrorCode::eDEBUG_WARNING)
+      ++failures;
+  }
+};
+struct Context {
+  PxDefaultAllocator allocator;
+  Errors errors;
+  PxFoundation *foundation = nullptr;
+  PxPhysics *physics = nullptr;
+  PxCooking *cooking = nullptr;
+  PxSerializationRegistry *registry = nullptr;
+  PxStringTable *strings = nullptr;
+  Context() {
+    foundation = PxCreateFoundation(PX_FOUNDATION_VERSION, allocator, errors);
+    need(foundation, "foundation");
+    physics = PxCreatePhysics(PX_PHYSICS_VERSION, *foundation,
+                              PxTolerancesScale(), true);
+    need(physics, "physics");
+    cooking = PxCreateCooking(PX_PHYSICS_VERSION, *foundation,
+                              PxCookingParams(physics->getTolerancesScale()));
+    need(cooking, "cooking");
+    registry = PxSerialization::createSerializationRegistry(*physics);
+    need(registry, "registry");
+    strings = &PxStringTableExt::createStringTable(allocator);
+  }
+  ~Context() {
+    if (registry)
+      registry->release();
+    if (cooking)
+      cooking->release();
+    if (physics)
+      physics->release();
+    if (strings)
+      strings->release();
+    if (foundation)
+      foundation->release();
+  }
+};
+struct Input : PxInputData {
+  std::vector<PxU8> data;
+  PxU32 position = 0;
+  explicit Input(const std::string &path) {
+    std::ifstream file(std::filesystem::u8path(path), std::ios::binary);
+    need(bool(file), "open RepX XML");
+    file.seekg(0, std::ios::end);
+    const auto size = file.tellg();
+    need(size >= 0 && static_cast<std::uint64_t>(size) <= 256u * 1024u * 1024u,
+         "XML input size");
+    data.resize(static_cast<std::size_t>(size));
+    file.seekg(0);
+    file.read(reinterpret_cast<char *>(data.data()), size);
+    need(bool(file), "read RepX XML");
+  }
+  PxU32 read(void *output, PxU32 count) override {
+    const auto n = std::min<PxU32>(count, getLength() - position);
+    if (n)
+      std::memcpy(output, data.data() + position, n);
+    position += n;
+    return n;
+  }
+  PxU32 getLength() const override { return static_cast<PxU32>(data.size()); }
+  void seek(PxU32 offset) override { position = std::min(offset, getLength()); }
+  PxU32 tell() const override { return position; }
+};
+std::string float_text(float value) {
+  char b[64];
+  const auto r =
+      std::to_chars(b, b + sizeof(b), value, std::chars_format::general,
+                    std::numeric_limits<float>::max_digits10);
+  need(r.ec == std::errc{}, "float output");
+  return std::string(b, r.ptr);
+}
+std::string hex(const char *text) {
+  std::string r;
+  const char *digits = "0123456789abcdef";
+  if (text)
+    for (const auto *p = reinterpret_cast<const unsigned char *>(text); *p;
+         ++p) {
+      r += digits[*p >> 4];
+      r += digits[*p & 15];
+    }
+  return r;
+}
+struct Locator {
+  std::uint64_t serial = 0, owner = 0;
+  std::size_t shape = 0;
+  bool operator<(const Locator &o) const {
+    return std::tie(serial, owner, shape) <
+           std::tie(o.serial, o.owner, o.shape);
+  }
+};
+struct Field {
+  char type = 'u';
+  std::string value;
+};
+using Fields = std::map<std::pair<std::string, std::size_t>, Field>;
+void u(Fields &f, const std::string &name, std::uint64_t value,
+       std::size_t index = 0) {
+  f[{name, index}] = {'u', std::to_string(value)};
+}
+template <class Enum, class Storage>
+void u(Fields &f, const std::string &name, PxFlags<Enum, Storage> value,
+       std::size_t index = 0) {
+  u(f, name, static_cast<Storage>(value), index);
+}
+void scalar(Fields &f, const std::string &name, float value,
+            std::size_t index = 0) {
+  f[{name, index}] = {'f', float_text(value)};
+}
+void vec(Fields &f, const std::string &name, const PxVec3 &v,
+         std::size_t index = 0) {
+  scalar(f, name, v.x, index);
+  scalar(f, name, v.y, index + 1);
+  scalar(f, name, v.z, index + 2);
+}
+void quat(Fields &f, const std::string &name, const PxQuat &q,
+          std::size_t index = 0) {
+  scalar(f, name, q.x, index);
+  scalar(f, name, q.y, index + 1);
+  scalar(f, name, q.z, index + 2);
+  scalar(f, name, q.w, index + 3);
+}
+void pose(Fields &f, const std::string &name, const PxTransform &p,
+          std::size_t index = 0) {
+  quat(f, name, p.q, index);
+  vec(f, name, p.p, index + 4);
+}
+bool less(const PxVec3 &a, const PxVec3 &b) {
+  return std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z);
+}
+void vertices(Fields &fields, std::vector<PxVec3> points) {
+  std::sort(points.begin(), points.end(), less);
+  u(fields, "VertexCount", points.size());
+  for (std::size_t i = 0; i < points.size(); ++i)
+    vec(fields, "Vertex", points[i], i * 3);
+}
+void triangles(Fields &fields, const PxTriangleMesh &mesh) {
+  std::vector<std::array<PxVec3, 3>> all;
+  const bool small =
+      bool(mesh.getTriangleMeshFlags() & PxTriangleMeshFlag::e16_BIT_INDICES);
+  for (PxU32 i = 0; i < mesh.getNbTriangles(); ++i) {
+    std::array<PxVec3, 3> triangle;
+    for (PxU32 j = 0; j < 3; ++j) {
+      const auto index =
+          small ? static_cast<const PxU16 *>(mesh.getTriangles())[i * 3 + j]
+                : static_cast<const PxU32 *>(mesh.getTriangles())[i * 3 + j];
+      triangle[j] = mesh.getVertices()[index];
+    }
+    const auto minimum = static_cast<std::size_t>(
+        std::min_element(triangle.begin(), triangle.end(), less) -
+        triangle.begin());
+    std::rotate(triangle.begin(), triangle.begin() + minimum, triangle.end());
+    all.push_back(triangle);
+  }
+  std::sort(all.begin(), all.end(), [](const auto &a, const auto &b) {
+    for (std::size_t i = 0; i < 3; ++i) {
+      if (less(a[i], b[i]))
+        return true;
+      if (less(b[i], a[i]))
+        return false;
+    }
+    return false;
+  });
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    for (std::size_t j = 0; j < 3; ++j)
+      vec(fields, "TriangleVertex", all[i][j], i * 9 + j * 3);
+    const auto normal =
+        (all[i][1] - all[i][0]).cross(all[i][2] - all[i][0]).getNormalized();
+    vec(fields, "TriangleNormal", normal, i * 3);
+  }
+}
+Fields inspect(PxBase &object, PxCollection &collection) {
+  Fields f;
+  if (auto *actor = object.is<PxRigidActor>()) {
+    f[{"Name", 0}] = {'s', hex(actor->getName())};
+    pose(f, "GlobalPose", actor->getGlobalPose());
+    u(f, "ActorFlags", actor->getActorFlags());
+    u(f, "DominanceGroup", actor->getDominanceGroup());
+    u(f, "OwnerClient", actor->getOwnerClient());
+    u(f, "ClientBehaviorFlags", actor->getClientBehaviorFlags());
+    std::vector<PxShape *> shapes(actor->getNbShapes());
+    actor->getShapes(shapes.data(), static_cast<PxU32>(shapes.size()));
+    u(f, "ShapeCount", shapes.size());
+    for (std::size_t i = 0; i < shapes.size(); ++i) {
+      u(f, "ShapeRef", collection.getId(*shapes[i]), i);
+      pose(f, "ShapeWorldPose",
+           actor->getGlobalPose() * shapes[i]->getLocalPose(), i * 7);
+    }
+    if (auto *dynamic = actor->is<PxRigidDynamic>()) {
+      pose(f, "CMassLocalPose", dynamic->getCMassLocalPose());
+      scalar(f, "Mass", dynamic->getMass());
+      vec(f, "MassSpaceInertiaTensor", dynamic->getMassSpaceInertiaTensor());
+      vec(f, "LinearVelocity", dynamic->getLinearVelocity());
+      vec(f, "AngularVelocity", dynamic->getAngularVelocity());
+      u(f, "RigidBodyFlags", dynamic->getRigidBodyFlags());
+      PxTransform target(PxIdentity);
+      u(f, "HasKinematicTarget", dynamic->getKinematicTarget(target) ? 1 : 0);
+      u(f, "RigidDynamicLockFlags", dynamic->getRigidDynamicLockFlags());
+      scalar(f, "LinearDamping", dynamic->getLinearDamping());
+      scalar(f, "AngularDamping", dynamic->getAngularDamping());
+      scalar(f, "MaxAngularVelocity", dynamic->getMaxAngularVelocity());
+      scalar(f, "MinCCDAdvanceCoefficient",
+             dynamic->getMinCCDAdvanceCoefficient());
+      scalar(f, "MaxDepenetrationVelocity",
+             dynamic->getMaxDepenetrationVelocity());
+      scalar(f, "MaxContactImpulse", dynamic->getMaxContactImpulse());
+      scalar(f, "SleepThreshold", dynamic->getSleepThreshold());
+      scalar(f, "StabilizationThreshold", dynamic->getStabilizationThreshold());
+      scalar(f, "WakeCounter", dynamic->getWakeCounter());
+      scalar(f, "ContactReportThreshold", dynamic->getContactReportThreshold());
+      PxU32 p = 0, v = 0;
+      dynamic->getSolverIterationCounts(p, v);
+      u(f, "minPositionIters", p);
+      u(f, "minVelocityIters", v);
+    }
+  }
+  if (auto *shape = object.is<PxShape>()) {
+    f[{"Name", 0}] = {'s', hex(shape->getName())};
+    pose(f, "LocalPose", shape->getLocalPose());
+    u(f, "IsExclusive", shape->isExclusive() ? 1 : 0);
+    u(f, "Flags", shape->getFlags());
+    scalar(f, "ContactOffset", shape->getContactOffset());
+    scalar(f, "RestOffset", shape->getRestOffset());
+    const auto sim = shape->getSimulationFilterData(),
+               query = shape->getQueryFilterData();
+    const PxU32 simwords[] = {sim.word0, sim.word1, sim.word2, sim.word3},
+                querywords[] = {query.word0, query.word1, query.word2,
+                                query.word3};
+    for (std::size_t i = 0; i < 4; ++i) {
+      u(f, "SimulationFilterData", simwords[i], i);
+      u(f, "QueryFilterData", querywords[i], i);
+    }
+    std::vector<PxMaterial *> mats(shape->getNbMaterials());
+    shape->getMaterials(mats.data(), static_cast<PxU32>(mats.size()));
+    u(f, "MaterialCount", mats.size());
+    for (std::size_t i = 0; i < mats.size(); ++i)
+      u(f, "MaterialRef", collection.getId(*mats[i]), i);
+    const auto g = shape->getGeometry();
+    u(f, "GeometryType", g.getType());
+    switch (g.getType()) {
+    case PxGeometryType::eBOX:
+      vec(f, "HalfExtents", g.box().halfExtents);
+      break;
+    case PxGeometryType::eSPHERE:
+      scalar(f, "Radius", g.sphere().radius);
+      break;
+    case PxGeometryType::eCAPSULE:
+      scalar(f, "Radius", g.capsule().radius);
+      scalar(f, "HalfHeight", g.capsule().halfHeight);
+      break;
+    case PxGeometryType::eCONVEXMESH:
+      vec(f, "MeshScale", g.convexMesh().scale.scale);
+      quat(f, "MeshRotation", g.convexMesh().scale.rotation);
+      u(f, "MeshFlags", g.convexMesh().meshFlags);
+      u(f, "ResourceRef", collection.getId(*g.convexMesh().convexMesh));
+      break;
+    case PxGeometryType::eTRIANGLEMESH:
+      vec(f, "MeshScale", g.triangleMesh().scale.scale);
+      quat(f, "MeshRotation", g.triangleMesh().scale.rotation);
+      u(f, "MeshFlags", g.triangleMesh().meshFlags);
+      u(f, "ResourceRef", collection.getId(*g.triangleMesh().triangleMesh));
+      break;
+    case PxGeometryType::eHEIGHTFIELD:
+      scalar(f, "HeightScale", g.heightField().heightScale);
+      scalar(f, "RowScale", g.heightField().rowScale);
+      scalar(f, "ColumnScale", g.heightField().columnScale);
+      u(f, "MeshFlags", g.heightField().heightFieldFlags);
+      u(f, "ResourceRef", collection.getId(*g.heightField().heightField));
+      break;
+    case PxGeometryType::ePLANE:
+      break;
+    default:
+      throw std::runtime_error("unexpected loaded geometry");
+    }
+  }
+  if (auto *material = object.is<PxMaterial>()) {
+    scalar(f, "StaticFriction", material->getStaticFriction());
+    scalar(f, "DynamicFriction", material->getDynamicFriction());
+    scalar(f, "Restitution", material->getRestitution());
+    u(f, "Flags", material->getFlags());
+    u(f, "FrictionCombineMode", material->getFrictionCombineMode());
+    u(f, "RestitutionCombineMode", material->getRestitutionCombineMode());
+  }
+  if (auto *mesh = object.is<PxTriangleMesh>()) {
+    vertices(f,
+             std::vector<PxVec3>(mesh->getVertices(),
+                                 mesh->getVertices() + mesh->getNbVertices()));
+    u(f, "TriangleCount", mesh->getNbTriangles());
+    triangles(f, *mesh);
+  }
+  if (auto *mesh = object.is<PxConvexMesh>())
+    vertices(f,
+             std::vector<PxVec3>(mesh->getVertices(),
+                                 mesh->getVertices() + mesh->getNbVertices()));
+  if (auto *hf = object.is<PxHeightField>()) {
+    u(f, "NbRows", hf->getNbRows());
+    u(f, "NbColumns", hf->getNbColumns());
+    u(f, "Format", hf->getFormat());
+    u(f, "Flags", hf->getFlags());
+    scalar(f, "Thickness", hf->getThickness());
+    scalar(f, "ConvexEdgeThreshold", hf->getConvexEdgeThreshold());
+    std::vector<PxHeightFieldSample> samples(std::size_t(hf->getNbRows()) *
+                                             hf->getNbColumns());
+    need(hf->saveCells(samples.data(),
+                       static_cast<PxU32>(samples.size() *
+                                          sizeof(PxHeightFieldSample))) ==
+             samples.size() * sizeof(PxHeightFieldSample),
+         "save heightfield cells");
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+      const auto *b = reinterpret_cast<const PxU8 *>(&samples[i]);
+      const auto packed = PxU32(b[0]) | (PxU32(b[1]) << 8) |
+                          (PxU32(b[2]) << 16) | (PxU32(b[3]) << 24);
+      u(f, "Sample", packed, i);
+    }
+  }
+  return f;
+}
+std::vector<std::string> split(const std::string &s) {
+  std::vector<std::string> row;
+  std::size_t start = 0;
+  for (;;) {
+    const auto at = s.find(',', start);
+    row.push_back(s.substr(start, at - start));
+    if (at == std::string::npos)
+      break;
+    start = at + 1;
+  }
+  return row;
+}
+void validate(const std::string &xml, const std::string &expected,
+              const std::string &oracle = {}) {
+  Context context;
+  Input input(xml);
+  auto *collection = PxSerialization::createCollectionFromXml(
+      input, *context.cooking, *context.registry, nullptr, context.strings);
+  need(collection, "SDK createCollectionFromXml failed");
+  struct Guard {
+    PxCollection *collection;
+    ~Guard() { collection->release(); }
+  } guard{collection};
+  std::ifstream csv(std::filesystem::u8path(expected));
+  need(bool(csv), "open expected CSV");
+  std::map<Locator, Fields> actual;
+  std::size_t fields = 0, objects = 0;
+  std::string line;
+  while (std::getline(csv, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    auto row = split(line);
+    if (row.empty() || row[0] == "kind")
+      continue;
+    need(row.size() >= 5, "expected CSV schema");
+    const Locator key{std::stoull(row[1]), std::stoull(row[2]),
+                      static_cast<std::size_t>(std::stoull(row[3]))};
+    if (row[0] == "object") {
+      PxBase *object = nullptr;
+      if (key.serial)
+        object = collection->find(key.serial);
+      else {
+        auto *owner = collection->find(key.owner);
+        need(owner && owner->is<PxRigidActor>(), "inline shape owner");
+        PxShape *shape = nullptr;
+        need(owner->is<PxRigidActor>()->getShapes(
+                 &shape, 1, static_cast<PxU32>(key.shape)) == 1,
+             "inline shape index");
+        object = shape;
+      }
+      need(object, "mapped SDK object exists");
+      const auto &type = row[4];
+      need(
+          (type == "PxShape" && object->is<PxShape>()) ||
+              (type == "PxRigidStatic" && object->is<PxRigidStatic>()) ||
+              (type == "PxRigidDynamic" && object->is<PxRigidDynamic>()) ||
+              (type == "PxMaterial" && object->is<PxMaterial>()) ||
+              (type == "PxBVH33TriangleMesh" && object->is<PxTriangleMesh>()) ||
+              (type == "PxConvexMesh" && object->is<PxConvexMesh>()) ||
+              (type == "PxHeightField" && object->is<PxHeightField>()),
+          "SDK concrete type matches mapping");
+      actual.emplace(key, inspect(*object, *collection));
+      ++objects;
+      continue;
+    }
+    need(row.size() == 7 && actual.count(key),
+         "expected field after mapped object");
+    const auto found = actual.at(key).find(
+        {row[4], static_cast<std::size_t>(std::stoull(row[5]))});
+    need(found != actual.at(key).end(), "SDK field available: " + row[4]);
+    const auto &value = found->second;
+    need(value.type == row[0][0], "SDK field type");
+    if (value.type == 'f') {
+      const auto a = std::stod(value.value), b = std::stod(row[6]);
+      need(std::isfinite(a) && std::isfinite(b) &&
+               std::abs(a - b) <= 1e-5 * std::max(1., std::abs(b)),
+           "SDK float mismatch: object " + std::to_string(key.serial) + " " +
+               row[4] + " actual=" + value.value + " expected=" + row[6]);
+    } else
+      need(value.value == row[6], "SDK exact field mismatch: " + row[4] +
+                                      " actual=" + value.value +
+                                      " expected=" + row[6]);
+    ++fields;
+  }
+  need(objects == collection->getNbObjects(),
+       "every loaded object independently covered");
+  need(!context.errors.failures, "SDK reported load errors");
+  std::cout << "RepX SDK validation passed: " << objects << " objects, "
+            << fields << " fields\n";
+  if (!oracle.empty()) {
+    struct Output : PxOutputStream {
+      std::ofstream stream;
+      explicit Output(const std::string &path)
+          : stream(std::filesystem::u8path(path), std::ios::binary) {}
+      PxU32 write(const void *data, PxU32 size) override {
+        stream.write(static_cast<const char *>(data), size);
+        return stream ? size : 0;
+      }
+    } output(oracle);
+    need(bool(output.stream), "open official SDK oracle output");
+    PxSerialization::PxXmlMiscParameter misc;
+    misc.upVector = PxVec3(0, 1, 0);
+    misc.scale = context.physics->getTolerancesScale();
+    need(PxSerialization::serializeCollectionToXml(
+             output, *collection, *context.registry, nullptr, nullptr, &misc),
+         "official SDK XML serialization");
+    output.stream.flush();
+    need(bool(output.stream), "flush official oracle XML");
+  }
+}
+} // namespace
+int main(int argc, char **argv) {
+  Assertions assertions;
+  PxSetAssertHandler(assertions);
+  try {
+    need(argc == 3 || (argc == 5 && std::string(argv[3]) == "--oracle"),
+         "usage: physx34_repx_validate file.repx expected.csv [--oracle "
+         "output.repx]");
+    validate(argv[1], argv[2], argc == 5 ? argv[4] : "");
+    if (argc == 5)
+      validate(argv[4], argv[2]);
+    return 0;
+  } catch (const std::exception &e) {
+    std::cerr << "RepX SDK validation failed: " << e.what() << '\n';
+    return 1;
+  }
+}
