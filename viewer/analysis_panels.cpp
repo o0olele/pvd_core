@@ -73,6 +73,7 @@ struct AnalysisPanels::Impl {
   pvd::memory::Filter memory_filter;
   pvd::errors::Filter error_filter;
   pvd::memory::Snapshot memory_snapshot;
+  std::optional<pvd::memory::WindowStats> memory_window;
   std::vector<pvd::memory::Allocation> memory_rows;
   std::vector<pvd::errors::Entry> error_rows;
   std::size_t m_prefix=std::numeric_limits<std::size_t>::max(),e_prefix=std::numeric_limits<std::size_t>::max();
@@ -83,6 +84,7 @@ struct AnalysisPanels::Impl {
   void bind(const Session* session) {
     if(source==session)return;
     source=session;profile.reset();memory.reset();errors.reset();
+    memory_window.reset();
     profile_count=memory_count=error_count=0;profile_dirty=memory_dirty=error_dirty=true;
     selected_interval.reset();view_manual=false;memory_page=error_page=0;m_prefix=e_prefix=std::numeric_limits<std::size_t>::max();
     thread.reset();zone.reset();error.clear();
@@ -220,6 +222,35 @@ struct AnalysisPanels::Impl {
     ImGui::Text("Live %.3f MiB (%zu allocations)  |  Peak %.3f MiB  |  Allocated %.3f MiB  |  Freed %.3f MiB",double(s.current_bytes)/(1024*1024),s.current_allocations,double(s.peak_bytes)/(1024*1024),double(s.allocated_bytes)/(1024*1024),double(s.freed_bytes)/(1024*1024));
     if(!memory_snapshot.complete)ImGui::TextColored({1,.65f,.35f,1},"Incomplete memory data; inspect diagnostics before interpreting totals.");
     ImGui::PopTextWrapPos();
+    std::optional<pvd::FrameMarker> native;
+    if(doc.scene_id()&&doc.frame())for(const auto& frame:source->frames())
+      if(frame.scene_id==*doc.scene_id()&&frame.event_count<=doc.frame()->snapshot.event_count&&
+         (!native||frame.event_count>native->event_count))native=frame;
+    if(native) {
+      const auto window=pvd::memory::native_frame_event_window(*source,*native);
+      if(!memory_window||memory_window->window.begin_event_count!=window.begin_event_count||
+         memory_window->window.end_event_count!=window.end_event_count||memory_dirty)
+        memory_window=memory->window_statistics(window);
+      const auto& stats=*memory_window;
+      const auto& flow=stats.activity;
+      ImGui::Separator();
+      ImGui::TextUnformatted("RECEIVED IN SELECTED NATIVE FRAME");
+      ImGui::TextWrapped("Global memory events received in [%zu, %zu), native scene %llu / stream %llu. Memory buffers have no scene ownership or allocation timestamps; this is not memory used by that scene or time spent inside simulation.",window.begin_event_count,window.end_event_count,static_cast<unsigned long long>(native->scene_id),static_cast<unsigned long long>(native->stream_id));
+      if(doc.sample_point()==SamplePoint::after_fetch)
+        ImGui::TextWrapped("After-fetch view: activity ends at the preceding native EndSection. Later flushed packets belong to a later receipt window.");
+      ImGui::TextWrapped("Outstanding(native end): %llu B / %zu allocations | Peak(as of native end): %llu B",static_cast<unsigned long long>(stats.as_of_end.current_bytes),stats.as_of_end.current_allocations,static_cast<unsigned long long>(stats.as_of_end.peak_bytes));
+      ImGui::TextWrapped("Allocated(frame): %llu B / %zu events | Freed(frame): %llu known B / %zu events (%zu unknown sizes)",static_cast<unsigned long long>(flow.allocated_bytes),flow.allocation_count,static_cast<unsigned long long>(flow.freed_bytes),flow.free_count,flow.unknown_free_count);
+      ImGui::TextWrapped("Churn(frame, allocated + known freed): %s B | Net(frame, allocated - known freed): %s B",flow.churn_bytes().c_str(),flow.net_bytes().c_str());
+      if(flow.replacement_count)
+        ImGui::TextWrapped("Replaced without observed free: %llu B / %zu events (separate from freed and net)",static_cast<unsigned long long>(flow.replaced_bytes),flow.replacement_count);
+      if(!stats.has_memory_channel)
+        ImGui::TextWrapped("No memory channel observed before this boundary; zero received events do not prove zero allocations.");
+      else if(!stats.complete)
+        ImGui::TextColored({1,.65f,.35f,1},"Partial observed accounting; unknown free sizes and quarantined data are not reconstructed.");
+    } else {
+      memory_window.reset();
+      ImGui::TextWrapped("Per-frame activity unavailable: no preceding native frame boundary for the selected scene.");
+    }
     if(memory->events().empty()&&memory->diagnostics().empty()){ImGui::TextWrapped("No memory channel was captured. Enable PhysX PVD eMEMORY instrumentation in the producer.");return;}
     if(ImGui::BeginTabBar("memory-pages")){
       if(ImGui::BeginTabItem("Allocation history")){
@@ -279,5 +310,8 @@ std::size_t AnalysisPanels::visible_row_count(AnalysisPage page)const noexcept{
   if(page==AnalysisPage::profile)return impl_->intervals.size();
   if(page==AnalysisPage::memory)return impl_->matches_memory;
   return impl_->matches_errors;
+}
+std::optional<memory::WindowStats> AnalysisPanels::memory_window_statistics()const {
+  return impl_->memory_window;
 }
 } // namespace pvd::viewer

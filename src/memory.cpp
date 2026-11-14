@@ -191,7 +191,9 @@ struct Index::Impl {
   std::vector<Event> events_;
   std::vector<Allocation> allocations_;
   std::vector<Diagnostic> diagnostics_;
+  std::vector<std::pair<Source, std::size_t>> memory_packets;
   std::size_t previous = 0, processed_packets = 0;
+  std::size_t indexed_prefix = 0;
   bool seen = false, stopped_all = false, failed = false;
   const Session *session = nullptr;
   explicit Impl(Options settings) : options(settings) {}
@@ -211,6 +213,13 @@ struct Index::Impl {
         diagnostics_.push_back(
             {code, source, packet.event_index, offset, std::move(message)});
       };
+      if (memory_packets.size() >= options.max_packets) {
+        diagnostic(DiagnosticCode::limit_exceeded,
+                   "memory packet metadata count exceeds limit", 0);
+        stopped_all = true;
+        break;
+      }
+      memory_packets.emplace_back(source, packet.event_index);
       if (seen && packet.event_index < previous) {
         diagnostic(
             DiagnosticCode::malformed,
@@ -366,6 +375,10 @@ Index::Index(const std::vector<ChannelPacket> &packets, Options options)
     : Index(options) {
   impl_->parse(packets, 0, packets.size());
   impl_->processed_packets = packets.size();
+  for (const auto &packet : packets)
+    if (packet.event_index != std::numeric_limits<std::size_t>::max())
+      impl_->indexed_prefix =
+          std::max(impl_->indexed_prefix, packet.event_index + 1);
 }
 Index::~Index() = default;
 Index::Index(Index &&) noexcept = default;
@@ -378,6 +391,9 @@ const std::vector<Allocation> &Index::allocations() const noexcept {
 }
 const std::vector<Diagnostic> &Index::diagnostics() const noexcept {
   return impl_->diagnostics_;
+}
+std::size_t Index::indexed_event_count() const noexcept {
+  return impl_->indexed_prefix;
 }
 void Index::update(const Session &session, std::size_t prefix) {
   if (impl_->failed)
@@ -400,6 +416,7 @@ void Index::update(const Session &session, std::size_t prefix) {
   try {
     impl_->parse(packets, impl_->processed_packets, end);
     impl_->processed_packets = end;
+    impl_->indexed_prefix = std::max(impl_->indexed_prefix, prefix);
   } catch (...) {
     impl_->failed = true;
     throw;
@@ -455,6 +472,141 @@ Snapshot Index::snapshot_at_event(std::size_t prefix, GroupBy by) const {
 }
 Snapshot Index::summary_at_event(std::size_t prefix, GroupBy by) const {
   return impl_->snapshot(prefix, by, false);
+}
+
+std::string ActivityStats::churn_bytes() const {
+  auto left = std::to_string(allocated_bytes),
+       right = std::to_string(freed_bytes);
+  std::string result;
+  unsigned carry = 0;
+  while (!left.empty() || !right.empty() || carry) {
+    unsigned digit = carry;
+    if (!left.empty()) {
+      digit += static_cast<unsigned>(left.back() - '0');
+      left.pop_back();
+    }
+    if (!right.empty()) {
+      digit += static_cast<unsigned>(right.back() - '0');
+      right.pop_back();
+    }
+    result.push_back(static_cast<char>('0' + digit % 10));
+    carry = digit / 10;
+  }
+  std::reverse(result.begin(), result.end());
+  return result;
+}
+std::string ActivityStats::net_bytes() const {
+  return allocated_bytes >= freed_bytes
+             ? std::to_string(allocated_bytes - freed_bytes)
+             : "-" + std::to_string(freed_bytes - allocated_bytes);
+}
+EventWindow native_frame_event_window(const Session &session,
+                                      const FrameMarker &frame) {
+  EventWindow result;
+  bool found = false;
+  for (const auto &candidate : session.frames()) {
+    if (candidate.stream_id != frame.stream_id ||
+        candidate.scene_id != frame.scene_id)
+      continue;
+    if (candidate.index == frame.index &&
+        candidate.begin_event_count == frame.begin_event_count &&
+        candidate.event_count == frame.event_count &&
+        candidate.begin_timestamp == frame.begin_timestamp &&
+        candidate.end_timestamp == frame.end_timestamp) {
+      result.end_event_count = candidate.event_count;
+      found = true;
+    } else if (candidate.event_count < frame.event_count)
+      result.begin_event_count =
+          std::max(result.begin_event_count, candidate.event_count);
+  }
+  if (!found)
+    throw std::invalid_argument(
+        "native memory window frame is not in this Session");
+  return result;
+}
+WindowStats Index::window_statistics(EventWindow window, GroupBy by,
+                                     std::optional<Source> source) const {
+  if (impl_->failed)
+    throw std::logic_error("memory index update failed; rebuild required");
+  if (window.begin_event_count > window.end_event_count ||
+      window.end_event_count > impl_->indexed_prefix)
+    throw std::out_of_range(
+        "memory statistics window exceeds indexed event prefix");
+  if (by != GroupBy::type && by != GroupBy::file && by != GroupBy::file_line &&
+      by != GroupBy::type_file_line)
+    throw std::invalid_argument("unknown memory statistics grouping");
+  WindowStats result;
+  result.window = window;
+  result.source = source;
+  std::map<GroupKey, std::pair<Stats, ActivityStats>> groups;
+  for (const auto &e : impl_->events_) {
+    if (e.event_index >= window.end_event_count)
+      break;
+    if (source && !(e.source == *source))
+      continue;
+    const bool in_window = e.event_index >= window.begin_event_count;
+    if (e.kind == EventKind::allocation) {
+      if (e.replaced_allocation_index) {
+        const auto &old = impl_->allocations_[*e.replaced_allocation_index];
+        auto &group = groups[group_key(old, by)];
+        release(result.as_of_end, old.size, true);
+        release(group.first, old.size, true);
+        if (in_window) {
+          add(result.activity.replaced_bytes, old.size);
+          ++result.activity.replacement_count;
+          add(group.second.replaced_bytes, old.size);
+          ++group.second.replacement_count;
+        }
+      }
+      const auto &allocation = impl_->allocations_[*e.allocation_index];
+      auto &group = groups[group_key(allocation, by)];
+      allocate(result.as_of_end, allocation.size);
+      allocate(group.first, allocation.size);
+      if (in_window) {
+        add(result.activity.allocated_bytes, allocation.size);
+        ++result.activity.allocation_count;
+        add(group.second.allocated_bytes, allocation.size);
+        ++group.second.allocation_count;
+      }
+    } else if (e.kind == EventKind::deallocation) {
+      if (in_window)
+        ++result.activity.free_count;
+      if (e.allocation_index) {
+        const auto &allocation = impl_->allocations_[*e.allocation_index];
+        auto &group = groups[group_key(allocation, by)];
+        release(result.as_of_end, allocation.size, false);
+        release(group.first, allocation.size, false);
+        if (in_window) {
+          add(result.activity.freed_bytes, allocation.size);
+          add(group.second.freed_bytes, allocation.size);
+          ++group.second.free_count;
+        }
+      } else {
+        ++result.as_of_end.free_count;
+        ++result.as_of_end.unknown_free_count;
+        if (in_window)
+          ++result.activity.unknown_free_count;
+      }
+    }
+  }
+  for (const auto &entry : groups)
+    result.groups.push_back({std::get<0>(entry.first), std::get<1>(entry.first),
+                             std::get<2>(entry.first), entry.second.first,
+                             entry.second.second});
+  for (const auto &packet : impl_->memory_packets)
+    if (packet.second < window.end_event_count &&
+        (!source || packet.first == *source)) {
+      result.has_memory_channel = true;
+      if (packet.second >= window.begin_event_count)
+        ++result.packets_in_window;
+    }
+  for (const auto &diagnostic : impl_->diagnostics_)
+    if (diagnostic.event_index < window.end_event_count &&
+        (!source || diagnostic.source == *source || impl_->stopped_all)) {
+      result.diagnostics.push_back(diagnostic);
+      result.complete = false;
+    }
+  return result;
 }
 
 std::vector<Allocation> Index::history_at_event(std::size_t prefix,

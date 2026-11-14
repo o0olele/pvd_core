@@ -1,6 +1,7 @@
 #include "pvd/writer.hpp"
 #include "workspace.hpp"
 #include "workspace_v1_fixture.hpp"
+#include "workspace_v2_fixture.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -150,10 +151,10 @@ bool preferences_equal(const ViewPreferences &a, const ViewPreferences &b) {
   return rendering(a.rendering) == rendering(b.rendering) &&
       std::tie(a.inspection.number_format, a.inspection.float_precision,
                a.inspection.double_precision, a.inspection.array_page_size,
-               a.show_debug_text) ==
+               a.show_debug_text,a.navigation.mode,a.navigation.movement_speed,a.navigation.look_sensitivity) ==
       std::tie(b.inspection.number_format, b.inspection.float_precision,
                b.inspection.double_precision, b.inspection.array_page_size,
-               b.show_debug_text);
+               b.show_debug_text,b.navigation.mode,b.navigation.movement_speed,b.navigation.look_sensitivity);
 }
 ViewPreferences distinct_preferences(bool second = false) {
   ViewPreferences v;
@@ -178,6 +179,9 @@ ViewPreferences distinct_preferences(bool second = false) {
   v.inspection.double_precision = second ? 1 : 12;
   v.inspection.array_page_size = second ? 128 : 2048;
   v.show_debug_text = second;
+  v.navigation.mode=second?CameraNavigationMode::orbit:CameraNavigationMode::first_person;
+  v.navigation.movement_speed=second?0:std::nextafter(123.0,124.0);
+  v.navigation.look_sensitivity=second?.1:std::nextafter(.003,.004);
   return v;
 }
 void ownership_and_locks() {
@@ -563,6 +567,9 @@ void invalid_preferences_are_atomic() {
   bad([](auto &v){v.inspection.double_precision=18;});
   bad([](auto &v){v.inspection.array_page_size=33;});
   bad([](auto &v){v.inspection.array_page_size=std::numeric_limits<std::size_t>::max();});
+  bad([](auto &v){v.navigation.mode=static_cast<CameraNavigationMode>(99);});
+  bad([](auto &v){v.navigation.movement_speed=-1;});
+  bad([&](auto &v){v.navigation.look_sensitivity=std::numeric_limits<double>::quiet_NaN();});
   for (const auto &prefs : invalid) {
     check(!valid_view_preferences(prefs), "invalid preferences reported valid");
     rejects([&]{w.set_default_preferences(prefs);}, "invalid defaults accepted");
@@ -581,18 +588,20 @@ void invalid_preferences_are_atomic() {
   WorkspaceLimits limits; limits.max_file_bytes=baseline.size()-1;
   rejects([&]{encode_workspace(original,limits);}, "preferences bypassed encode byte budget");
 
-  // Hostile but correctly checksummed v2 defaults. Fixed offsets belong to the
-  // documented 62-byte preference wire record, not native struct layout.
+  // Hostile but correctly checksummed v3 defaults. Existing v2 field offsets
+  // stay unchanged; the appended navigation record is 17 bytes.
   const auto empty = encode_workspace(WorkspaceSettings{});
-  const auto base = empty.size()-62;
+  const auto base = empty.size()-79;
   auto wire=empty; wire[base+16]=99; fix_crc(wire);
   rejects([&]{decode_workspace(wire);}, "wire AA enum bypassed validation");
-  wire=empty; wire.back()=2; fix_crc(wire);
+  wire=empty; wire[base+61]=2; fix_crc(wire);
   rejects([&]{decode_workspace(wire);}, "wire debug-text boolean accepted 2");
   wire=empty; wire[base+50]=0; wire[base+51]=0; wire[base+52]=0xC0; wire[base+53]=0x7F; fix_crc(wire);
   rejects([&]{decode_workspace(wire);}, "wire NaN point size accepted");
   wire=empty; for(unsigned i=0;i<4;++i)wire[base+57+i]=255; fix_crc(wire);
   rejects([&]{decode_workspace(wire);}, "wire inspector page count bypassed budget policy");
+  wire=empty; wire[base+62]=99; fix_crc(wire);
+  rejects([&]{decode_workspace(wire);}, "wire navigation mode bypassed validation");
 
   WorkspaceLimits quota; quota.max_captures=1;
   Workspace bounded({},quota); const auto temporary=bounded.add(fixture.document());
@@ -750,9 +759,18 @@ void file_and_strong_restore() {
 } // namespace
 int main() {
   try {
+    const Bytes v2(workspace_v2_fixture.begin(),workspace_v2_fixture.end());
+    const auto restored_v2=decode_workspace(v2);
+    check(restored_v2.version==workspace_format_version&&restored_v2.slots.size()==1&&
+          restored_v2.slots[0].view.camera.handedness==DisplayHandedness::left_handed&&
+          restored_v2.slots[0].view.preferences.rendering.antialiasing==Antialiasing::msaa4x&&
+          restored_v2.default_preferences.inspection.array_page_size==512&&
+          restored_v2.default_preferences.navigation.mode==CameraNavigationMode::orbit&&
+          restored_v2.default_preferences.navigation.movement_speed==10,
+          "actual v2 workspace migration lost display state or navigation defaults");
     const Bytes old(std::begin(test_fixtures::workspace_v1), std::end(test_fixtures::workspace_v1));
     const auto migrated = decode_workspace(old);
-    check(migrated.version == 2 && migrated.slots.size() == 1 &&
+    check(migrated.version == workspace_format_version && migrated.slots.size() == 1 &&
               migrated.slots[0].view.camera.handedness == DisplayHandedness::right_handed &&
               migrated.captures[0].bookmarks[0].camera &&
               migrated.captures[0].bookmarks[0].camera->handedness == DisplayHandedness::right_handed,

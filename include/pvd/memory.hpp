@@ -58,6 +58,21 @@ struct Stats {
   std::size_t current_allocations = 0, peak_allocations = 0,
               allocation_count = 0, free_count = 0, unknown_free_count = 0;
 };
+
+// Outer event-index interval [begin,end). A whole inner memory packet is
+// received at one event index; its individual allocations have no timestamps.
+struct EventWindow {
+  std::size_t begin_event_count = 0, end_event_count = 0;
+};
+struct ActivityStats {
+  std::uint64_t allocated_bytes = 0, freed_bytes = 0, replaced_bytes = 0;
+  std::size_t allocation_count = 0, free_count = 0, unknown_free_count = 0,
+              replacement_count = 0;
+  // Exact decimal arithmetic, including a sum above uint64_t. Unknown free
+  // sizes are unavailable and excluded; replacement is not a recorded free.
+  PVD_ANALYSIS_API std::string churn_bytes() const; // allocated + known freed
+  PVD_ANALYSIS_API std::string net_bytes() const;   // allocated - known freed
+};
 enum class GroupBy { type, file, file_line, type_file_line };
 struct GroupStats {
   std::optional<std::string> type_name, file;
@@ -73,12 +88,36 @@ struct Snapshot {
   std::vector<Diagnostic> diagnostics;
   bool complete = true;
 };
+struct GroupWindowStats {
+  std::optional<std::string> type_name, file;
+  std::uint32_t line = 0;
+  Stats as_of_end;
+  ActivityStats activity;
+};
+struct WindowStats {
+  EventWindow window;
+  std::optional<Source> source;
+  Stats as_of_end;        // cumulative outstanding/peak/flows before end
+  ActivityStats activity; // only memory events whose outer index is in window
+  std::vector<GroupWindowStats> groups;
+  std::vector<Diagnostic>
+      diagnostics; // relevant prefix history, including gaps
+  std::size_t packets_in_window = 0;
+  bool has_memory_channel = false, complete = true;
+};
+// The preceding EndSection in exactly (stream_id,scene_id), or zero for its
+// first frame. Validates that frame belongs to session. This selects a GLOBAL
+// receipt interval; a memory buffer has no scene-ownership field.
+PVD_ANALYSIS_API EventWindow native_frame_event_window(const Session &,
+                                                       const FrameMarker &);
 struct Options {
   std::size_t max_packet_bytes = 64u * 1024u * 1024u;
   std::size_t max_string_bytes = 1024u * 1024u;
   std::size_t max_strings_per_source = 1024u * 1024u;
   std::size_t max_memory_events = 4u * 1024u * 1024u;
   std::size_t max_allocations = 2u * 1024u * 1024u;
+  // Bounds retained receipt metadata even for empty/quarantined packets.
+  std::size_t max_packets = 4u * 1024u * 1024u;
 };
 struct Filter {
   std::optional<Source> source;
@@ -111,6 +150,14 @@ public:
   PVD_ANALYSIS_API const std::vector<Event> &events() const noexcept;
   PVD_ANALYSIS_API const std::vector<Allocation> &allocations() const noexcept;
   PVD_ANALYSIS_API const std::vector<Diagnostic> &diagnostics() const noexcept;
+  PVD_ANALYSIS_API std::size_t indexed_event_count() const noexcept;
+  // Requires begin<=end<=indexed_event_count(). Source filters are exact;
+  // neither type/history filters nor selected scene silently alter the scope.
+  // Earlier diagnostics remain visible: a quarantined source cannot become
+  // apparently complete merely because no events were decoded in this window.
+  PVD_ANALYSIS_API WindowStats
+  window_statistics(EventWindow, GroupBy by = GroupBy::type_file_line,
+                    std::optional<Source> source = {}) const;
   PVD_ANALYSIS_API Snapshot snapshot_at_event(
       std::size_t event_count, GroupBy by = GroupBy::type_file_line) const;
   // Same totals/groups/diagnostics as snapshot_at_event, without copying live

@@ -18,7 +18,7 @@ endif()
 list(APPEND PVD_INSTALL_TARGETS pvd_analysis)
 
 if(BUILD_TESTING)
-    foreach(kind IN ITEMS profile memory error curves memory_bootstrap profile_bootstrap profile_curves)
+    foreach(kind IN ITEMS profile memory memory_window error curves memory_bootstrap profile_bootstrap profile_curves)
         add_executable(pvd_${kind}_tests tests/${kind}_tests.cpp)
         target_link_libraries(pvd_${kind}_tests PRIVATE pvd::analysis)
         add_test(NAME ${kind} COMMAND pvd_${kind}_tests)
@@ -73,6 +73,10 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/allocations_memory_expected.csv
             ${PROJECT_BINARY_DIR}/fixtures/allocations_memory_summary.csv)
         set_tests_properties(physx34_memory PROPERTIES FIXTURES_REQUIRED physx34_memory TIMEOUT 30)
+        add_test(NAME physx34_memory_window COMMAND pvd_memory_window_tests
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory_summary.csv)
+        set_tests_properties(physx34_memory_window PROPERTIES FIXTURES_REQUIRED physx34_memory TIMEOUT 30)
         add_test(NAME physx34_curves COMMAND pvd_curves_tests
             ${PROJECT_BINARY_DIR}/fixtures/physical_capture.pxd2)
         set_tests_properties(physx34_curves PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)

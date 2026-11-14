@@ -1,6 +1,7 @@
 #include "deformable_panel.hpp"
 #include "display_panel.hpp"
 #include "ui_scale.hpp"
+#include "camera_panel.hpp"
 #include "pvd/body_overlays.hpp"
 #include "scene_query_panel.hpp"
 #include "export_panel.hpp"
@@ -490,6 +491,8 @@ private:
     PanelState panels;
     RenderOptions render_options;
     SceneToolState scene_tools;
+    CameraNavigationPreferences navigation;
+    CameraPanelState camera_panel;
     DisplayPanelState display;
     SceneQueryPanelState scene_queries;
     ExportPanelState export_panel;
@@ -606,6 +609,7 @@ private:
       state.render_options = preferences.rendering;
       state.panels.inspector_preferences = preferences.inspection;
       state.show_debug_text = preferences.show_debug_text;
+      state.navigation = preferences.navigation;
     }
   }
   void store_preferences(SlotId id) {
@@ -616,6 +620,7 @@ private:
     preferences.rendering = cached->second->render_options;
     preferences.inspection = cached->second->panels.inspector_preferences;
     preferences.show_debug_text = cached->second->show_debug_text;
+    preferences.navigation = cached->second->navigation;
     if (!valid_view_preferences(preferences)) return;
     slot->preferences() = preferences;
     if (workspace_.active_id() == id) workspace_.set_default_preferences(preferences);
@@ -1006,7 +1011,8 @@ private:
           "first/last frame; F fits visible geometry. Shortcuts pause while "
           "editing or using a popup.");
       ImGui::TextWrapped(
-          "RMB orbit, MMB pan, wheel zoom, click picks a visible shape. View "
+          "RMB look, MMB pan, wheel zoom; hover the viewport for WASD/QE, Shift 2x. "
+          "View offers orbit/first-person controllers, speed, look-at and clipping. Click picks a visible shape. View "
           "tools contains visibility, colors, tracking and captured cameras.");
       ImGui::TextWrapped(
           "Workspace files store source paths, views and verified bookmarks, "
@@ -2863,6 +2869,9 @@ private:
           viewport_size_.x / std::max(1.f, viewport_size_.y);
       drawSceneTools(document(), camera(), ui().scene_tools);
       ImGui::Separator();
+      if (drawCameraControls(document(),camera(),ui().navigation,ui().camera_panel))
+        set_fitted(true);
+      ImGui::Separator();
       ui().display.viewport_aspect = viewport_size_.x / std::max(1.f, viewport_size_.y);
       drawDisplaySettings(document(), camera(), ui().render_options,
                           renderer_->stats(), ui().display);
@@ -2934,13 +2943,19 @@ private:
                                ImGuiButtonFlags_MouseButtonMiddle);
     const bool hovered = ImGui::IsItemHovered();
     const auto &io = ImGui::GetIO();
+    try {
+      if(navigateCameraFromImGui(camera(),ui().navigation,hovered))set_fitted(true);
+    }catch(const std::exception &e){ui().camera_panel.error=e.what();}
     if (hovered && io.MouseWheel != 0)
       camera().zoom(io.MouseWheel);
     if (ImGui::IsItemActive()) {
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
           (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
-        camera().orbit(-io.MouseDelta.x * 0.008 / ui_scale_->current().screen_scale,
-                       -io.MouseDelta.y * 0.008 / ui_scale_->current().screen_scale);
+        try {
+          rotate_camera(camera(),-io.MouseDelta.x/ui_scale_->current().screen_scale,
+                        -io.MouseDelta.y/ui_scale_->current().screen_scale,ui().navigation);
+          set_fitted(true);
+        }catch(const std::exception &e){ui().camera_panel.error=e.what();}
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
         camera().pan(io.MouseDelta.x, io.MouseDelta.y, viewport_size_.y);
     }
@@ -3020,7 +3035,7 @@ private:
                                std::min<std::size_t>(text.text.size(), 4096));
       }
     draw_list->PopClipRect();
-    ImGui::TextDisabled("RMB orbit   MMB pan   Wheel zoom   Click select");
+    ImGui::TextDisabled("RMB look   MMB pan   Wheel zoom   WASD / Q E move   Shift 2x");
     if (!renderer_->body_overlays().complete)
       ImGui::GetWindowDrawList()->AddText(
           {viewport_origin_.x+8,viewport_origin_.y+8}, IM_COL32(255,185,85,255),

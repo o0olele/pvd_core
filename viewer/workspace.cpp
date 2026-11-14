@@ -263,6 +263,9 @@ struct Encoder {
     u(v.inspection.double_precision, 1);
     u(v.inspection.array_page_size, 4);
     u(v.show_debug_text, 1);
+    u(static_cast<unsigned>(v.navigation.mode), 1);
+    d(v.navigation.movement_speed);
+    d(v.navigation.look_sensitivity);
   }
   void view(const StoredView &v) {
     u(v.scene_id.has_value(), 1);
@@ -365,6 +368,11 @@ struct Decoder {
     v.inspection.double_precision = static_cast<unsigned>(u(1));
     v.inspection.array_page_size = static_cast<std::size_t>(u(4));
     v.show_debug_text = boolean();
+    if (version >= 3) {
+      v.navigation.mode = static_cast<CameraNavigationMode>(u(1));
+      v.navigation.movement_speed = d();
+      v.navigation.look_sensitivity = d();
+    }
     return v;
   }
   StoredView view() {
@@ -597,7 +605,7 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
           "workspace magic is invalid");
   Decoder h{bytes, limits, 8};
   auto version = h.u(4);
-  require(version == 1 || version == workspace_format_version, "unsupported workspace version");
+  require(version >= 1 && version <= workspace_format_version, "unsupported workspace version");
   auto size = h.u(8);
   auto checksum = h.u(4);
   require(h.u(4) == 0, "workspace header reserved field is unsupported");

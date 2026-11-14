@@ -1,6 +1,7 @@
 #pragma once
 #include "inspection_preferences.hpp"
 #include "renderer.hpp"
+#include "camera_controller.hpp"
 #include <cmath>
 
 namespace pvd::viewer {
@@ -8,6 +9,7 @@ struct ViewPreferences {
   RenderOptions rendering;
   InspectorPreferences inspection;
   bool show_debug_text = true;
+  CameraNavigationPreferences navigation;
 };
 // Same input constraints as Renderer plus the inspector's independent policy.
 // A preference value is UI-free and does not initialize a GPU or native window.
@@ -15,7 +17,7 @@ inline bool valid_view_preferences(const ViewPreferences &v) noexcept {
   const auto &r = v.rendering;
   if ((r.antialiasing != Antialiasing::off &&
        r.antialiasing != Antialiasing::msaa4x) ||
-      !valid_inspector_preferences(v.inspection))
+      !valid_inspector_preferences(v.inspection) || !valid_camera_navigation(v.navigation))
     return false;
   for (float component : r.background_color)
     if (!std::isfinite(component) || component < 0 || component > 1)
