@@ -1,5 +1,6 @@
 #pragma once
 #include "pvd/curves.hpp"
+#include "pvd/frame_timing.hpp"
 #include "pvd/profile.hpp"
 
 namespace pvd::analysis {
@@ -12,8 +13,14 @@ enum class ProfileMetric {
   total_nanoseconds,
   mean_nanoseconds,
   minimum_nanoseconds,
-  maximum_nanoseconds
+  maximum_nanoseconds,
+  native_frame_ticks,
+  native_frame_nanoseconds
 };
+inline bool native_frame_metric(ProfileMetric metric) noexcept {
+  return metric==ProfileMetric::native_frame_ticks||
+         metric==ProfileMetric::native_frame_nanoseconds;
+}
 // The SDK has no collection-coverage or final-flush watermark record. Opting in
 // asserts that matching CPU events were continuously collected for these
 // windows.
@@ -81,6 +88,9 @@ struct ProfileCurveSeries {
   std::vector<std::string> diagnostics;
   bool complete = true, cancelled = false, resampled = false,
        work_limited = false, provisional = false;
+  // Frame metrics use marker wall time, not CPU aggregates/coverage. Kept for
+  // exact frame-specific CSV and explicit consumer inspection.
+  std::shared_ptr<const FrameTimingSeries> frame_timing;
 };
 // One incrementally updated profile Index per Session. Repeated query/draw
 // calls do not parse channel history. Late flushes may revise historical frame

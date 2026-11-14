@@ -52,7 +52,9 @@ struct Aggregate {
   }
 };
 bool nanosecond_metric(ProfileMetric metric) {
-  return metric >= ProfileMetric::total_nanoseconds;
+  return (metric >= ProfileMetric::total_nanoseconds &&
+          metric <= ProfileMetric::maximum_nanoseconds) ||
+         metric == ProfileMetric::native_frame_nanoseconds;
 }
 bool filter_zone(const ProfileCurveFilter &f, profile::ZoneKey zone) {
   return !f.zone || *f.zone == zone;
@@ -127,6 +129,10 @@ const char *profile_metric_name(ProfileMetric metric) noexcept {
     return "Minimum completed duration (ns)";
   case ProfileMetric::maximum_nanoseconds:
     return "Maximum completed duration (ns)";
+  case ProfileMetric::native_frame_ticks:
+    return "Native frame wall-clock duration (ticks)";
+  case ProfileMetric::native_frame_nanoseconds:
+    return "Native frame wall-clock duration (ns)";
   }
   return "Unknown profile metric";
 }
@@ -216,7 +222,7 @@ ProfileCurveSeries ProfileCurves::sample(ProfileCurveRequest request,
     throw std::invalid_argument("profile curve budgets require 1..1000000 "
                                 "samples and positive max_work");
   if (static_cast<int>(request.metric) < 0 ||
-      request.metric > ProfileMetric::maximum_nanoseconds ||
+      request.metric > ProfileMetric::native_frame_nanoseconds ||
       static_cast<int>(request.coverage) < 0 ||
       request.coverage > ProfileCoverage::assume_continuous ||
       static_cast<int>(request.partial) < 0 ||
@@ -229,6 +235,43 @@ ProfileCurveSeries ProfileCurves::sample(ProfileCurveRequest request,
   result.source_event_count = impl_->prefix;
   result.timestamp_numerator = impl_->header.timestamp_numerator;
   result.timestamp_denominator = impl_->header.timestamp_denominator;
+  if (native_frame_metric(request.metric)) {
+    FrameTimingRequest frame;
+    frame.source=request.source;
+    frame.metric=request.metric==ProfileMetric::native_frame_ticks
+                     ?FrameTimingMetric::ticks:FrameTimingMetric::nanoseconds;
+    frame.first_frame=request.first_frame;frame.end_frame=request.end_frame;
+    frame.stride=request.stride;
+    FrameTimingOptions limits;
+    limits.max_samples=options.max_samples;limits.max_work=options.max_work;
+    limits.event_count=impl_->prefix;limits.resampling=options.resampling;
+    limits.cancelled=options.cancelled;limits.progress=options.progress;
+    auto timing=std::make_shared<FrameTimingSeries>(
+        sample_frame_timing(*impl_->session,frame,limits));
+    result.attribution="Native frame wall-clock duration: EndSection minus BeginSection; not CPU scope sums, after-fetch intervals or playback FPS";
+    result.request.filter={};
+    result.candidate_samples=timing->candidate_samples;
+    result.complete=timing->complete;result.cancelled=timing->cancelled;
+    result.resampled=timing->resampled;result.work_limited=timing->work_limited;
+    result.diagnostics=timing->diagnostics;
+    if(request.filter.zone||request.filter.event_id||request.filter.thread_id||
+       request.filter.context_id||!request.filter.text.empty())
+      result.diagnostics.emplace_back("CPU scope filters do not apply to native frame timing");
+    result.samples.reserve(timing->samples.size());
+    for(const auto &s:timing->samples){
+      ProfileCurveSample sample;
+      sample.source=s.source;sample.begin_ticks=s.begin_ticks;sample.end_ticks=s.end_ticks;
+      if(s.duration_ticks)sample.total_ticks=std::to_string(*s.duration_ticks);
+      else sample.total_ticks.clear();
+      sample.value=s.value;sample.exact_value=s.exact_value;
+      sample.seconds=s.seconds;sample.elapsed_seconds=s.elapsed_seconds;
+      sample.break_before=s.break_before;sample.calibration_valid=s.calibration_valid;
+      sample.state=s.state==FrameTimingState::valid?ProfileSampleState::observed:ProfileSampleState::invalid_clock;
+      result.samples.push_back(std::move(sample));
+    }
+    result.frame_timing=std::move(timing);
+    return result;
+  }
   const auto stats = impl_->index.statistics();
   result.provisional = !stats.finished;
   const bool calibrated =
@@ -529,6 +572,9 @@ ProfileCurveSeries ProfileCurves::sample(ProfileCurveRequest request,
                  impl_->header.timestamp_numerator /
                  impl_->header.timestamp_denominator);
       break;
+    case ProfileMetric::native_frame_ticks:
+    case ProfileMetric::native_frame_nanoseconds:
+      throw std::logic_error("native frame timing dispatch failure");
     }
   }
   return result;
@@ -536,6 +582,7 @@ ProfileCurveSeries ProfileCurves::sample(ProfileCurveRequest request,
 
 void write_profile_curve_csv(std::ostream &output,
                              const ProfileCurveSeries &series) {
+  if(series.frame_timing){write_frame_timing_csv(output,*series.frame_timing);return;}
   output << "scene_id,stream_id,frame_index,event_count,begin_ticks,end_ticks,"
             "completed_count,total_ticks,minimum_ticks,maximum_ticks,metric,"
             "value_exact,value_plot,state,provisional,calibration_valid,break_"

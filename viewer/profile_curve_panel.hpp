@@ -3,6 +3,10 @@
 #include "pvd/profile_curves.hpp"
 
 namespace pvd::viewer {
+struct ProfileCurveControlRect { float left=0,top=0,width=0,height=0; };
+struct ProfileCurveControls {
+  ProfileCurveControlRect metric,frame_ticks,frame_nanoseconds,add,export_csv;
+};
 struct ProfileCurvePlotView {
   float left = 0, top = 0, width = 0, height = 0;
   double x_min = 1, x_max = 2, y_min = 0, y_max = 1;
@@ -22,6 +26,9 @@ public:
   // stay.
   std::size_t add_series(Document &, analysis::ProfileCurveRequest,
                          std::string label = {});
+  std::size_t add_frame_timing(Document &,
+      analysis::FrameTimingMetric = analysis::FrameTimingMetric::nanoseconds,
+      std::string label = {});
   void set_request(Document &, std::size_t, analysis::ProfileCurveRequest);
   bool erase_series(std::size_t);
   void select_series(std::size_t);
@@ -40,6 +47,7 @@ public:
   std::size_t row_count() const noexcept;
   std::size_t visible_row_count() const noexcept;
   ProfileCurvePlotView plot_view() const;
+  ProfileCurveControls controls_view() const noexcept;
   bool seek_sample(Document &, std::size_t series_index,
                    std::size_t sample_index);
   const std::string &error() const noexcept;

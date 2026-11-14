@@ -26,9 +26,15 @@ std::string clipped(const std::string &s, std::size_t size = 200) {
   return s.substr(0, size) + "...";
 }
 void text(const std::string &s) { ImGui::TextUnformatted(s.c_str()); }
+ProfileCurveControlRect item_rect() {
+  const auto p=ImGui::GetItemRectMin(),s=ImGui::GetItemRectSize();
+  return {p.x,p.y,s.x,s.y};
+}
 int unit(a::ProfileMetric metric) {
   return metric == a::ProfileMetric::count               ? 0
-         : metric >= a::ProfileMetric::total_nanoseconds ? 2
+         : ((metric >= a::ProfileMetric::total_nanoseconds &&
+              metric <= a::ProfileMetric::maximum_nanoseconds) ||
+             metric == a::ProfileMetric::native_frame_nanoseconds) ? 2
                                                          : 1;
 }
 const char *unit_name(a::ProfileMetric metric) {
@@ -53,6 +59,7 @@ void source_for(a::ProfileCurveRequest &r, const Document &d) {
 }
 std::string label_for(const a::ProfileCurveRequest &r,
                       const profile::Index *index) {
+  if(a::native_frame_metric(r.metric))return a::profile_metric_name(r.metric);
   const auto &f = r.filter;
   std::string label =
       f.zone ? (index ? clipped(index->zone_name(*f.zone), 60) + " " : "") +
@@ -110,6 +117,7 @@ struct ProfileCurvePanel::Impl {
        time_axis = false, manual_x = false, auto_y = true;
   double xlo = 1, xhi = 2, ylo = 0, yhi = 1;
   ProfileCurvePlotView plot;
+  ProfileCurveControls controls;
   std::optional<std::pair<std::size_t, std::size_t>> selected_sample, click;
   std::chrono::steady_clock::time_point last_refresh{};
   std::string error;
@@ -525,9 +533,36 @@ struct ProfileCurvePanel::Impl {
       open_editor = false;
     }
     if (!ImGui::CollapsingHeader(
-            "Choose CPU scope / metric",
+            "Choose frame time / CPU scope",
             entries.empty() ? ImGuiTreeNodeFlags_DefaultOpen : 0))
       return;
+    const char *metrics[] = {"Completed count", "Total ticks (inclusive)",
+                             "Mean ticks", "Minimum ticks", "Maximum ticks",
+                             "Total ns (inclusive)", "Mean ns", "Minimum ns",
+                             "Maximum ns", "Frame time (native ticks)",
+                             "Frame time (native ns)"};
+    int metric=static_cast<int>(editor.metric);
+    ImGui::SetNextItemWidth(
+        std::max(ui_pixels(100.f),ImGui::GetContentRegionAvail().x-ui_pixels(85)));
+    const auto metric_position=ImGui::GetCursorScreenPos();
+    controls.metric={metric_position.x,metric_position.y,
+                     ImGui::CalcItemWidth(),ImGui::GetFrameHeight()};
+    if(ImGui::BeginCombo("Metric",metrics[metric],ImGuiComboFlags_HeightLarge)){
+      for(int choice=0;choice<11;++choice){
+        const auto chosen=ImGui::Selectable(metrics[choice],metric==choice);
+        if(choice==9)controls.frame_ticks=item_rect();
+        if(choice==10)controls.frame_nanoseconds=item_rect();
+        if(chosen){editor.metric=static_cast<a::ProfileMetric>(choice);
+          if(a::native_frame_metric(editor.metric))editor.filter={};}
+      }
+      ImGui::EndCombo();
+    }
+    const bool frame_timing=a::native_frame_metric(editor.metric);
+    if(frame_timing)
+      ImGui::TextWrapped("Native frame wall time = EndSection minus BeginSection. "
+                         "No CPU collection is required. Header calibration gives "
+                         "exact nanoseconds; after-fetch and playback FPS are not used.");
+    if(!frame_timing) {
     auto &f = editor.filter;
     std::string zone_label = "All advertised zones";
     if (f.zone)
@@ -625,16 +660,6 @@ struct ProfileCurvePanel::Impl {
             f.context_id = contexts[static_cast<std::size_t>(n)];
       ImGui::EndCombo();
     }
-    const char *metrics[] = {"Completed count", "Total ticks (inclusive)",
-                             "Mean ticks",      "Minimum ticks",
-                             "Maximum ticks",   "Total ns (inclusive)",
-                             "Mean ns",         "Minimum ns",
-                             "Maximum ns"};
-    int metric = static_cast<int>(editor.metric);
-    ImGui::SetNextItemWidth(
-        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
-    if (ImGui::Combo("Metric", &metric, metrics, 9))
-      editor.metric = static_cast<a::ProfileMetric>(metric);
     bool covered = editor.coverage == a::ProfileCoverage::assume_continuous;
     if (ImGui::Checkbox("Assume continuous collection", &covered))
       editor.coverage = covered ? a::ProfileCoverage::assume_continuous
@@ -719,8 +744,11 @@ struct ProfileCurvePanel::Impl {
           "advertised event also chooses its exact zone lifetime.");
       ImGui::TreePop();
     }
+    }
     ImGui::BeginDisabled(entries.size() >= curve_limit);
-    if (ImGui::Button("Add profile curve")) {
+    const auto add=ImGui::Button(frame_timing?"Add frame-time curve":"Add profile curve");
+    controls.add=item_rect();
+    if (add) {
       owner.add_series(doc, editor);
       editing = false;
     }
@@ -730,7 +758,7 @@ struct ProfileCurvePanel::Impl {
       if (ImGui::Button("Update selected"))
         owner.set_request(doc, selected, editor);
     }
-    if (choices_truncated)
+    if (choices_truncated && !frame_timing)
       ImGui::TextWrapped(
           "Selector lists reached their display budget. Manual IDs remain "
           "available; series filters still use exact IDs.");
@@ -769,8 +797,13 @@ struct ProfileCurvePanel::Impl {
         ImGui::TextWrapped("Exact value: %s", s.exact_value.empty()
                                                   ? "(gap)"
                                                   : s.exact_value.c_str());
-        ImGui::TextWrapped("Observed inclusive total ticks: %s",
-                           s.total_ticks.c_str());
+        ImGui::TextWrapped(series.frame_timing?"Native frame duration ticks: %s":
+                                             "Observed inclusive total ticks: %s",
+                           s.total_ticks.empty()?"(gap)":s.total_ticks.c_str());
+        if(data.frame_timing)
+          ImGui::TextWrapped("Recorded begin %llu / end %llu",
+              static_cast<unsigned long long>(s.begin_ticks),
+              static_cast<unsigned long long>(s.end_ticks));
       }
     }
     if (!series.diagnostics.empty() &&
@@ -784,6 +817,15 @@ struct ProfileCurvePanel::Impl {
 };
 
 ProfileCurvePanel::ProfileCurvePanel() : impl_(std::make_unique<Impl>()) {}
+std::size_t ProfileCurvePanel::add_frame_timing(Document &doc,
+    a::FrameTimingMetric metric,std::string label) {
+  if(metric!=a::FrameTimingMetric::ticks&&metric!=a::FrameTimingMetric::nanoseconds)
+    throw std::invalid_argument("Invalid frame timing metric");
+  a::ProfileCurveRequest q;
+  q.metric=metric==a::FrameTimingMetric::ticks?a::ProfileMetric::native_frame_ticks:
+                                            a::ProfileMetric::native_frame_nanoseconds;
+  return add_series(doc,q,std::move(label));
+}
 ProfileCurvePanel::~ProfileCurvePanel() = default;
 void ProfileCurvePanel::reset() { impl_ = std::make_unique<Impl>(); }
 std::size_t ProfileCurvePanel::add_series(Document &doc,
@@ -902,6 +944,9 @@ std::size_t ProfileCurvePanel::visible_row_count() const noexcept {
 ProfileCurvePlotView ProfileCurvePanel::plot_view() const {
   return impl_->plot;
 }
+ProfileCurveControls ProfileCurvePanel::controls_view() const noexcept {
+  return impl_->controls;
+}
 const std::string &ProfileCurvePanel::error() const noexcept {
   return impl_->error;
 }
@@ -920,6 +965,7 @@ bool ProfileCurvePanel::seek_sample(Document &doc, std::size_t entry,
   return true;
 }
 void ProfileCurvePanel::draw(Document &doc, const CsvExport &export_csv) {
+  impl_->controls={};
   try {
     impl_->bind(doc);
     impl_->curve_visible = 0;
@@ -942,10 +988,16 @@ void ProfileCurvePanel::draw(Document &doc, const CsvExport &export_csv) {
         std::chrono::steady_clock::now() - impl_->last_refresh >=
             std::chrono::seconds(1))
       impl_->resample(doc);
-    ImGui::TextWrapped(
-        "Native scene frame windows: completed scopes are assigned by original "
-        "end tick, never by the packet receipt frame. Inclusive totals include "
-        "nested / overlapping threads; this is not CPU utilization.");
+    if(!impl_->entries.empty() && impl_->entries[impl_->selected].data.frame_timing)
+      ImGui::TextWrapped("Native frame wall-clock duration uses the recorded "
+                         "begin/end counters, not CPU scope sums, after-fetch "
+                         "intervals or playback FPS. Closed frame times do not "
+                         "change with late profile flushes.");
+    else
+      ImGui::TextWrapped(
+          "Native scene frame windows: completed scopes are assigned by original "
+          "end tick, never by the packet receipt frame. Inclusive totals include "
+          "nested / overlapping threads; this is not CPU utilization.");
     if (doc.sample_point() == SamplePoint::after_fetch)
       ImGui::TextWrapped(
           "The viewer currently shows after-fetch data. These curves use "
@@ -961,7 +1013,9 @@ void ProfileCurvePanel::draw(Document &doc, const CsvExport &export_csv) {
     ImGui::Checkbox("Auto (1 Hz)", &impl_->auto_refresh);
     ImGui::SameLine();
     ImGui::BeginDisabled(impl_->entries.empty() || !export_csv);
-    if (ImGui::Button("Export selected CSV") && export_csv &&
+    const auto export_clicked=ImGui::Button("Export selected CSV");
+    impl_->controls.export_csv=item_rect();
+    if (export_clicked && export_csv &&
         !impl_->entries.empty()) {
       auto snapshot = impl_->entries[impl_->selected].data;
       export_csv("profile-curve.csv",

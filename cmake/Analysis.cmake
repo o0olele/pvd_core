@@ -1,6 +1,6 @@
 # Analysis is independent of transport, rendering, ImGui, Windows and the SDK.
 add_library(pvd_analysis src/profile.cpp src/memory.cpp src/errors.cpp src/curves.cpp
-    src/memory_bootstrap.cpp src/profile_bootstrap.cpp src/profile_curves.cpp)
+    src/memory_bootstrap.cpp src/profile_bootstrap.cpp src/profile_curves.cpp src/frame_timing.cpp)
 add_library(pvd::analysis ALIAS pvd_analysis)
 set_target_properties(pvd_analysis PROPERTIES EXPORT_NAME analysis VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -18,7 +18,7 @@ endif()
 list(APPEND PVD_INSTALL_TARGETS pvd_analysis)
 
 if(BUILD_TESTING)
-    foreach(kind IN ITEMS profile memory memory_window error curves memory_bootstrap profile_bootstrap profile_curves)
+    foreach(kind IN ITEMS profile memory memory_window error curves memory_bootstrap profile_bootstrap profile_curves frame_timing)
         add_executable(pvd_${kind}_tests tests/${kind}_tests.cpp)
         target_link_libraries(pvd_${kind}_tests PRIVATE pvd::analysis)
         add_test(NAME ${kind} COMMAND pvd_${kind}_tests)
@@ -56,6 +56,10 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/profile_frames_windows.csv
             ${PROJECT_BINARY_DIR}/fixtures/profile_frames_scopes.csv)
         set_tests_properties(physx34_profile_curves PROPERTIES FIXTURES_REQUIRED physx34_profile_frames TIMEOUT 30)
+        add_test(NAME frame_timing_physx34 COMMAND pvd_frame_timing_tests
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_capture.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/profile_frames_windows.csv)
+        set_tests_properties(frame_timing_physx34 PROPERTIES FIXTURES_REQUIRED physx34_profile_frames TIMEOUT 30)
         add_test(NAME physx34_profile_generate COMMAND pvd_physx34_profile_capture
             ${PROJECT_BINARY_DIR}/fixtures/profile)
         set_tests_properties(physx34_profile_generate PROPERTIES FIXTURES_SETUP physx34_profile TIMEOUT 30)

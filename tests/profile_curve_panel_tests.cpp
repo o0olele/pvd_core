@@ -381,6 +381,65 @@ void exact_csv(float width) {
         "exact CSV schema missing");
 }
 
+void frame_timing_widgets(float width) {
+  StreamHeader header;
+  header.timestamp_numerator=7;header.timestamp_denominator=3;
+  std::vector<Event> events;
+  const auto emit=[&](Payload value){events.push_back({1,999999,0,std::move(value)});};
+  emit(StringHandleEvent{"physx3",1});emit(StringHandleEvent{"PxScene",2});
+  emit(StringHandleEvent{"frame",3});emit(StringHandleEvent{"validation_after_fetch",4});
+  emit(CreateClass{{1,2}});emit(CreateInstance{{1,2},1});
+  for(const auto times:{std::pair<std::uint64_t,std::uint64_t>{100,105},{200,210},{300,320}}){emit(BeginSection{1,3,times.first});emit(EndSection{1,3,times.second});}
+  emit(BeginSection{1,4,1000});emit(EndSection{1,4,1001});
+  Document doc;doc.adopt(std::make_unique<Session>(header,events));doc.set_scene(1);
+  ProfileCurvePanel panel;
+  const auto click_control=[&](ProfileCurveControlRect r){
+    check(r.width>0&&r.height>0,"actual frame-time widget rect unavailable");
+    return click(panel,doc,width,{r.left+r.width*.5f,r.top+r.height*.5f});
+  };
+  draw(panel,doc,width);draw(panel,doc,width);
+  click_control(panel.controls_view().metric);
+  draw(panel,doc,width);
+  click_control(panel.controls_view().frame_ticks);
+  draw(panel,doc,width);draw(panel,doc,width);
+  click_control(panel.controls_view().add);
+  check(panel.series_count()==1&&panel.request(0)->metric==a::ProfileMetric::native_frame_ticks,
+        "actual Metric/Add UI did not select native frame timing");
+  check(panel.profile_index()->zones().empty()&&panel.series(0)->frame_timing&&
+            panel.row_count()==3&&panel.series(0)->samples[0].exact_value=="5"&&
+            panel.series(0)->samples[1].exact_value=="10"&&
+            panel.series(0)->samples[2].exact_value=="20",
+        "frame-time UI required CPU data or used receipt/FPS/afterfetch time");
+  draw(panel,doc,width);const auto initial=draw(panel,doc,width);
+  check(panel.plot_view().unit=="ticks"&&panel.visible_row_count()==3&&
+            initial.text.find("Native frame wall-clock duration")!=std::string::npos,
+        "native frame plot label/unit/points");
+  check(doc.set_sample_point(SamplePoint::after_fetch),"narrow after-fetch marker setup");
+  draw(panel,doc,width);
+  click(panel,doc,width,screen_point(panel.plot_view(),2,10));
+  check(doc.sample_point()==SamplePoint::native_frame&&doc.frame_index()==1,
+        "frame-time mouse point did not seek original native frame");
+  const auto old=panel.plot_view();
+  draw(panel,doc,width,screen_point(old,2,10),{},1);draw(panel,doc,width);
+  check(panel.plot_view().x_max-panel.plot_view().x_min<old.x_max-old.x_min,
+        "native frame-time wheel zoom missing");
+  panel.set_time_axis(true);draw(panel,doc,width);
+  check(panel.plot_view().time_axis&&panel.plot_view().x_max<1e-5,
+        "frame-time x axis used playback FPS");
+  panel.add_frame_timing(doc,a::FrameTimingMetric::nanoseconds);
+  const auto *data=panel.series(1);
+  check(data&&data->samples[0].exact_value=="35/3"&&data->frame_timing,
+        "frame-time UI lost exact rational ns");
+  draw(panel,doc,width);draw(panel,doc,width);
+  const auto exported=click_control(panel.controls_view().export_csv);
+  check(exported.csv.find("duration_ticks")!=std::string::npos&&
+            exported.csv.find("35/3")!=std::string::npos&&
+            exported.csv.find("completed_count")==std::string::npos,
+        "actual frame-time CSV button reused misleading CPU scope schema");
+  panel.set_time_axis(false);const auto final=draw(panel,doc,width);
+  check(initial.overflow<=1&&final.overflow<=1,"frame-time controls overflow width");
+  std::cout<<"native frame-time widgets width="<<width<<" no-CPU/seek/zoom/time/CSV passed\n";
+}
 void live_refresh_and_bounds() {
   Fixture f;
   Document live;
@@ -503,6 +562,8 @@ int main(int argc, char **argv) {
     widgets(420);
     exact_csv(1060);
     exact_csv(420);
+    frame_timing_widgets(1060);
+    frame_timing_widgets(420);
     live_refresh_and_bounds();
     if (argc > 1)
       sdk(argv[1]);

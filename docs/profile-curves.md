@@ -43,6 +43,12 @@ the native counter domain. Such a capture violates this API's input contract;
 the raw wire has no clock-domain tag with which the consumer could detect it.
 GPU events and event-value counters are not CPU duration scopes.
 
+Two appended metrics, `native_frame_ticks` and `native_frame_nanoseconds`, use
+the independent [native FrameTiming API](frame-timing.md). They measure the
+recorded frame section's wall-clock duration, require no CPU scope collection,
+and retain exact rational nanoseconds/CSV. Their `frame_timing` member and
+attribution distinguish them from the original inclusive CPU metrics below.
+
 ## Frame attribution
 
 Each point uses a native scene frame section's exact half-open counter window
