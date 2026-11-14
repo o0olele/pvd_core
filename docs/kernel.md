@@ -9,6 +9,9 @@
 | 通信解码 | `pvd/protocol.hpp` | 增量 feed、初始化头、事件分组、28 类带类型的事件、大小端与输入限制 |
 | 会话与对象模型 | `pvd/session.hpp` | 可追加事件、类/继承/属性/消息元数据、64 位对象 ID、生命周期代次、属性值、引用和帧索引 |
 | 历史查询 | `Session::snapshot_at_frame` / `snapshot_at_event` | 共享不可变载荷、检查点与事件重放；查询顺序可以向前或向后 |
+| 原生坐标 | `pvd/coordinates.hpp` | 保留 last-wire 原文，并提供 OriginShift 后的实际世界值 |
+| 非破坏剪辑 | `pvd/clips.hpp` | 独立命名范围、稳定 ID、场景代次及源身份校验；不依赖查看器 |
+| 保存/裁剪 | `pvd/writer.hpp` | 原始事件重编码、起点对象图和原子文件发布 |
 | 无界面工具 | `pvd_inspect` | 捕获摘要、帧索引、对象与属性原始值的 JSON 输出 |
 | SDK 验证 | `pvd_physx34_capture` | 使用外部 PhysX 3.4 模拟生成数据和独立期望 CSV，不参与内核链接 |
 | TCP 采集 | `pvd/capture.hpp` | 独立 `pvd::transport`，线程安全查询、原始录制与断连恢复，见 [实时采集](live-capture.md) |
@@ -30,7 +33,7 @@ cmake --install build-core --config Debug --prefix "E:/Code/pvd/install-core"
 其他 CMake 项目使用：
 
 ```cmake
-find_package(pvd_core 0.1 CONFIG REQUIRED)
+find_package(pvd_core 0.8 CONFIG REQUIRED)
 target_link_libraries(my_backend PRIVATE pvd::core)
 ```
 
@@ -40,6 +43,7 @@ target_link_libraries(my_backend PRIVATE pvd::core)
 
 ```cpp
 #include <pvd/session.hpp>
+#include <pvd/coordinates.hpp>
 
 auto session = pvd::Session::load_file("capture.pxd2");
 const auto& schema = session.metadata();
@@ -48,7 +52,7 @@ if (!frames.empty()) {
     auto state = session.snapshot_at_frame(0); // 全局第一个已完成 frame 标记
     for (const auto& [id, object] : state.instances) {
         if (auto value = object.property("GlobalPose")) {
-            if (auto pose = value->as_transform()) {
+            if (auto pose = pvd::coordinates::native_transform(*value)) {
                 // pose->position 与 pose->rotation 可交给任意渲染前端。
             }
         }
@@ -90,7 +94,7 @@ pvd::Session session(*decoder.header(), decoder.events());
 
 另有真实 `PvdDataStream` 生成的自定义捕获，用来覆盖数组、分块属性、普通与分组消息、引用、字符串和对象删除。生成器只读 SDK 并把输出、DLL 和构建产物写到本项目构建目录。
 
-本地 SDK 的 Extensions 静态库使用 `/MTd`，新生成器使用 `/MDd`，直接混合链接会产生 runtime-library mismatch。生成器只链接核心 DLL 的 import libraries，通过核心 API 创建形状和同步 dispatcher，避免引入该静态库，也不需要修改或重建 SDK。DLL 的构建 CRT 不能仅从新生成器选项推定。
+本地 SDK 的 Extensions 静态库使用 `/MTd`。基础生成器使用 `/MDd` 并只链接核心 DLL 的 import libraries；需要 Extensions 的独立生成器与验证器显式选用 `/MTd`，避免直接混用两套 runtime。无需修改或重建 SDK。DLL 的构建 CRT 不能仅从新生成器选项推定。
 
 2026-11-14 在本机完成的0.1版初始验证（0.2版新增的实时验证见 [实时采集](live-capture.md)）：
 
@@ -109,9 +113,9 @@ pvd::Session session(*decoder.header(), decoder.events());
 
 - 可追加会话及独立 TCP 接收器已提供；一个采集对象对应一个连接，重连需创建新会话。直接使用可变 Session 时由调用方同步，TcpCapture 则提供同步后的副本查询。
 - 事件和属性载荷保存在内存，检查点数量可配置；当前没有磁盘分页、压缩或大型录制性能承诺。
-- Profile / memory 的嵌套二级数据保持原始通道载荷和相关元数据，尚未完整转换为聚合统计；debug-render 解码已由独立渲染模块提供。
+- Profile / memory / errors 的历史索引、聚合、原生帧活动和 CSV 已由独立 `pvd::analysis` 提供；debug-render 解码与坐标轴等派生数据由 `pvd::render` 提供。
 - OriginShift 保留原始属性字节，并为已确认的 PhysX 3.4 世界字段维护逐次 float 平移的不可变 shadow。渲染或物理读取使用 `coordinates::native_transform/native_vec3/native_value`；`as_*` 仍表示 last-wire 值，不能在 shift 后直接当作当前世界坐标。详见 [origin-shift.md](origin-shift.md)。
-- 还没有旧保存容器写入、剪辑导出、RepX 导出或图形渲染器。
+- Raw 保存、命名剪辑及裁剪已实现；`pvd::repx` 提供独立导出，ImGui/D3D11 只在可选查看器中。旧保存容器和旧 SDK 协议仍按用户范围后续兼容。
 - 已实现源协议大小端和32/64位字段处理；真实 SDK 集成首先验证本机 x64 little-endian 3.4，其他组合以合成协议测试覆盖。
 
 这些边界不进入 UI 层接口；后续可在独立格式适配器、分析模块和渲染提取层扩展。

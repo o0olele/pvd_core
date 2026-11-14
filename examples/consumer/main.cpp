@@ -1,5 +1,7 @@
 #include <pvd/protocol.hpp>
 #include <pvd/writer.hpp>
+#include <pvd/clips.hpp>
+#include <pvd/coordinates.hpp>
 #ifdef PVD_CONSUMER_TRANSPORT
 #include <pvd/capture.hpp>
 #endif
@@ -8,10 +10,12 @@
 #include <pvd/deformables.hpp>
 #include <pvd/scene_queries.hpp>
 #include <pvd/body_overlays.hpp>
+#include <pvd/coordinate_frames.hpp>
 #include <pvd/constraint_builder.hpp>
 #endif
 #ifdef PVD_CONSUMER_ANALYSIS
 #include <pvd/profile_curves.hpp>
+#include <pvd/frame_timing.hpp>
 #include <pvd/memory.hpp>
 #include <pvd/errors.hpp>
 #endif
@@ -51,6 +55,24 @@ int main(int argc, char** argv) {
         decoder.finish();
         pvd::Session session(*decoder.header(), decoder.events());
         auto state = session.frames().empty() ? session.latest() : session.snapshot_at_frame(0);
+        // These are installed core APIs even with the viewer/SDK disabled.
+        if (!session.frames().empty()) {
+            const auto &marker = session.frames().front();
+            const auto *scene = state.instance(marker.scene_id);
+            if (!scene) throw std::runtime_error("native frame has no scene");
+            auto catalog = pvd::clips::Catalog::create(session, {scene->id, scene->generation});
+            const auto restored = pvd::clips::restore_catalogs(session, {catalog.state()});
+            if (restored.size() != 1 || !restored.front().catalog)
+                throw std::runtime_error("installed core clip catalog validation failed");
+            std::cout << "clip_frames=" << catalog.selected()->frames.count() << '\n';
+        }
+        for (const auto &entry : state.instances) {
+            if (const auto *pose = entry.second.property("GlobalPose")) {
+                if (!pvd::coordinates::native_transform(*pose))
+                    throw std::runtime_error("installed native coordinate accessor failed");
+                break;
+            }
+        }
         std::ostringstream saved(std::ios::binary);
         const auto written = pvd::writing::write_session(saved, session);
         const auto bytes = saved.str();
@@ -71,6 +93,10 @@ int main(int argc, char** argv) {
         pvd::render::BodyOverlayOptions overlay_options;
         overlay_options.show_linear_velocity = true;
         const auto overlays = pvd::render::build_body_overlays(frame, state, overlay_options);
+        pvd::render::CoordinateFrameOptions coordinate_options;
+        coordinate_options.actor = true;
+        const auto axes = pvd::render::build_coordinate_frames(frame, state, coordinate_options);
+        if (!axes.complete) throw std::runtime_error("installed coordinate-frame extraction failed");
         std::cout << "linear_velocity_vectors=" << overlays.linear_vectors
                   << " overlay_diagnostics=" << overlays.diagnostics.size() << '\n';
         if (!frame.instances.empty()) {
@@ -101,6 +127,12 @@ int main(int argc, char** argv) {
         pvd::errors::Index errors(session);
         pvd::analysis::ProfileCurves curves(session);
         if (!session.frames().empty()) {
+            pvd::analysis::FrameTimingRequest timing_request;
+            timing_request.source.scene_id = session.frames().front().scene_id;
+            timing_request.metric = pvd::analysis::FrameTimingMetric::ticks;
+            const auto timing = pvd::analysis::sample_frame_timing(session, timing_request);
+            if (!timing.complete || timing.samples.empty())
+                throw std::runtime_error("installed native frame timing API failed");
             pvd::analysis::ProfileCurveRequest request;
             request.source.scene_id = session.frames().front().scene_id;
             auto series = curves.sample(request);

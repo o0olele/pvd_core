@@ -1,7 +1,7 @@
 # Consume the standalone libraries
 
 Each exported target is independent of the viewer. `pvd::core` provides raw
-decoding, snapshots and writing; optional `pvd::transport`, `pvd::render`,
+decoding, snapshots, native coordinate access, named clip catalogs and writing; optional `pvd::transport`, `pvd::render`,
 `pvd::analysis` and `pvd::repx` provide transport, geometry/native objects,
 engineering analysis and XML export. The PhysX SDK is used only by optional
 validation executables. ImGui and D3D11 remain in viewer targets.
@@ -23,11 +23,12 @@ installed `bin` directory must be available for DLL lookup. A static install
 uses the same consumer project without that DLL requirement. Module options
 must match libraries enabled in the installed package; RepX requires render.
 
-The example verifies core streaming input and an in-memory raw save/replay,
+The example requires version 0.8 or newer. It verifies core streaming input,
+source-sealed clip restoration, native coordinate reads and an in-memory raw save/replay,
 optional TCP cancellation, geometry tessellation, native-object extraction,
 publication-based scene queries, standalone geometry extraction, captured rigid
-velocity overlays, SDK-exact joint line generation, profile/memory/error index
-construction, native-frame event curves and RepX
+velocity overlays, local actor frames, SDK-exact joint line generation, profile/memory/error index
+construction, native section timing, native-frame event curves and RepX
 generation. It deliberately exports the first completed frame rather than the
 file's cleanup tail. Captures with no supported rigid actor require disabling
 the example's RepX option. Its explicit partial policy demonstrates diagnostic
