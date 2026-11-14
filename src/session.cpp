@@ -4,6 +4,8 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <set>
+#include <string_view>
 #include <type_traits>
 
 namespace pvd {
@@ -326,6 +328,40 @@ struct Session::Impl {
     }
   }
   void commit(Operation o) {
+    if (o.kind == Kind::assign) {
+      const auto &properties = object(o.id).properties;
+      auto changed = [&](const auto &assignment) {
+        auto old = properties.find(assignment.first);
+        if (old == properties.end()) return true;
+        const auto &a = old->second, &b = assignment.second;
+        return a.incoming_type != b.incoming_type || a.item_count != b.item_count ||
+               a.byte_order != b.byte_order || a.pointer_width != b.pointer_width ||
+               a.opaque != b.opaque || a.text != b.text ||
+               a.reference_ids != b.reference_ids ||
+               (a.bytes != b.bytes && a.raw_bytes() != b.raw_bytes());
+      };
+      if (o.assignments.size() == 1) {
+        if (!changed(o.assignments.front())) return;
+      } else {
+        // Messages are atomic. Repeated property arguments retain their last
+        // value, including a final assignment restoring the previous value.
+        // Channel packets were already indexed independently and stay intact.
+        std::set<std::string_view> seen;
+        std::vector<bool> keep(o.assignments.size());
+        std::size_t count = 0;
+        for (std::size_t i = o.assignments.size(); i-- > 0;)
+          if (seen.insert(o.assignments[i].first).second && changed(o.assignments[i])) {
+            keep[i] = true;
+            ++count;
+          }
+        if (!count) return;
+        std::vector<std::pair<std::string, PropertyValue>> compact;
+        compact.reserve(count);
+        for (std::size_t i = 0; i < keep.size(); ++i)
+          if (keep[i]) compact.push_back(std::move(o.assignments[i]));
+        o.assignments.swap(compact);
+      }
+    }
     o.event_count = index + 1;
     apply(working, o);
     operations.push_back(std::move(o));
@@ -798,7 +834,7 @@ Session Session::parse(const Bytes &b, SessionOptions o) {
   d.finish();
   if (!d.header())
     throw std::invalid_argument("capture has no stream header");
-  return Session(*d.header(), d.events(), o);
+  return Session(*d.header(), d.take_events(), o);
 }
 Session Session::load_file(const std::string &path, SessionOptions o) {
   std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
@@ -817,7 +853,7 @@ Session Session::load_file(const std::string &path, SessionOptions o) {
   d.finish();
   if (!d.header())
     throw std::invalid_argument("capture has no stream header");
-  return Session(*d.header(), d.events(), o);
+  return Session(*d.header(), d.take_events(), o);
 }
 void Session::append(std::vector<Event> events) {
   if (impl_->is_finished)

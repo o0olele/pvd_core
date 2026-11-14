@@ -876,6 +876,50 @@ void incremental_long_multiscene_history() {
                   offline.snapshot_at_frame(frame));
   }
 }
+void repeated_messages_preserve_atomic_state_and_packets() {
+  Fixture f;
+  f.type(1, "Repeated");
+  f.property(1, "Repeated", "value", "PvdF32");
+  f.property(1, "Repeated", "packet", "PvdU8", true, "profile event stream");
+  f.instance(1, "Repeated", 7);
+  f.value(1, 7, "value", "PvdF32", floats({0.f}));
+  f.value(1, 7, "packet", "PvdU8", {1, 2}, 2);
+  const auto initial = f.events.size();
+  auto cls = f.name(1, "Repeated", "test"),
+       msg = f.name(1, "RepeatedMessage", "test"), dt = f.name(1, "PvdF32");
+  auto value = f.str(1, "value");
+  f.emit(1, CreatePropertyMessage{cls, msg, {{value, dt, 0, 4}, {value, dt, 4, 4}}, 8});
+  f.emit(1, SetPropertyMessage{7, msg, floats({1.f, 0.f})});
+  const auto restored = f.events.size();
+  f.value(1, 7, "packet", "PvdU8", {1, 2}, 2);
+  f.value(1, 7, "packet", "PvdU8", {1, 2}, 2);
+  f.value(1, 7, "value", "PvdF32", floats({-0.f}));
+  const auto minus_zero = f.events.size();
+  Bytes zeros(4);
+  f.value(1, 7, "value", "PvdU32", zeros);
+  const auto changed_type = f.events.size();
+  f.emit(1, SetPropertyMessage{7, msg, floats({0.f, 2.f})});
+  SessionOptions options;
+  options.checkpoint_interval = 3;
+  Session session(f.header, f.events, options);
+  check(session.events().size() == f.events.size() && session.channels().size() == 3,
+        "repeated channel packets/raw events were coalesced");
+  for (const auto &packet : session.channels())
+    check(packet.value.raw_bytes() == Bytes({1, 2}), "channel bytes changed");
+  auto original = session.snapshot_at_event(initial);
+  check(property(session.snapshot_at_event(restored), 7, "value").as_float() == 0.f,
+        "atomic message last repeated assignment must restore old state");
+  auto zero = property(session.snapshot_at_event(minus_zero), 7, "value").as_float();
+  check(zero && std::signbit(*zero), "negative-zero wire change was lost");
+  check(property(session.snapshot_at_event(changed_type), 7, "value").incoming_type.name == "PvdU32",
+        "equal bytes with different incoming type were merged");
+  check(property(session.latest(), 7, "value").as_float() == 2.f,
+        "atomic message final changed value was lost");
+  check(property(original, 7, "value").as_float() == 0.f,
+        "retained snapshot changed");
+  for (std::size_t i = f.events.size(); i-- > initial;)
+    check(session.snapshot_at_event(i).event_count == i, "no-op source prefix lost");
+}
 } // namespace
 int main() {
   try {
@@ -883,6 +927,7 @@ int main() {
     endian_pointer_width_and_failures();
     incremental_failure_prefix_and_finish();
     incremental_long_multiscene_history();
+    repeated_messages_preserve_atomic_state_and_packets();
     allocation_failure_prefix_recovery();
     std::cout << "session tests passed\n";
     return 0;
