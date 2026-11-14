@@ -1,0 +1,4 @@
+* text=auto eol=lf
+third_party/imgui/** -whitespace
+*.png binary
+*.pxd2 binary

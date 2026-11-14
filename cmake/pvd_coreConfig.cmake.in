@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+if(@PVD_BUILD_TRANSPORT@)
+    include(CMakeFindDependencyMacro)
+    find_dependency(Threads)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/pvd_coreTargets.cmake")
+check_required_components(pvd_core)

@@ -1,0 +1,19 @@
+/build*/
+/out/
+/install*/
+*.user
+*.suo
+__pycache__/
+
+# Local reverse-engineering evidence and generated capture data.
+/analysis/
+/captures/
+*.pxd2
+
+# Local IDE, runtime, and environment state.
+/.vs/
+/imgui.ini
+/pvd-viewer-error.log
+.env
+.env.*
+!.env.example
