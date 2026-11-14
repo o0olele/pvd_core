@@ -1,5 +1,6 @@
 #include "pvd/repx.hpp"
 #include "pvd/render.hpp"
+#include "repx_joint_fields.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -203,7 +204,8 @@ std::string flags(std::uint64_t value,
   }
   if (value)
     throw ExportError("unrecognized PhysX 3.4 flag bits");
-  return out;
+  // A nonempty zero token forces the SDK reader to clear constructor defaults.
+  return out.empty() ? "0" : out;
 }
 std::string actor_flags(std::uint64_t v) {
   return flags(v, {"eVISUALIZATION", "eDISABLE_GRAVITY", "eSEND_SLEEP_NOTIFIES",
@@ -277,6 +279,8 @@ struct Build {
   const Options &options;
   Result result;
   std::map<std::uint64_t, Actor> actors;
+  std::map<std::uint64_t, joint_detail::Joint> joints;
+  std::set<std::uint64_t> joint_candidates;
   std::map<std::uint64_t, Shape> shapes;
   std::map<std::uint64_t, const InstanceState *> materials;
   std::map<std::uint64_t, Resource> resources;
@@ -344,7 +348,8 @@ struct Build {
             !(is(o, "PxPhysics") || is(o, "PxScene") || is(o, "PxShape") ||
               is(o, "PxMaterial") || is(o, "PxGeometry") ||
               is(o, "PxTriangleMesh") || is(o, "PxConvexMesh") ||
-              is(o, "PxHeightField") ||
+              is(o, "PxHeightField") || is(o, "PxJoint") ||
+              is(o, "PxConstraint") ||
               o.class_name.namespace_name == "_debugger_");
         if (unknown_top) {
           if (!options.scene || !o.property("Scene") || in_scene(o))
@@ -430,21 +435,63 @@ struct Build {
                 "selection roots must be supported rigid actors or attached "
                 "shapes");
       }
-    // Constraints/joints are not silently detached from the selected actors.
+    // A view selection is never expanded across a joint endpoint.
+    std::set<std::uint64_t> linked, backing;
+    for (auto id : selected) {
+      const auto &actor = resolve(id);
+      if (actor.property("Joints"))
+        try {
+          for (auto jid : references(actor, "Joints"))
+            if (jid) {
+              linked.insert(jid);
+              const auto *target = snapshot.instance(jid);
+              if (!target ||
+                  !(is(*target, "PxJoint") || joint_detail::supported(*target)))
+                issue(actor, "Joints",
+                      "dangling/unsupported joint relationship");
+            }
+        } catch (const ExportError &error) {
+          issue(actor, "Joints", error.what());
+        }
+    }
     for (const auto &entry : snapshot.instances) {
       const auto &o = entry.second;
-      if (!(is(o, "PxJoint") || is(o, "PxConstraint") ||
-            is(o, "PxArticulation") || is(o, "PxAggregate")))
+      if (!(is(o, "PxJoint") || joint_detail::supported(o)))
+        continue;
+      if (const auto *value = o.property("Constraint");
+          value && value->item_count == 1)
+        if (auto id = value->as_object_ref(); id && *id)
+          backing.insert(*id);
+      bool relevant =
+          linked.count(o.id) ||
+          (options.selection == Selection::all_actors && !options.scene);
+      if (options.selection == Selection::all_actors && options.scene &&
+          o.property("Scene") && in_scene(o))
+        relevant = true;
+      for (const auto *name : {"Actors.actor0", "Actors.actor1"})
+        if (const auto *value = o.property(name);
+            value && value->item_count == 1)
+          if (auto id = value->as_object_ref())
+            relevant |= selected.count(*id) != 0;
+      if (relevant)
+        joint_candidates.insert(o.id);
+    }
+    for (const auto &entry : snapshot.instances) {
+      const auto &o = entry.second;
+      if (!(is(o, "PxConstraint") || is(o, "PxArticulation") ||
+            is(o, "PxAggregate")) ||
+          backing.count(o.id))
         continue;
       bool relevant =
           options.selection == Selection::all_actors && !options.scene;
-      for (const auto &p : o.properties)
-        if (p.second.reference_ids)
-          for (auto id : *p.second.reference_ids)
-            relevant = relevant || selected.count(id);
+      for (const auto &property : o.properties)
+        if (property.second.reference_ids)
+          for (auto id : *property.second.reference_ids)
+            relevant |= selected.count(id) != 0;
       if (relevant)
         issue(o, "class",
-              "joint/articulation/aggregate relationships are not implemented");
+              "custom constraint/articulation/aggregate serialization is not "
+              "implemented");
     }
     if (selected.empty())
       throw ExportError("no supported actors in requested RepX selection");
@@ -696,6 +743,79 @@ struct Build {
         options.max_objects)
       throw ExportError("RepX dependency object budget exceeded");
   }
+  void prepare_joints() {
+    const auto base_count =
+        actors.size() + shapes.size() + materials.size() + resources.size();
+    std::size_t field_bytes = 0;
+    for (auto id : joint_candidates) {
+      check();
+      const auto &object = resolve(id);
+      std::optional<joint_detail::Joint> ready;
+      try {
+        if (!joint_detail::supported(object))
+          throw ExportError("unsupported custom/unknown joint class");
+        const auto endpoint_ids = joint_detail::endpoints(object);
+        bool dynamic = false;
+        for (auto actor : endpoint_ids)
+          if (actor) {
+            if (!selected.count(actor))
+              throw ExportError("joint crosses the selected actor boundary; no "
+                                "unselected actor was added");
+            const auto found = actors.find(actor);
+            if (found == actors.end())
+              throw ExportError(
+                  "joint endpoint actor was omitted/invalid in this export");
+            dynamic |= found->second.dynamic;
+          }
+        if (!dynamic)
+          throw ExportError(
+              "SDK extension joint requires at least one dynamic rigid actor");
+        auto value = joint_detail::read(object);
+        if (const auto *ref = object.property("Constraint")) {
+          if (ref->item_count != 1)
+            throw ExportError(
+                "joint backing constraint reference is not scalar");
+          const auto target = ref->as_object_ref();
+          if (!target || !*target)
+            throw ExportError("joint has invalid backing constraint reference");
+          if (const auto *constraint = snapshot.instance(*target)) {
+            if (!is(*constraint, "PxConstraint"))
+              throw ExportError(
+                  "joint backing constraint has wrong recorded type");
+            if (constraint->property("MinResponseThreshold") &&
+                scalar(*constraint, "MinResponseThreshold") != 0)
+              throw ExportError(
+                  "nondefault backing constraint MinResponseThreshold is not "
+                  "restored by SDK joint RepX");
+          }
+        }
+        for (const auto &field : value.fields)
+          if (const auto *text = std::get_if<std::string>(&field.value))
+            (void)escape(*text);
+        ready = std::move(value);
+      } catch (const ExportError &error) {
+        issue(object, "joint", error.what());
+        continue;
+      }
+      // The official reader creates one auxiliary PxConstraint for every joint.
+      if (base_count > options.max_objects ||
+          (joints.size() + 1) > (options.max_objects - base_count) / 2)
+        throw ExportError(
+            "RepX joint/backing-constraint object budget exceeded");
+      for (const auto &field : ready->fields) {
+        std::size_t amount = 64;
+        for (const auto &component : field.path)
+          amount += component.size();
+        if (const auto *text = std::get_if<std::string>(&field.value))
+          amount += text->size();
+        if (field_bytes > options.max_xml_bytes ||
+            amount > options.max_xml_bytes - field_bytes)
+          throw ExportError("RepX joint field/XML budget exceeded");
+        field_bytes += amount;
+      }
+      joints.emplace(id, std::move(*ready));
+    }
+  }
   std::uint64_t serial(std::uint64_t id) const {
     auto found = ids.find(id);
     if (found == ids.end())
@@ -723,6 +843,8 @@ struct Build {
     for (const auto &actor : actors)
       add(*actor.second.object,
           actor.second.dynamic ? "PxRigidDynamic" : "PxRigidStatic");
+    for (const auto &joint : joints)
+      add(*joint.second.object, joint.second.type.c_str());
     for (const auto &actor : actors)
       for (std::size_t i = 0; i < actor.second.shapes.size(); ++i) {
         const auto &shape = shapes.at(actor.second.shapes[i]);
@@ -811,6 +933,50 @@ struct Build {
     xml.element("Flags", shape_flags(integer(o, "Flags")));
     xml.element("Name", text(o, "Name"));
     xml.close("PxShape");
+  }
+  struct JointNode {
+    std::optional<std::string> value;
+    std::map<std::string, JointNode> children;
+  };
+  void joint_xml(Xml &xml, const joint_detail::Joint &joint) {
+    JointNode root;
+    auto put = [&](const std::vector<std::string> &path, std::string value) {
+      auto *node = &root;
+      for (const auto &component : path)
+        node = &node->children[component];
+      node->value = std::move(value);
+    };
+    for (std::size_t i = 0; i < 2; ++i)
+      put({"Actors", "actor" + std::to_string(i)},
+          std::to_string(joint.actors[i] ? serial(joint.actors[i]) : 0));
+    for (const auto &field : joint.fields)
+      std::visit(
+          [&](const auto &value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, float>)
+              put(field.path, number(value));
+            else if constexpr (std::is_same_v<T, Vec3>)
+              put(field.path, vec(value));
+            else if constexpr (std::is_same_v<T, Transform>)
+              put(field.path, transform(value));
+            else
+              put(field.path, value);
+          },
+          field.value);
+    const auto emit = [&](const auto &self, const JointNode &node) -> void {
+      for (const auto &child : node.children)
+        if (child.second.value)
+          xml.element(child.first, *child.second.value);
+        else {
+          xml.open(child.first);
+          self(self, child.second);
+          xml.close(child.first);
+        }
+    };
+    xml.open(joint.type);
+    xml.element("Id", std::to_string(serial(joint.object->id)));
+    emit(emit, root);
+    xml.close(joint.type);
   }
   Result output() {
     allocate_ids();
@@ -975,7 +1141,10 @@ struct Build {
       }
       xml.close(type);
     }
+    for (const auto &joint : joints)
+      joint_xml(xml, joint.second);
     xml.close("PhysX30Collection");
+    result.joint_count = joints.size();
     result.xml = std::move(xml.data);
     result.actor_count = actors.size();
     result.shape_count = shapes.size();
@@ -1007,6 +1176,7 @@ Result export_snapshot(const Metadata &metadata, const Snapshot &snapshot,
         build.issue(*actor, diagnostic.property, diagnostic.message);
     }
   build.prepare(frame);
+  build.prepare_joints();
   return build.output();
 }
 Result export_session(const Session &session, std::size_t event_count,

@@ -44,5 +44,22 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/repx.repx ${PROJECT_BINARY_DIR}/fixtures/repx_expected.csv
             --oracle ${PROJECT_BINARY_DIR}/fixtures/repx_official.repx)
         set_tests_properties(physx34_repx_official_roundtrip PROPERTIES FIXTURES_REQUIRED physx34_repx TIMEOUT 30)
+        add_test(NAME physx34_repx_joints_generate COMMAND pvd_repx_tests
+            ${PROJECT_BINARY_DIR}/fixtures/joints_capture.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/joints_joints.csv
+            ${PROJECT_BINARY_DIR}/fixtures/joints_export)
+        set_tests_properties(physx34_repx_joints_generate PROPERTIES FIXTURES_REQUIRED physx34_joints
+            FIXTURES_SETUP physx34_repx_joints TIMEOUT 30)
+        foreach(suffix IN ITEMS "" _big_endian _world _boundary_partial _component
+                _visible _broken_partial _zero_flags _utf8)
+            add_test(NAME physx34_repx_joints${suffix} COMMAND pvd_physx34_repx_validate
+                ${PROJECT_BINARY_DIR}/fixtures/joints_export${suffix}.repx
+                ${PROJECT_BINARY_DIR}/fixtures/joints_export${suffix}_expected.csv)
+            set_tests_properties(physx34_repx_joints${suffix} PROPERTIES FIXTURES_REQUIRED physx34_repx_joints TIMEOUT 30)
+        endforeach()
+        add_test(NAME physx34_repx_joints_official_roundtrip COMMAND pvd_physx34_repx_validate
+            ${PROJECT_BINARY_DIR}/fixtures/joints_export.repx ${PROJECT_BINARY_DIR}/fixtures/joints_export_expected.csv
+            --oracle ${PROJECT_BINARY_DIR}/fixtures/joints_export_official.repx)
+        set_tests_properties(physx34_repx_joints_official_roundtrip PROPERTIES FIXTURES_REQUIRED physx34_repx_joints TIMEOUT 30)
     endif()
 endif()

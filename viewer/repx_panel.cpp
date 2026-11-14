@@ -64,9 +64,9 @@ void draw_repx_progress(RepxJob &job, bool compact) {
   if (!compact) {
     ImGui::TextWrapped("%s", status.destination.c_str());
     if (status.stage == RepxStage::completed) {
-      ImGui::TextWrapped("%s: %zu actors, %zu shapes, %zu materials, %zu resources (%zu bytes).",
+      ImGui::TextWrapped("%s: %zu actors, %zu shapes, %zu joints, %zu materials, %zu resources (%zu bytes).",
           status.complete ? "Complete rigid collection" : "Partial rigid collection",
-          status.actors, status.shapes, status.materials, status.resources, status.xml_bytes);
+          status.actors, status.shapes, status.joints, status.materials, status.resources, status.xml_bytes);
       ImGui::TextDisabled("Displayed prefix: %zu source events", status.event_count);
     }
     if (status.stage == RepxStage::cancelled)

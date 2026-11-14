@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(pvd_core VERSION 0.6.0 LANGUAGES CXX)
+project(pvd_core VERSION 0.7.0 LANGUAGES CXX)
 
 option(BUILD_SHARED_LIBS "Build pvd_core as a shared library" OFF)
 option(PVD_BUILD_TOOLS "Build the headless capture inspection tool" ON)

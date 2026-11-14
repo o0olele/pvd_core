@@ -15,7 +15,7 @@ struct RepxRequest {
 struct RepxStatus {
   RepxStage stage = RepxStage::idle;
   std::string destination, error;
-  std::size_t event_count = 0, actors = 0, shapes = 0, materials = 0,
+  std::size_t event_count = 0, actors = 0, shapes = 0, joints = 0, materials = 0,
               resources = 0, xml_bytes = 0;
   std::vector<repx::Diagnostic> diagnostics;
   bool complete = false, cancel_requested = false;

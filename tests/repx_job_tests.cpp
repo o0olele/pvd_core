@@ -87,7 +87,7 @@ void checks(Document &doc,const std::filesystem::path &dir,bool partial) {
   check(request.event_count==doc.frame()->snapshot.event_count,"export ignored displayed prefix");
   auto expected=repx::export_session(*doc.session(),request.event_count,request.options);
   RepxJob job;job.start(*doc.session(),request);auto saved=finish(job);
-  check(saved.stage==RepxStage::completed&&saved.actors==expected.actor_count&&saved.complete==expected.complete,"background export differs");
+  check(saved.stage==RepxStage::completed&&saved.actors==expected.actor_count&&saved.joints==expected.joint_count&&saved.complete==expected.complete,"background export differs");
   check(read(output)==expected.xml,"background file differs from snapshot");
   auto original=read(output);job.start(*doc.session(),request);
   check(finish(job).stage==RepxStage::failed&&read(output)==original,"no-overwrite damaged file");

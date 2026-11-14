@@ -14,6 +14,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -255,6 +256,112 @@ Fields inspect(PxBase &object, PxCollection &collection) {
       u(f, "minVelocityIters", v);
     }
   }
+  if (auto *joint = object.is<PxJoint>()) {
+    f[{"Name", 0}] = {'s', hex(joint->getName())};
+    PxRigidActor *a0 = nullptr;
+    PxRigidActor *a1 = nullptr;
+    joint->getActors(a0, a1);
+    u(f, "Actors.actor0", a0 ? collection.getId(*a0) : 0);
+    u(f, "Actors.actor1", a1 ? collection.getId(*a1) : 0);
+    pose(f, "LocalPose[eACTOR0]",
+         joint->getLocalPose(PxJointActorIndex::eACTOR0));
+    pose(f, "LocalPose[eACTOR1]",
+         joint->getLocalPose(PxJointActorIndex::eACTOR1));
+    PxReal force = 0, torque = 0;
+    joint->getBreakForce(force, torque);
+    scalar(f, "BreakForce.force", force);
+    scalar(f, "BreakForce.torque", torque);
+    u(f, "ConstraintFlags", joint->getConstraintFlags());
+    scalar(f, "InvMassScale0", joint->getInvMassScale0());
+    scalar(f, "InvMassScale1", joint->getInvMassScale1());
+    scalar(f, "InvInertiaScale0", joint->getInvInertiaScale0());
+    scalar(f, "InvInertiaScale1", joint->getInvInertiaScale1());
+    const auto limit = [&](const std::string &p,
+                           const PxJointLimitParameters &l) {
+      scalar(f, p + ".Restitution", l.restitution);
+      scalar(f, p + ".BounceThreshold", l.bounceThreshold);
+      scalar(f, p + ".Stiffness", l.stiffness);
+      scalar(f, p + ".Damping", l.damping);
+      scalar(f, p + ".ContactDistance", l.contactDistance);
+    };
+    const auto pair = [&](const std::string &p, const auto &l) {
+      limit(p, l);
+      scalar(f, p + ".Lower", l.lower);
+      scalar(f, p + ".Upper", l.upper);
+    };
+    const auto cone = [&](const std::string &p, const PxJointLimitCone &l) {
+      limit(p, l);
+      scalar(f, p + ".YAngle", l.yAngle);
+      scalar(f, p + ".ZAngle", l.zAngle);
+    };
+    if (auto *typed = joint->is<PxFixedJoint>()) {
+      scalar(f, "ProjectionLinearTolerance",
+             typed->getProjectionLinearTolerance());
+      scalar(f, "ProjectionAngularTolerance",
+             typed->getProjectionAngularTolerance());
+    }
+    if (auto *typed = joint->is<PxDistanceJoint>()) {
+      scalar(f, "MinDistance", typed->getMinDistance());
+      scalar(f, "MaxDistance", typed->getMaxDistance());
+      scalar(f, "Tolerance", typed->getTolerance());
+      scalar(f, "Stiffness", typed->getStiffness());
+      scalar(f, "Damping", typed->getDamping());
+      u(f, "DistanceJointFlags", typed->getDistanceJointFlags());
+    }
+    if (auto *typed = joint->is<PxPrismaticJoint>()) {
+      pair("Limit", typed->getLimit());
+      u(f, "PrismaticJointFlags", typed->getPrismaticJointFlags());
+      scalar(f, "ProjectionLinearTolerance",
+             typed->getProjectionLinearTolerance());
+      scalar(f, "ProjectionAngularTolerance",
+             typed->getProjectionAngularTolerance());
+    }
+    if (auto *typed = joint->is<PxRevoluteJoint>()) {
+      pair("Limit", typed->getLimit());
+      scalar(f, "DriveVelocity", typed->getDriveVelocity());
+      scalar(f, "DriveForceLimit", typed->getDriveForceLimit());
+      scalar(f, "DriveGearRatio", typed->getDriveGearRatio());
+      u(f, "RevoluteJointFlags", typed->getRevoluteJointFlags());
+      scalar(f, "ProjectionLinearTolerance",
+             typed->getProjectionLinearTolerance());
+      scalar(f, "ProjectionAngularTolerance",
+             typed->getProjectionAngularTolerance());
+    }
+    if (auto *typed = joint->is<PxSphericalJoint>()) {
+      cone("LimitCone", typed->getLimitCone());
+      u(f, "SphericalJointFlags", typed->getSphericalJointFlags());
+      scalar(f, "ProjectionLinearTolerance",
+             typed->getProjectionLinearTolerance());
+    }
+    if (auto *typed = joint->is<PxD6Joint>()) {
+      const char *axes[] = {"eX", "eY", "eZ", "eTWIST", "eSWING1", "eSWING2"};
+      const char *drives[] = {"eX", "eY", "eZ", "eSWING", "eTWIST", "eSLERP"};
+      for (PxU32 i = 0; i < 6; ++i) {
+        u(f, std::string("Motion[") + axes[i] + "]",
+          static_cast<PxU32>(typed->getMotion(static_cast<PxD6Axis::Enum>(i))));
+        const auto d = typed->getDrive(static_cast<PxD6Drive::Enum>(i));
+        const auto p = std::string("Drive[") + drives[i] + "]";
+        scalar(f, p + ".Stiffness", d.stiffness);
+        scalar(f, p + ".Damping", d.damping);
+        scalar(f, p + ".ForceLimit", d.forceLimit);
+        u(f, p + ".Flags", d.flags);
+      }
+      const auto linear = typed->getLinearLimit();
+      limit("LinearLimit", linear);
+      scalar(f, "LinearLimit.Value", linear.value);
+      pair("TwistLimit", typed->getTwistLimit());
+      cone("SwingLimit", typed->getSwingLimit());
+      pose(f, "DrivePosition", typed->getDrivePosition());
+      PxVec3 v, w;
+      typed->getDriveVelocity(v, w);
+      vec(f, "DriveVelocity.linear", v);
+      vec(f, "DriveVelocity.angular", w);
+      scalar(f, "ProjectionLinearTolerance",
+             typed->getProjectionLinearTolerance());
+      scalar(f, "ProjectionAngularTolerance",
+             typed->getProjectionAngularTolerance());
+    }
+  }
   if (auto *shape = object.is<PxShape>()) {
     f[{"Name", 0}] = {'s', hex(shape->getName())};
     pose(f, "LocalPose", shape->getLocalPose());
@@ -382,6 +489,7 @@ void validate(const std::string &xml, const std::string &expected,
   std::ifstream csv(std::filesystem::u8path(expected));
   need(bool(csv), "open expected CSV");
   std::map<Locator, Fields> actual;
+  std::set<PxBase *> covered;
   std::size_t fields = 0, objects = 0;
   std::string line;
   while (std::getline(csv, line)) {
@@ -410,6 +518,8 @@ void validate(const std::string &xml, const std::string &expected,
       const auto &type = row[4];
       need(
           (type == "PxShape" && object->is<PxShape>()) ||
+              (type == object->getConcreteTypeName() &&
+               object->is<PxJoint>()) ||
               (type == "PxRigidStatic" && object->is<PxRigidStatic>()) ||
               (type == "PxRigidDynamic" && object->is<PxRigidDynamic>()) ||
               (type == "PxMaterial" && object->is<PxMaterial>()) ||
@@ -418,6 +528,12 @@ void validate(const std::string &xml, const std::string &expected,
               (type == "PxHeightField" && object->is<PxHeightField>()),
           "SDK concrete type matches mapping");
       actual.emplace(key, inspect(*object, *collection));
+      covered.insert(object);
+      if (auto *joint = object->is<PxJoint>()) {
+        need(joint->getConstraint() != nullptr,
+             "joint backing constraint created");
+        covered.insert(joint->getConstraint());
+      }
       ++objects;
       continue;
     }
@@ -440,11 +556,11 @@ void validate(const std::string &xml, const std::string &expected,
                                       " expected=" + row[6]);
     ++fields;
   }
-  need(objects == collection->getNbObjects(),
+  need(covered.size() == collection->getNbObjects(),
        "every loaded object independently covered");
   need(!context.errors.failures, "SDK reported load errors");
-  std::cout << "RepX SDK validation passed: " << objects << " objects, "
-            << fields << " fields\n";
+  std::cout << "RepX SDK validation passed: " << covered.size() << " objects ("
+            << objects << " mapped), " << fields << " fields\n";
   if (!oracle.empty()) {
     struct Output : PxOutputStream {
       std::ofstream stream;

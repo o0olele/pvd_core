@@ -64,7 +64,7 @@ struct Result {
   std::string xml;
   std::string version = "3.4.2";
   std::size_t actor_count = 0, shape_count = 0, material_count = 0,
-              resource_count = 0;
+              resource_count = 0, joint_count = 0;
   std::vector<ObjectMapping> objects;
   std::vector<Diagnostic> diagnostics;
   bool complete = true;
@@ -78,7 +78,8 @@ public:
   using std::runtime_error::runtime_error;
 };
 // PhysX 3.4 RepX XML containing selected rigid actors and their material/shape/
-// mesh dependencies. No SDK, ImGui, device, or scene simulation dependency.
+// mesh dependencies and eligible six-type extension joints. No SDK, ImGui,
+// device, or scene simulation dependency. Joint endpoints never widen actors.
 // Unknown/unsupported requested content is rejected by default. Partial output
 // requires explicit opt-in and carries diagnostics plus XML provenance.
 PVD_REPX_API Result export_snapshot(const Metadata &, const Snapshot &,

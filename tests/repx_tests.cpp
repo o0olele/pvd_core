@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -251,9 +252,44 @@ void resource_triangles(Csv &csv, const render::MeshData &mesh) {
     csv.vec("TriangleNormal", normal, i * 3);
   }
 }
+struct JointOracleRow {
+  std::string name, type, property, value;
+  std::size_t index = 0;
+  char kind = 'f';
+};
+using JointOracle = std::map<std::uint64_t, std::vector<JointOracleRow>>;
+float joint_float(const InstanceState &object, const JointOracleRow &row) {
+  const auto &value = need(object, row.property.c_str());
+  if (value.incoming_type.name == "PxTransform") {
+    const auto v = value.as_transform();
+    check(bool(v) && row.index < 7, "joint oracle transform field");
+    const float parts[] = {v->rotation.x, v->rotation.y, v->rotation.z,
+                           v->rotation.w, v->position.x, v->position.y,
+                           v->position.z};
+    return parts[row.index];
+  }
+  if (value.incoming_type.name == "PxVec3") {
+    const auto v = value.as_vec3();
+    check(bool(v) && row.index < 3, "joint oracle Vec3 field");
+    const float parts[] = {v->x, v->y, v->z};
+    return parts[row.index];
+  }
+  check(row.index == 0, "joint scalar oracle index");
+  return scalar(object, row.property.c_str());
+}
+std::uint64_t joint_uint(const InstanceState &object,
+                         const JointOracleRow &row) {
+  if (row.property.rfind("Actors.", 0) == 0) {
+    const auto v = need(object, row.property.c_str()).as_object_ref();
+    check(bool(v), "joint actor reference");
+    return *v;
+  }
+  return uint(object, row.property.c_str());
+}
 void expected(std::ostream &out, const Metadata &metadata,
               const Snapshot &state, const xml::Result &result,
-              const xml::Options &options) {
+              const xml::Options &options,
+              const JointOracle *joint_oracle = nullptr) {
   render::Extractor extractor;
   auto frame = extractor.extract(metadata, state);
   std::map<std::uint64_t, const render::ShapeInstance *> shapes;
@@ -335,6 +371,21 @@ void expected(std::ostream &out, const Metadata &metadata,
         c.u("minVelocityIters",
             uint(o, "SolverIterationCounts.minVelocityIters"));
       }
+    } else if (mapping.type.find("Joint") != std::string::npos) {
+      check(joint_oracle && joint_oracle->count(o.id),
+            "independent joint getter oracle required");
+      c.s("Name", o.property("Name") ? need(o, "Name").text.value_or("") : "");
+      for (const auto &row : joint_oracle->at(o.id))
+        if (row.kind == 'f')
+          c.f(row.property, joint_float(o, row), row.index);
+        else {
+          const auto value = joint_uint(o, row);
+          c.u(row.property,
+              row.property.rfind("Actors.", 0) == 0
+                  ? (value ? ids.at(value) : 0)
+                  : value,
+              row.index);
+        }
     } else if (mapping.type == "PxMaterial") {
       for (const auto *p : {"StaticFriction", "DynamicFriction", "Restitution"})
         c.f(p, scalar(o, p));
@@ -423,14 +474,16 @@ void expected(std::ostream &out, const Metadata &metadata,
   check(bool(out), "expected CSV written");
 }
 void emit_fixture(const std::string &prefix, const Metadata &metadata,
-                  const Snapshot &snapshot, xml::Options options) {
+                  const Snapshot &snapshot, xml::Options options,
+                  const JointOracle *joints = nullptr) {
   auto result = xml::export_snapshot(metadata, snapshot, options);
   xml::save_file(prefix + ".repx", result, true);
   std::ofstream csv(std::filesystem::u8path(prefix + "_expected.csv"));
-  expected(csv, metadata, snapshot, result, options);
+  expected(csv, metadata, snapshot, result, options, joints);
   std::cout << "RepX export: " << result.actor_count << " actors, "
             << result.shape_count << " shapes, " << result.resource_count
-            << " resources, complete=" << result.complete << '\n';
+            << " resources, " << result.joint_count
+            << " joints, complete=" << result.complete << '\n';
 }
 Snapshot big_endian(Snapshot state) {
   for (auto &object : state.instances)
@@ -700,6 +753,238 @@ void real(const char *capture, const char *prefix) {
   emit_fixture(std::string(prefix) + "_synthetic", basic.metadata, basic.state,
                {});
 }
+std::vector<std::string> joint_csv_split(std::string line) {
+  if (!line.empty() && line.back() == '\r')
+    line.pop_back();
+  std::vector<std::string> result;
+  std::size_t at = 0;
+  for (;;) {
+    auto next = line.find(',', at);
+    result.push_back(line.substr(at, next - at));
+    if (next == std::string::npos)
+      break;
+    at = next + 1;
+  }
+  return result;
+}
+void real_joints(const char *capture, const char *oracle_file,
+                 const char *output) {
+  auto session = Session::load_file(capture);
+  std::size_t prefix = 0;
+  for (const auto &section : session.sections())
+    if (section.name == "joint_oracle")
+      prefix = section.event_count;
+  check(prefix != 0, "real joint marker");
+  const auto snapshot = session.snapshot_at_event(prefix);
+  const auto &metadata = session.metadata();
+  JointOracle oracle;
+  std::ifstream file(std::filesystem::u8path(oracle_file));
+  check(bool(file), "open independent joint getter oracle");
+  std::string line;
+  std::size_t rows = 0;
+  while (std::getline(file, line)) {
+    auto fields = joint_csv_split(line);
+    if (fields[0] == "joint_name")
+      continue;
+    check(fields.size() == 6, "joint getter oracle CSV schema");
+    JointOracleRow row{fields[0],
+                       fields[1],
+                       fields[2],
+                       fields[5],
+                       static_cast<std::size_t>(std::stoull(fields[3])),
+                       fields[4][0]};
+    const InstanceState *object = nullptr;
+    for (const auto &entry : snapshot.instances)
+      if (entry.second.class_name.name == row.type &&
+          entry.second.property("Name") &&
+          entry.second.property("Name")->text == row.name) {
+        object = &entry.second;
+        break;
+      }
+    check(object != nullptr, "SDK oracle joint exists in capture");
+    if (row.kind == 'f')
+      check(joint_float(*object, row) == std::stof(row.value),
+            "PVD joint field differs from independent SDK getter float");
+    else
+      check(joint_uint(*object, row) == std::stoull(row.value),
+            "PVD joint field differs from independent SDK getter integer/ref");
+    oracle[object->id].push_back(std::move(row));
+    ++rows;
+  }
+  check(rows == 243 && oracle.size() == 6,
+        "six-type independent joint oracle coverage");
+  const auto base = xml::export_snapshot(metadata, snapshot);
+  check(base.complete && base.actor_count == 7 && base.joint_count == 6,
+        "all six SDK joints were not exported");
+  emit_fixture(output, metadata, snapshot, {}, &oracle);
+  auto be = big_endian(snapshot);
+  check(xml::export_snapshot(metadata, be).xml == base.xml,
+        "LE/BE joint snapshot serialization differs");
+  emit_fixture(std::string(output) + "_big_endian", metadata, be, {}, &oracle);
+  std::map<std::string, std::uint64_t> by_name;
+  for (const auto &entry : oracle)
+    by_name[entry.second.front().name] = entry.first;
+  const auto fixed = by_name.at("joint_fixed"),
+             distance = by_name.at("joint_distance"),
+             d6 = by_name.at("joint_d6");
+  const auto endpoint = [&](std::uint64_t joint, int slot) {
+    return *need(*snapshot.instance(joint),
+                 slot ? "Actors.actor1" : "Actors.actor0")
+                .as_object_ref();
+  };
+  xml::Options world;
+  world.selection = xml::Selection::objects;
+  const auto world_body = endpoint(fixed, 1);
+  world.objects = {{world_body, snapshot.instance(world_body)->generation}};
+  const auto scene_id =
+      *need(*snapshot.instance(world_body), "Scene").as_object_ref();
+  world.scene =
+      xml::ObjectKey{scene_id, snapshot.instance(scene_id)->generation};
+  const auto only_world = xml::export_snapshot(metadata, snapshot, world);
+  check(only_world.actor_count == 1 && only_world.joint_count == 1,
+        "world joint selection widened actors");
+  emit_fixture(std::string(output) + "_world", metadata, snapshot, world,
+               &oracle);
+  xml::Options boundary;
+  boundary.selection = xml::Selection::objects;
+  boundary.scene = world.scene;
+  const auto distance_body = endpoint(distance, 1),
+             anchor = endpoint(distance, 0);
+  boundary.objects = {
+      {distance_body, snapshot.instance(distance_body)->generation}};
+  bool crossed = false;
+  try {
+    xml::export_snapshot(metadata, snapshot, boundary);
+  } catch (const xml::ExportError &e) {
+    crossed = std::string(e.what()).find("boundary") != std::string::npos;
+  }
+  check(crossed,
+        "selected actor cross-boundary joint was not explicitly rejected");
+  boundary.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto partial = xml::export_snapshot(metadata, snapshot, boundary);
+  check(!partial.complete && partial.actor_count == 1 &&
+            partial.joint_count == 0 && !partial.diagnostics.empty(),
+        "partial boundary joint silently widened or claimed complete");
+  check(std::none_of(
+            partial.objects.begin(), partial.objects.end(),
+            [&](const auto &object) { return object.source.id == anchor; }),
+        "unselected anchor leaked into partial export");
+  emit_fixture(std::string(output) + "_boundary_partial", metadata, snapshot,
+               boundary, &oracle);
+  xml::Options closed;
+  closed.selection = xml::Selection::objects;
+  std::set<std::uint64_t> actors;
+  for (const auto &entry : oracle) {
+    const auto a = endpoint(entry.first, 0), b = endpoint(entry.first, 1);
+    if (a && b) {
+      actors.insert(a);
+      actors.insert(b);
+    }
+  }
+  for (auto actor : actors)
+    closed.objects.push_back({actor, snapshot.instance(actor)->generation});
+  const auto component = xml::export_snapshot(metadata, snapshot, closed);
+  check(component.complete && component.actor_count == 5 &&
+            component.joint_count == 4,
+        "closed selected joint component was not preserved exactly");
+  emit_fixture(std::string(output) + "_component", metadata, snapshot, closed,
+               &oracle);
+  xml::Options visible;
+  visible.selection = xml::Selection::attachments;
+  visible.scene = world.scene;
+  for (auto actor : actors) {
+    const auto &o = *snapshot.instance(actor);
+    const auto sid = *need(o, "Scene").as_object_ref();
+    for (auto shape : *need(o, "Shapes").reference_ids)
+      visible.attachments.push_back(
+          {{sid, snapshot.instance(sid)->generation},
+           {actor, o.generation},
+           {shape, snapshot.instance(shape)->generation}});
+  }
+  const auto attachments = xml::export_snapshot(metadata, snapshot, visible);
+  check(
+      attachments.actor_count == 5 && attachments.joint_count == 4 &&
+          attachments.xml == component.xml,
+      "visible attachments expanded actor boundary or dropped internal joints");
+  emit_fixture(std::string(output) + "_visible", metadata, snapshot, visible,
+               &oracle);
+  auto broken = snapshot;
+  broken.instances.at(fixed).properties["ConstraintFlags"] =
+      ui(uint(*snapshot.instance(fixed), "ConstraintFlags") | 1);
+  rejects([&] { xml::export_snapshot(metadata, broken); });
+  xml::Options allow;
+  allow.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto missing = xml::export_snapshot(metadata, broken, allow);
+  check(!missing.complete && missing.joint_count == 5 &&
+            missing.xml.find("<PxFixedJoint>") == std::string::npos,
+        "read-only broken joint was fabricated as intact");
+  emit_fixture(std::string(output) + "_broken_partial", metadata, broken, allow,
+               &oracle);
+  auto zero = snapshot;
+  for (const auto &entry : oracle) {
+    auto &properties = zero.instances.at(entry.first).properties;
+    properties["ConstraintFlags"] = ui(0);
+    for (const auto *field : {"DistanceJointFlags", "PrismaticJointFlags",
+                              "RevoluteJointFlags", "SphericalJointFlags"})
+      if (properties.count(field))
+        properties[field] = ui(0);
+    if (entry.first == d6)
+      for (const auto *drive : {"eX", "eY", "eZ", "eSWING", "eTWIST", "eSLERP"})
+        properties[std::string("Drive[") + drive + "].Flags"] = ui(0);
+  }
+  for (auto &entry : zero.instances) {
+    auto &object = entry.second;
+    if (object.property("ActorFlags"))
+      object.properties["ActorFlags"] = ui(0);
+    if (object.class_name.name == "PxShape" ||
+        object.class_name.name == "PxMaterial")
+      object.properties["Flags"] = ui(0);
+  }
+  const auto clear_flags = xml::export_snapshot(metadata, zero);
+  check(clear_flags.xml.find("<ConstraintFlags>0</ConstraintFlags>") !=
+            std::string::npos,
+        "zero flags would retain SDK constructor defaults");
+  emit_fixture(std::string(output) + "_zero_flags", metadata, zero, {},
+               &oracle);
+  auto invalid = snapshot;
+  invalid.instances.at(d6).properties.erase("Drive[eSLERP].ForceLimit");
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  check(xml::export_snapshot(metadata, invalid, allow).joint_count == 5,
+        "missing drive data was silently defaulted");
+  invalid = snapshot;
+  invalid.instances.at(d6).properties["Motion[eX]"] = ui(99);
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  invalid = snapshot;
+  invalid.instances.at(fixed).properties["ConstraintFlags"] = ui(64);
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  invalid = snapshot;
+  invalid.instances.at(fixed).properties["ConstraintFlags"] = ui(512);
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  invalid = snapshot;
+  invalid.instances.at(d6).properties["SwingLimit.YAngle"] =
+      floats("PvdF32", {0});
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  invalid = snapshot;
+  invalid.instances.at(fixed).properties["LocalPose[eACTOR0]"] =
+      floats("PxTransform", {0, 0, 0, 0, 0, 0, 0});
+  rejects([&] { xml::export_snapshot(metadata, invalid); });
+  auto stale = world;
+  stale.objects[0].generation++;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, stale); });
+  xml::Options budget;
+  budget.max_objects = 26;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, budget); });
+  budget.max_objects = 27;
+  check(xml::export_snapshot(metadata, snapshot, budget).joint_count == 6,
+        "backing constraints were not charged consistently to object budget");
+  auto renamed = snapshot;
+  renamed.instances.at(fixed).properties["Name"] = string(u8"关节<&\" renamed");
+  emit_fixture(std::string(output) + "_utf8", metadata, renamed, {}, &oracle);
+  std::cout << "Joint SDK source oracle: " << rows
+            << " fields, six kinds, boundary/partial/zero "
+               "flags/generation/budget cases passed\n";
+}
+
 } // namespace
 int main(int argc, char **argv) {
   try {
@@ -707,9 +992,11 @@ int main(int argc, char **argv) {
       unit();
     else if (argc == 3)
       real(argv[1], argv[2]);
+    else if (argc == 4)
+      real_joints(argv[1], argv[2], argv[3]);
     else
-      throw std::runtime_error(
-          "usage: repx_tests [capture.pxd2 output_prefix]");
+      throw std::runtime_error("usage: repx_tests [capture.pxd2 output_prefix] "
+                               "or [joints.pxd2 joints.csv output_prefix]");
     std::cout << "RepX tests passed\n";
     return 0;
   } catch (const std::exception &e) {

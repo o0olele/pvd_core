@@ -54,6 +54,7 @@ struct RepxJob::Impl {
         state.stage = RepxStage::writing;
         state.actors = result.actor_count;
         state.shapes = result.shape_count;
+        state.joints = result.joint_count;
         state.materials = result.material_count;
         state.resources = result.resource_count;
         state.xml_bytes = result.xml.size();
