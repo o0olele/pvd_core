@@ -1,5 +1,5 @@
 # Analysis is independent of transport, rendering, ImGui, Windows and the SDK.
-add_library(pvd_analysis src/profile.cpp)
+add_library(pvd_analysis src/profile.cpp src/memory.cpp src/errors.cpp)
 add_library(pvd::analysis ALIAS pvd_analysis)
 set_target_properties(pvd_analysis PROPERTIES EXPORT_NAME analysis VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -17,10 +17,12 @@ endif()
 list(APPEND PVD_INSTALL_TARGETS pvd_analysis)
 
 if(BUILD_TESTING)
-    add_executable(pvd_profile_tests tests/profile_tests.cpp)
-    target_link_libraries(pvd_profile_tests PRIVATE pvd::analysis)
-    add_test(NAME profile COMMAND pvd_profile_tests)
-    set_tests_properties(profile PROPERTIES TIMEOUT 30)
+    foreach(kind IN ITEMS profile memory error)
+        add_executable(pvd_${kind}_tests tests/${kind}_tests.cpp)
+        target_link_libraries(pvd_${kind}_tests PRIVATE pvd::analysis)
+        add_test(NAME ${kind} COMMAND pvd_${kind}_tests)
+        set_tests_properties(${kind} PROPERTIES TIMEOUT 30)
+    endforeach()
 endif()
 
 if(PVD_BUILD_PHYSX34_VALIDATION)
@@ -31,6 +33,11 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         ${PROJECT_SOURCE_DIR}/examples/physx34_compat
         ${PHYSX34_ROOT}/PxShared/src/foundation/include
         ${PHYSX34_ROOT}/PxShared/src/pvd/src)
+    pvd_add_physx34_capture(pvd_physx34_memory_capture
+        ${PROJECT_SOURCE_DIR}/examples/physx34_memory_capture.cpp)
+    target_include_directories(pvd_physx34_memory_capture SYSTEM PRIVATE
+        ${PROJECT_SOURCE_DIR}/examples/physx34_compat
+        ${PHYSX34_ROOT}/PxShared/src/foundation/include)
     if(BUILD_TESTING)
         file(MAKE_DIRECTORY ${PROJECT_BINARY_DIR}/fixtures)
         add_test(NAME physx34_profile_generate COMMAND pvd_physx34_profile_capture
@@ -40,5 +47,15 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/profile_capture.pxd2
             ${PROJECT_BINARY_DIR}/fixtures/profile_expected.csv)
         set_tests_properties(physx34_profile PROPERTIES FIXTURES_REQUIRED physx34_profile TIMEOUT 30)
+        add_executable(pvd_physx34_memory tests/physx34_memory.cpp)
+        target_link_libraries(pvd_physx34_memory PRIVATE pvd::analysis)
+        add_test(NAME physx34_memory_generate COMMAND pvd_physx34_memory_capture
+            ${PROJECT_BINARY_DIR}/fixtures/allocations)
+        set_tests_properties(physx34_memory_generate PROPERTIES FIXTURES_SETUP physx34_memory TIMEOUT 30)
+        add_test(NAME physx34_memory COMMAND pvd_physx34_memory
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory_expected.csv
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory_summary.csv)
+        set_tests_properties(physx34_memory PROPERTIES FIXTURES_REQUIRED physx34_memory TIMEOUT 30)
     endif()
 endif()
