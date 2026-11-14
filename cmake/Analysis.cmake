@@ -1,5 +1,6 @@
 # Analysis is independent of transport, rendering, ImGui, Windows and the SDK.
-add_library(pvd_analysis src/profile.cpp src/memory.cpp src/errors.cpp src/curves.cpp)
+add_library(pvd_analysis src/profile.cpp src/memory.cpp src/errors.cpp src/curves.cpp
+    src/memory_bootstrap.cpp src/profile_bootstrap.cpp)
 add_library(pvd::analysis ALIAS pvd_analysis)
 set_target_properties(pvd_analysis PROPERTIES EXPORT_NAME analysis VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -17,7 +18,7 @@ endif()
 list(APPEND PVD_INSTALL_TARGETS pvd_analysis)
 
 if(BUILD_TESTING)
-    foreach(kind IN ITEMS profile memory error curves)
+    foreach(kind IN ITEMS profile memory error curves memory_bootstrap profile_bootstrap)
         add_executable(pvd_${kind}_tests tests/${kind}_tests.cpp)
         target_link_libraries(pvd_${kind}_tests PRIVATE pvd::analysis)
         add_test(NAME ${kind} COMMAND pvd_${kind}_tests)
@@ -60,5 +61,15 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         add_test(NAME physx34_curves COMMAND pvd_curves_tests
             ${PROJECT_BINARY_DIR}/fixtures/physical_capture.pxd2)
         set_tests_properties(physx34_curves PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
+        add_test(NAME physx34_memory_bootstrap COMMAND pvd_memory_bootstrap_tests
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory.pxd2)
+        set_tests_properties(physx34_memory_bootstrap PROPERTIES FIXTURES_REQUIRED physx34_memory TIMEOUT 30)
+        add_test(NAME physx34_profile_bootstrap COMMAND pvd_profile_bootstrap_tests
+            ${PROJECT_BINARY_DIR}/fixtures/profile_capture.pxd2)
+        set_tests_properties(physx34_profile_bootstrap PROPERTIES FIXTURES_REQUIRED physx34_profile TIMEOUT 30)
+        add_test(NAME physx34_writer_analysis COMMAND pvd_writer_tests
+            ${PROJECT_BINARY_DIR}/fixtures/profile_capture.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/allocations_memory.pxd2)
+        set_tests_properties(physx34_writer_analysis PROPERTIES FIXTURES_REQUIRED "physx34_profile;physx34_memory" TIMEOUT 30)
     endif()
 endif()

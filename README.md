@@ -20,6 +20,8 @@
 
 `pvd::core` 的 [raw 保存与裁剪 API](docs/saving.md) 支持 28 类事件重编码、可恢复前缀、UTF-8 路径和原子发布；裁剪保留起点元数据/对象状态，分析通道通过独立 provider 重建跨包状态。
 
+`pvd::analysis` 的 [裁剪分析状态重建](docs/crop-analysis.md) 只携带起点所需的内存字典/活动分配及 CPU 未闭合区间/最新计数器。未知或不完整源默认拒绝；显式允许 partial 时把原始警告写入导出文件。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

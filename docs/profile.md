@@ -157,3 +157,45 @@ SDK DLL import libraries, uses `/MDd`, and never builds or modifies the SDK.
 Run `pvd_profile_tests capture.pxd2 expected.csv` for record-by-record and
 independently paired duration/calibration comparison. The generated fixture
 currently contains 15 profile records and seven completed CPU intervals.
+
+## Cropping a buffered profile continuation
+
+`pvd/profile_bootstrap.hpp` adds the independent analysis-layer
+`profile::make_bootstrap(session, prefix, options)`. It indexes only that prefix
+without calling `finish()`, reconstructs outstanding recursive start stacks,
+and returns canonical bytes for each still-live profile buffer. Map each
+`SourceBootstrap` into `writing::ChannelBootstrap` with its original
+`stream_id`, `zone.id`, `buffer_generation`, `property_name`, the
+`profile event stream` semantic, and `bytes`. Pass these entries in
+`writing::CropOptions` when preparing the crop. Core remains independent of the
+analysis library.
+
+Only outstanding starts and the latest raw counter per event/thread/context
+are retained. Full context fields and absolute 64-bit start timestamps make
+the baseline independent of packet compression history. Recursive starts
+remain in their original arrival order; completed old intervals and old stops
+are excluded. Subsequent original packets reset their own compression state
+and pair with those starts normally. Canonical counter records remain
+untimestamped. `records` maps each canonical payload offset to its original
+`Source`, because a synthetic start's source event index/byte offset necessarily
+changes. Stream IDs, zone generations, CPU/priority, context and exact native
+ticks are preserved. Wire/header calibration and SDK legacy-counter diagnostics
+remain visible after reopening the crop.
+
+Limits bound input/output bytes, source count, outstanding scopes and retained
+counters, in addition to the profile index's limits. Corrupt/truncated packets,
+unsupported GPU data, unresolved names, unmatched stops, invalid intervals and
+lost/saturated diagnostic history reject reconstruction for an affected live
+zone. Earlier diagnostics belonging only to a destroyed zone generation do not
+invalidate a clean new generation. Clock-unavailable and raw-versus-SDK counter
+limitations remain explicit supported diagnostics. One live zone using several
+properties or source streams is conservatively rejected: grouping one packet
+per source could reorder recursive starts across those sources. The native
+SDK fixture gives each zone its own dedicated stream.
+
+The bootstrap tests exercise LE/BE and 32/64-bit pointer headers, high-bit
+64-bit ticks/context, multiple threads, nested recursion, latest counters,
+zone-pointer reuse with generation preservation, corruption/GPU/limit rejection,
+and writer/crop/reload continuation. Four real SDK packet-boundary cuts include
+the open start on one side of a flush and its stop on the other; their resulting
+intervals match the original ticks, calibrated duration and source identity.
