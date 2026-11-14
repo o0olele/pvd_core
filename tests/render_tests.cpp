@@ -481,12 +481,42 @@ void heightfield_endian_and_diagnostics() {
             partial.diagnostics.size() == 1,
         "per-instance failure isolation");
 }
+void geometry_without_actor_ownership() {
+  for (auto order : {ByteOrder::little, ByteOrder::big}) {
+    Fixture f(order);
+    f.convex();
+    for (auto id : {1u, 2u, 10u, 100u}) f.state.instances.erase(id);
+    f.state.instances.at(200).generation = 7;
+    Extractor extractor;
+    auto geometry = extractor.extract_geometry(f.metadata, f.state, {200, 7});
+    check(geometry.geometry && geometry.diagnostics.empty(),
+          "recorded standalone convex geometry needs no fake actor/shape");
+    const auto mesh = std::get<ConvexMesh>(*geometry.geometry).mesh;
+    check(mesh->vertices.size() == 4 && mesh->indices.size() == 12,
+          "standalone geometry lost validated hull data");
+    auto again = extractor.extract_geometry(f.metadata, f.state, {200, 7});
+    check(std::get<ConvexMesh>(*again.geometry).mesh == mesh && extractor.cache_stats().hits > 0,
+          "standalone geometry bypassed shared resource cache");
+    auto stale = extractor.extract_geometry(f.metadata, f.state, {200, 6});
+    check(!stale.geometry && stale.diagnostics.size() == 1 &&
+              stale.diagnostics[0].actor_id == 0 && stale.diagnostics[0].shape_id == 0,
+          "stale standalone geometry fabricated attachment identity");
+    f.state.instances.erase(300);
+    check(!extractor.extract_geometry(f.metadata, f.state, {200, 7}).geometry,
+          "removed standalone dependency returned stale cached geometry");
+    check(mesh->vertices.size() == 4, "retained standalone mesh mutated");
+    f.box(200, {1, 2, 3});
+    check(std::holds_alternative<Box>(*extractor.extract_geometry(f.metadata, f.state, {200, 7}).geometry),
+          "standalone primitive decode failed");
+  }
+}
 } // namespace
 int main() {
   try {
     primitive_transform_shared_scene_state();
     mesh_scale_cache_and_lifetime();
     heightfield_endian_and_diagnostics();
+    geometry_without_actor_ownership();
     std::cout << "render tests passed\n";
     return 0;
   } catch (const std::exception &e) {

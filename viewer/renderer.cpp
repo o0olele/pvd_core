@@ -97,10 +97,16 @@ struct Apartment {
 };
 } // namespace
 
+MultisampleStatus select_multisampling(Antialiasing request,bool color4x,bool depth4x,bool resolve) {
+    if(request==Antialiasing::off)return {};
+    if(request!=Antialiasing::msaa4x)throw std::invalid_argument("unknown antialiasing mode");
+    const bool supported=color4x&&depth4x&&resolve;
+    return {4,supported?4u:1u,!supported};
+}
 struct Renderer::Impl {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Texture2D> target,depth;
+    ComPtr<ID3D11Texture2D> target,depth,multisample_target;
     ComPtr<ID3D11RenderTargetView> rtv;
     ComPtr<ID3D11ShaderResourceView> srv;
     ComPtr<ID3D11DepthStencilView> dsv;
@@ -108,12 +114,14 @@ struct Renderer::Impl {
     ComPtr<ID3D11PixelShader> ps;
     ComPtr<ID3D11InputLayout> layout;
     ComPtr<ID3D11Buffer> constants,dynamic_vertices;
-    ComPtr<ID3D11RasterizerState> solid,wire;
+    ComPtr<ID3D11RasterizerState> solid,wire,solid_mirrored,wire_mirrored;
     ComPtr<ID3D11DepthStencilState> depth_write,depth_read;
     ComPtr<ID3D11BlendState> blend;
     std::uint32_t width=0,height=0;
     std::size_t max_cache=256,dynamic_capacity=0;
     std::uint64_t clock=0,hits=0,misses=0;
+    bool mirrored=false,msaa_checked=false,color4x=false,depth4x=false,resolve_color=false;
+    MultisampleStatus multisampling;
     RenderStats stats;
     struct Mesh {
         std::weak_ptr<const render::TriangleBuffer> owner;
@@ -139,10 +147,15 @@ struct Renderer::Impl {
         D3D11_BUFFER_DESC buffer{};buffer.ByteWidth=sizeof(Constants);buffer.Usage=D3D11_USAGE_DEFAULT;buffer.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
         hr(d->CreateBuffer(&buffer,nullptr,&constants),"CreateBuffer draw constants");
         D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;
-        raster.FrontCounterClockwise=TRUE;raster.DepthClipEnable=TRUE;
+        raster.FrontCounterClockwise=TRUE;raster.DepthClipEnable=TRUE;raster.MultisampleEnable=TRUE;
         hr(d->CreateRasterizerState(&raster,&solid),"CreateRasterizerState solid");
+        raster.FrontCounterClockwise=FALSE;
+        hr(d->CreateRasterizerState(&raster,&solid_mirrored),"CreateRasterizerState mirrored solid");
+        raster.FrontCounterClockwise=TRUE;
         raster.FillMode=D3D11_FILL_WIREFRAME;raster.DepthBias=-1;
         hr(d->CreateRasterizerState(&raster,&wire),"CreateRasterizerState selection wireframe");
+        raster.FrontCounterClockwise=FALSE;
+        hr(d->CreateRasterizerState(&raster,&wire_mirrored),"CreateRasterizerState mirrored wireframe");
         D3D11_DEPTH_STENCIL_DESC depth_desc{};depth_desc.DepthEnable=TRUE;depth_desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;
         depth_desc.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
         hr(d->CreateDepthStencilState(&depth_desc,&depth_write),"CreateDepthStencilState write");
@@ -154,24 +167,45 @@ struct Renderer::Impl {
         b.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;
         hr(d->CreateBlendState(&blending,&blend),"CreateBlendState");
     }
-    void resize(std::uint32_t w,std::uint32_t h) {
-        if(w==width&&h==height)return;
-        if(!w||!h){target.Reset();depth.Reset();rtv.Reset();srv.Reset();dsv.Reset();width=height=0;return;}
+    void allocate(std::uint32_t w,std::uint32_t h,MultisampleStatus samples) {
+        if(!w||!h){target.Reset();depth.Reset();multisample_target.Reset();rtv.Reset();srv.Reset();dsv.Reset();width=height=0;multisampling=samples;return;}
         const UINT limit=device->GetFeatureLevel()>=D3D_FEATURE_LEVEL_11_0?16384u:8192u;
         need(w<=limit&&h<=limit,"viewer viewport exceeds D3D texture dimensions");
         D3D11_TEXTURE2D_DESC desc{};desc.Width=w;desc.Height=h;desc.MipLevels=1;desc.ArraySize=1;
         desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_DEFAULT;
         desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
-        ComPtr<ID3D11Texture2D> new_target,new_depth;ComPtr<ID3D11RenderTargetView> new_rtv;
+        ComPtr<ID3D11Texture2D> new_target,new_depth,new_multisample;ComPtr<ID3D11RenderTargetView> new_rtv;
         ComPtr<ID3D11ShaderResourceView> new_srv;ComPtr<ID3D11DepthStencilView> new_dsv;
         hr(device->CreateTexture2D(&desc,nullptr,&new_target),"CreateTexture2D viewport color");
-        hr(device->CreateRenderTargetView(new_target.Get(),nullptr,&new_rtv),"CreateRenderTargetView viewport");
         hr(device->CreateShaderResourceView(new_target.Get(),nullptr,&new_srv),"CreateShaderResourceView viewport");
+        if(samples.actual_samples>1) {
+            desc.SampleDesc.Count=samples.actual_samples;desc.BindFlags=D3D11_BIND_RENDER_TARGET;
+            hr(device->CreateTexture2D(&desc,nullptr,&new_multisample),"CreateTexture2D multisampled viewport color");
+        }
+        hr(device->CreateRenderTargetView(new_multisample?new_multisample.Get():new_target.Get(),nullptr,&new_rtv),"CreateRenderTargetView viewport");
+        desc.SampleDesc.Count=samples.actual_samples;
         desc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;desc.BindFlags=D3D11_BIND_DEPTH_STENCIL;
         hr(device->CreateTexture2D(&desc,nullptr,&new_depth),"CreateTexture2D viewport depth");
         hr(device->CreateDepthStencilView(new_depth.Get(),nullptr,&new_dsv),"CreateDepthStencilView viewport");
-        target=std::move(new_target);depth=std::move(new_depth);rtv=std::move(new_rtv);srv=std::move(new_srv);dsv=std::move(new_dsv);
-        width=w;height=h;
+        target=std::move(new_target);depth=std::move(new_depth);multisample_target=std::move(new_multisample);rtv=std::move(new_rtv);srv=std::move(new_srv);dsv=std::move(new_dsv);
+        width=w;height=h;multisampling=samples;
+    }
+    void resize(std::uint32_t w,std::uint32_t h) {
+        if(w==width&&h==height)return;
+        allocate(w,h,multisampling);
+    }
+    void configure_samples(Antialiasing request) {
+        if(request==Antialiasing::msaa4x&&!msaa_checked) {
+            UINT color_quality=0,depth_quality=0,support=0;
+            hr(device->CheckMultisampleQualityLevels(DXGI_FORMAT_R8G8B8A8_UNORM,4,&color_quality),"CheckMultisampleQualityLevels viewport color 4x");
+            hr(device->CheckMultisampleQualityLevels(DXGI_FORMAT_D24_UNORM_S8_UINT,4,&depth_quality),"CheckMultisampleQualityLevels viewport depth 4x");
+            hr(device->CheckFormatSupport(DXGI_FORMAT_R8G8B8A8_UNORM,&support),"CheckFormatSupport viewport resolve");
+            color4x=color_quality>0;depth4x=depth_quality>0;resolve_color=(support&D3D11_FORMAT_SUPPORT_MULTISAMPLE_RESOLVE)!=0;msaa_checked=true;
+        }
+        const auto requested=select_multisampling(request,color4x,depth4x,resolve_color);
+        if(requested.actual_samples!=multisampling.actual_samples&&width&&height)
+            allocate(width,height,requested);
+        else multisampling=requested;
     }
     Mesh& upload(const std::shared_ptr<const render::TriangleBuffer>& source) {
         const auto found=meshes.find(source.get());
@@ -210,7 +244,7 @@ struct Renderer::Impl {
         const UINT stride=sizeof(Vertex),offset=0;auto* vb=mesh.vertices.Get();
         context->IASetVertexBuffers(0,1,&vb,&stride,&offset);context->IASetIndexBuffer(mesh.indices.Get(),DXGI_FORMAT_R32_UINT,0);
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        context->RSSetState(lines?wire.Get():solid.Get());context->OMSetDepthStencilState(lines?depth_read.Get():depth_write.Get(),0);
+        context->RSSetState(lines?(mirrored?wire_mirrored.Get():wire.Get()):(mirrored?solid_mirrored.Get():solid.Get()));context->OMSetDepthStencilState(lines?depth_read.Get():depth_write.Get(),0);
         update(projection,world,color,!lines,lines?3e-7f:0);context->DrawIndexed(mesh.index_count,0,0);
         ++stats.draw_calls;stats.triangles+=mesh.index_count/3;
     }
@@ -229,7 +263,7 @@ struct Renderer::Impl {
         if(!lines.empty())std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+triangles.size()*sizeof(Vertex),lines.data(),lines.size()*sizeof(Vertex));
         context->Unmap(dynamic_vertices.Get(),0);
         const UINT stride=sizeof(Vertex),offset=0;auto* buffer=dynamic_vertices.Get();context->IASetVertexBuffers(0,1,&buffer,&stride,&offset);
-        context->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context->RSSetState(solid.Get());context->OMSetDepthStencilState(depth_read.Get(),0);
+        context->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context->RSSetState(mirrored?solid_mirrored.Get():solid.Get());context->OMSetDepthStencilState(depth_read.Get(),0);
         if(!triangles.empty()) {
             update(projection,pose_matrix(Transform{}),{1,1,1,1},false,2e-7f);
             context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context->Draw(static_cast<UINT>(triangles.size()),0);
@@ -242,14 +276,16 @@ struct Renderer::Impl {
         }
     }
     void render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options) {
-        stats={};if(!target)return;
+        stats={};configure_samples(options.antialiasing);stats.multisampling=multisampling;if(!target)return;
+        mirrored=camera.handedness==DisplayHandedness::left_handed;
+        for(float component:options.background_color)need(std::isfinite(component)&&component>=0&&component<=1,"viewer background color must be finite RGBA in [0,1]");
         need(std::isfinite(options.point_size)&&options.point_size>=1&&options.point_size<=64,"viewer point size must be in [1,64]");
         need(std::isfinite(options.contact_normal_length)&&options.contact_normal_length>=0,"viewer contact normal length must be finite/nonnegative");
         need(std::isfinite(options.particle_velocity_scale)&&options.particle_velocity_scale>=0&&options.particle_velocity_scale<=1e6f,"viewer particle velocity scale must be finite and in [0,1000000]");
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
         ID3D11ShaderResourceView* unbound=nullptr;context->PSSetShaderResources(0,1,&unbound);
         auto* output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
-        constexpr float background[]={0.043f,0.063f,0.086f,1};context->ClearRenderTargetView(rtv.Get(),background);
+        context->ClearRenderTargetView(rtv.Get(),options.background_color.data());
         context->ClearDepthStencilView(dsv.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1,0);
         D3D11_VIEWPORT viewport{0,0,float(width),float(height),0,1};context->RSSetViewports(1,&viewport);
         context->IASetInputLayout(layout.Get());context->VSSetShader(vs.Get(),nullptr,0);context->PSSetShader(ps.Get(),nullptr,0);
@@ -258,14 +294,17 @@ struct Renderer::Impl {
         context->OMSetBlendState(blend.Get(),nullptr,0xffffffffu);
         const auto projection=camera.view_projection(double(width)/height);
         const auto step=2*static_cast<float>(std::pow(10.0,std::floor(std::log10(std::max(0.1,camera.distance)/20.0))));
-        const auto center_x=static_cast<float>(std::floor(camera.target.x/step)*step),center_z=static_cast<float>(std::floor(camera.target.z/step)*step);
+        const auto axes=display_axes(camera);
+        const auto dot=[](Vec3 a,Vec3 b){return double(a.x)*b.x+double(a.y)*b.y+double(a.z)*b.z;};
+        const auto center_x=static_cast<float>(std::floor(dot(camera.target,axes.horizontal)/step)*step),center_z=static_cast<float>(std::floor(dot(camera.target,axes.depth)/step)*step);
+        const auto grid_position=[&](float x,float z){return add(scale(axes.horizontal,x),scale(axes.depth,z));};
         // Grid is a quiet background guide. Draw it before opaque geometry so a
         // captured plane has a clean surface instead of a dense overlay pattern.
         std::vector<Vertex> grid;
         if(options.show_grid)for(int i=-20;i<=20;++i) {
             const auto offset=i*step;const std::array<float,4> color=i%5==0?std::array<float,4>{0.15f,0.21f,0.27f,0.5f}:std::array<float,4>{0.10f,0.15f,0.20f,0.35f};
-            line(grid,{center_x+offset,0,center_z-20*step},{center_x+offset,0,center_z+20*step},color,color);
-            line(grid,{center_x-20*step,0,center_z+offset},{center_x+20*step,0,center_z+offset},color,color);
+            line(grid,grid_position(center_x+offset,center_z-20*step),grid_position(center_x+offset,center_z+20*step),color,color);
+            line(grid,grid_position(center_x-20*step,center_z+offset),grid_position(center_x+20*step,center_z+offset),color,color);
         }
         draw_dynamic({},grid,projection);
         std::set<render::PickingKey> triggers;for(const auto& shape:frame.render.instances)if(shape.flags.trigger)triggers.insert(shape.picking_key());
@@ -298,6 +337,39 @@ struct Renderer::Impl {
         };
         if(options.show_debug_points)for(const auto& p:frame.debug.points)point(p.position,argb(p.color),options.point_size);
         if(options.show_debug_lines)for(const auto& l:frame.debug.lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
+        if(options.show_joint_frames)for(const auto& l:frame.joint_frame_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
+        if(options.show_joint_limits)for(const auto& l:frame.joint_limit_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
+        if(options.show_scene_queries) {
+            const auto query_color=[&](const render::SceneQuerySource& source,std::uint32_t color) {
+                return frame.scene_query_selection&&same_query_source(source,*frame.scene_query_selection)?
+                    std::array<float,4>{1,.82f,.23f,1}:argb(color);
+            };
+            // Selected queries are emitted last so coincident paths/volumes
+            // from other calls cannot hide their highlight.
+            for(int selected_pass=0;selected_pass<2;++selected_pass) {
+            const auto in_pass=[&](const render::SceneQuerySource& source) {
+                const bool selected=frame.scene_query_selection&&same_query_source(source,*frame.scene_query_selection);
+                return selected==(selected_pass==1);
+            };
+            for(const auto& value:frame.scene_queries.lines) {
+                if(!in_pass(value.source))continue;
+                if(value.kind==render::SceneQueryLineKind::impact_normal&&!options.show_query_normals)continue;
+                const auto color=query_color(value.source,value.color);
+                line(lines,value.position0,value.position1,color,color);++stats.query_lines;
+            }
+            if(options.show_query_volumes)for(const auto& volume:frame.query_volumes)if(volume.mesh&&in_pass(volume.source)) {
+                const auto color=query_color(volume.source,0xff6ccedbu);
+                for(std::size_t i=0;i+2<volume.mesh->indices.size();i+=3) {
+                    const auto a=render::transform_point(volume.pose,volume.mesh->positions.at(volume.mesh->indices[i]));
+                    const auto b=render::transform_point(volume.pose,volume.mesh->positions.at(volume.mesh->indices[i+1]));
+                    const auto c=render::transform_point(volume.pose,volume.mesh->positions.at(volume.mesh->indices[i+2]));
+                    line(lines,a,b,color,color);line(lines,b,c,color,color);line(lines,c,a,color,color);
+                    stats.query_lines+=3;
+                }
+                ++stats.query_volumes;
+            }
+            }
+        }
         if(options.show_debug_triangles)for(const auto& t:frame.debug.triangles) {
             append(triangles,colored(t.position0,argb(t.color0)));append(triangles,colored(t.position1,argb(t.color1)));append(triangles,colored(t.position2,argb(t.color2)));
         }
@@ -352,6 +424,7 @@ struct Renderer::Impl {
         draw_dynamic(triangles,lines,projection);
         // Avoid retaining the viewport as an output when the host samples its SRV.
         context->OMSetRenderTargets(0,nullptr,nullptr);
+        if(multisample_target)context->ResolveSubresource(target.Get(),0,multisample_target.Get(),0,DXGI_FORMAT_R8G8B8A8_UNORM);
         stats.cached_meshes=meshes.size();stats.cache_hits=hits;stats.cache_misses=misses;
     }
 };

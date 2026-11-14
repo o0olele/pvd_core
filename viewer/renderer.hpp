@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -13,12 +14,28 @@ struct ID3D11ShaderResourceView;
 namespace pvd::viewer {
 struct FrameState;
 class OrbitCamera;
+enum class Antialiasing { off, msaa4x };
+struct MultisampleStatus {
+    std::uint32_t requested_samples = 1, actual_samples = 1;
+    bool fallback = false;
+};
+// A 4x target requires matching color/depth support and color resolve support.
+// The renderer supplies actual device capabilities; exposed for deterministic
+// unsupported-device policy testing without pretending WARP lacks 4x support.
+MultisampleStatus select_multisampling(Antialiasing, bool color4x,
+                                     bool depth4x, bool color_resolve);
 
 struct RenderOptions {
+    std::array<float,4> background_color{0.043f,0.063f,0.086f,1};
+    Antialiasing antialiasing = Antialiasing::off;
     bool show_grid = true, show_axes = true;
     bool show_solids = true, show_wireframe = false;
     bool show_debug_points = true, show_debug_lines = true, show_debug_triangles = true;
     bool show_contacts = true;
+    bool show_joint_frames = true, show_joint_limits = true;
+    bool show_scene_queries = true, show_query_normals = true, show_query_volumes = true;
+    bool show_bounds = false, show_linear_velocity = false, show_angular_velocity = false;
+    float rigid_velocity_scale = 0.2f;
     bool show_cloth = true, show_particles = true;
     bool show_cloth_constraints = true, show_cloth_pins = true;
     bool show_particle_velocity = false;
@@ -32,6 +49,8 @@ struct RenderStats {
     std::uint64_t cache_hits = 0, cache_misses = 0;
     std::uint64_t cloth_points = 0, particle_points = 0,
                   cloth_constraints = 0, particle_velocity_vectors = 0;
+    MultisampleStatus multisampling;
+    std::uint64_t query_lines = 0, query_volumes = 0;
 };
 struct RgbaImage {
     std::uint32_t width = 0, height = 0;

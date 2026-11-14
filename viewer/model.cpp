@@ -45,7 +45,9 @@ void camera_valid(const OrbitCamera &c) {
       dot(d(c.reference_up), d(c.reference_up)) <= 0 || !std::isfinite(c.yaw) ||
       !std::isfinite(c.pitch) || !std::isfinite(c.distance) ||
       c.distance <= 0 || !std::isfinite(c.vertical_fov) ||
-      c.vertical_fov <= 0 || c.vertical_fov >= pi)
+      c.vertical_fov <= 0 || c.vertical_fov >= pi ||
+      (c.handedness != DisplayHandedness::right_handed &&
+       c.handedness != DisplayHandedness::left_handed))
     throw std::invalid_argument("invalid orbit camera parameters");
 }
 struct Basis {
@@ -71,7 +73,10 @@ Basis basis(const OrbitCamera &c) {
   auto eye = d(c.target) + camera_offset(c) * c.distance;
   auto forward = normal(d(c.target) - eye);
   auto right = normal(cross(forward, camera_axes(c).up));
-  return {eye, forward, right, cross(right, forward)};
+  const auto up = cross(right, forward);
+  if (c.handedness == DisplayHandedness::left_handed)
+    right = right * -1;
+  return {eye, forward, right, up};
 }
 void include(std::optional<render::Bounds> &b, Vec3 p) {
   if (!b)
@@ -237,6 +242,38 @@ deformable_bounds(const FrameState &frame,
 }
 
 } // namespace
+bool same_query_source(const render::SceneQuerySource &a,
+                       const render::SceneQuerySource &b) noexcept {
+  return a.scene == b.scene && a.kind == b.kind && a.batched == b.batched &&
+      a.sequence == b.sequence && a.snapshot_event_count == b.snapshot_event_count &&
+      a.publication_event_count == b.publication_event_count && a.stream_id == b.stream_id &&
+      a.outer_timestamp == b.outer_timestamp && a.byte_offset == b.byte_offset;
+}
+DisplayAxes display_axes(const OrbitCamera &camera) {
+  camera_valid(camera);
+  const auto axes = camera_axes(camera);
+  return {f(axes.x), f(axes.up), f(axes.z)};
+}
+void set_display_up(OrbitCamera &camera, DisplayUp up) {
+  static constexpr Vec3 axes[] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                  {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+  const auto index = static_cast<std::size_t>(up);
+  if (index >= std::size(axes))
+    throw std::invalid_argument("unknown display up axis");
+  auto next = camera;
+  next.reference_up = axes[index];
+  camera_valid(next);
+  camera = next;
+}
+std::optional<DisplayUp> display_up(const OrbitCamera &camera) {
+  const auto up = normal(d(camera.reference_up));
+  static constexpr Vec3 axes[] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                  {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+  for (std::size_t i = 0; i < std::size(axes); ++i)
+    if (dot(up, d(axes[i])) > 1 - 1e-6)
+      return static_cast<DisplayUp>(i);
+  return {};
+}
 Mat4 multiply(const Mat4 &a, const Mat4 &b) {
   Mat4 o;
   for (int c = 0; c < 4; ++c)
@@ -311,7 +348,9 @@ Ray OrbitCamera::screen_ray(double x, double y, double width,
 void OrbitCamera::orbit(double dx, double dy) {
   if (!std::isfinite(dx) || !std::isfinite(dy))
     return;
-  yaw = std::remainder(yaw + dx, 2 * pi);
+  yaw = std::remainder(
+      yaw + dx * (handedness == DisplayHandedness::left_handed ? -1 : 1),
+      2 * pi);
   pitch = std::clamp(pitch + dy, -pi / 2 + .001, pi / 2 - .001);
 }
 void OrbitCamera::pan(double dx, double dy, double height) {
@@ -519,6 +558,7 @@ struct Document::Impl {
   std::optional<deformables::OwnerKey> isolated_deformable;
   std::unique_ptr<Session> session;
   render::Extractor extractor;
+  render::SceneQueryIndex query_index;
   std::string source;
   std::vector<SceneInfo> scenes;
   std::optional<std::uint64_t> scene;
@@ -536,10 +576,11 @@ struct Document::Impl {
   std::shared_ptr<FrameState> frame = std::make_shared<FrameState>();
   std::optional<PickingKey> selected;
   std::optional<deformables::SelectionKey> selected_deformable;
+  std::optional<render::SceneQuerySource> selected_query;
   std::optional<ObjectKey> inspected;
   std::map<std::vector<std::uint64_t>, CacheEntry> cache;
   std::uint64_t clock = 0;
-  explicit Impl(ModelOptions o) : options(o), extractor(o.extractor) {
+  explicit Impl(ModelOptions o) : options(o), extractor(o.extractor), query_index(o.scene_queries) {
     frame->label = "No recording";
   }
   std::vector<std::uint64_t> signature(const render::Geometry &g) {
@@ -730,6 +771,11 @@ struct Document::Impl {
       include(next.bounds, t.position);
     for (const auto &c : next.debug.contacts)
       include(next.bounds, c.position);
+    for (const auto *lines : {&next.joint_frame_lines, &next.joint_limit_lines})
+      for (const auto &line : *lines) {
+        include(next.bounds, line.position0);
+        include(next.bounds, line.position1);
+      }
     std::map<PickingKey, const render::ShapeInstance *> shapes;
     for (const auto &shape : next.render.instances)
       shapes.emplace(shape.picking_key(), &shape);
@@ -768,6 +814,10 @@ struct Document::Impl {
     update_selection();
   }
   void update_selection() {
+    if (selected_query && std::none_of(frame->scene_queries.queries.begin(),
+        frame->scene_queries.queries.end(), [&](const auto &query) {
+          return same_query_source(query.source, *selected_query);
+        })) selected_query.reset();
     if (selected_deformable &&
         !deformable_key_valid(*frame, *selected_deformable))
       selected_deformable.reset();
@@ -788,6 +838,7 @@ struct Document::Impl {
     for (auto &d : frame->draws)
       d.selected = selected && d.key == *selected;
     frame->deformable_selection = selected_deformable;
+    frame->scene_query_selection = selected_query;
     for (auto &draw : frame->deformable_draws)
       draw.selected =
           selected_deformable && draw.key == selected_deformable->object;
@@ -846,9 +897,120 @@ struct Document::Impl {
     } else
       range.end_event_count = next->snapshot.event_count;
     range.scene_id = scene;
+    if (scene && sample == SamplePoint::native_frame) {
+      next->scene_queries = query_index.extract(*session,
+          render::SceneQueryWindow{*scene, range.begin_event_count, range.end_event_count});
+      std::size_t volume_triangles = 0;
+      std::map<std::size_t, Snapshot> query_snapshots;
+      bool volume_limit = false;
+      const auto volume_error = [&](const std::string &message) {
+        if (next->errors.size() < 256) next->errors.push_back("Scene query volume: " + message);
+      };
+      for (const auto &query : next->scene_queries.queries) {
+        if (volume_limit) break;
+        auto source_snapshot = query_snapshots.find(query.source.snapshot_event_count);
+        if (source_snapshot == query_snapshots.end())
+          source_snapshot = query_snapshots.emplace(query.source.snapshot_event_count,
+              session->snapshot_at_event(query.source.snapshot_event_count)).first;
+        for (std::size_t i = 0; i < query.geometries.size(); ++i) {
+          std::optional<Transform> pose;
+          if (i < query.poses.size()) pose = query.poses[i];
+          else if (!i && query.overlap_pose) pose = query.overlap_pose;
+          if (!pose) { volume_error("recorded geometry has no matching recorded pose"); continue; }
+          auto geometry = extractor.extract_geometry(session->metadata(), source_snapshot->second, query.geometries[i].key);
+          if (!geometry.geometry) {
+            for (const auto &diagnostic : geometry.diagnostics)
+              volume_error("geometry " + std::to_string(query.geometries[i].key.id) + ": " + diagnostic.message);
+            continue;
+          }
+          try {
+            auto mesh = triangles(*geometry.geometry);
+            const auto count = mesh->indices.size() / 3;
+            if (count > options.max_query_volume_triangles - volume_triangles) {
+              volume_error("preview triangle budget reached; remaining recorded volumes are not drawn");
+              volume_limit = true;
+              break;
+            }
+            for (const auto &point : mesh->positions) {
+              auto world = render::transform_point(*pose, point);
+              if (!std::isfinite(world.x) || !std::isfinite(world.y) || !std::isfinite(world.z))
+                throw std::overflow_error("query volume world coordinates overflow");
+            }
+            volume_triangles += count;
+            next->query_volumes.push_back({query.source, std::move(mesh), *pose});
+          } catch (const std::exception &e) { volume_error(e.what()); }
+        }
+      }
+    } else {
+      next->scene_queries.event_count = next->snapshot.event_count;
+      for (std::size_t i = 0; i < 6; ++i) {
+        next->scene_queries.collections[i].kind = static_cast<render::SceneQueryKind>(i % 3);
+        next->scene_queries.collections[i].batched = i >= 3;
+      }
+    }
+    auto debug_options = options.debug;
+    debug_options.joint_axis_length = 0;
     next->debug =
         render::extract_debug(next->snapshot, session->metadata(),
-                              session->channels(), range, options.debug);
+                              session->channels(), range, debug_options);
+    std::vector<render::DebugConstraint> frames, limits;
+    for (const auto &constraint : next->debug.constraints)
+      (std::holds_alternative<render::DebugJointFrames>(constraint.payload)
+           ? frames
+           : limits)
+          .push_back(constraint);
+    using DebugLocation = std::tuple<std::size_t, std::size_t, std::uint64_t>;
+    std::set<DebugLocation> handled;
+    bool constraint_display_complete = true;
+    auto constraint_options = options.constraints;
+    const auto build_constraints = [&](const auto &input, auto &output) {
+      auto built = render::build_constraint_lines(input, constraint_options);
+      constraint_display_complete =
+          constraint_display_complete && built.complete;
+      std::set<std::size_t> rejected;
+      for (const auto &diagnostic : built.diagnostics) {
+        rejected.insert(diagnostic.constraint_index);
+        next->errors.push_back(
+            "Joint display channel " +
+            std::to_string(diagnostic.source.channel_instance_id) + " event " +
+            std::to_string(diagnostic.source.event_index) + " offset " +
+            std::to_string(diagnostic.source.payload_offset) + ": " +
+            diagnostic.message);
+      }
+      for (std::size_t i = 0; i < built.constraints_processed; ++i) {
+        const auto &constraint = input[i];
+        const auto scale =
+            std::holds_alternative<render::DebugJointFrames>(constraint.payload)
+                ? constraint_options.frame_scale
+                : constraint_options.limit_scale;
+        if (scale > 0 && !rejected.count(i))
+          handled.emplace(constraint.source.event_index,
+                          constraint.source.payload_offset,
+                          constraint.source.channel_instance_id);
+      }
+      constraint_options.max_lines -= built.lines.size();
+      constraint_options.max_constraints -= std::min(
+          constraint_options.max_constraints, built.constraints_processed);
+      output = std::move(built.lines);
+    };
+    build_constraints(frames, next->joint_frame_lines);
+    build_constraints(limits, next->joint_limit_lines);
+    next->debug.diagnostics.erase(
+        std::remove_if(
+            next->debug.diagnostics.begin(), next->debug.diagnostics.end(),
+            [&](const auto &diagnostic) {
+              return diagnostic.code ==
+                         render::DebugCode::constraint_not_tessellated &&
+                     handled.count({diagnostic.event_index,
+                                    diagnostic.payload_offset,
+                                    diagnostic.channel_instance_id});
+            }),
+        next->debug.diagnostics.end());
+    // Extraction failures retain diagnostics; only successfully handled
+    // constraint placeholders were removed. Include builder limits/failures in
+    // this viewer's displayed-data completeness as well.
+    next->debug.complete =
+        next->debug.diagnostics.empty() && constraint_display_complete;
     for (const auto &s : next->render.instances) {
       try {
         DrawItem item{triangles(s.geometry),
@@ -1108,6 +1270,41 @@ std::optional<deformables::SelectionKey>
 Document::selected_deformable() const noexcept {
   return impl_->selected_deformable;
 }
+std::optional<render::SceneQuerySource> Document::selected_query() const noexcept {
+  return impl_->selected_query;
+}
+bool Document::select_query(const render::SceneQuerySource &requested) {
+  const auto &queries = impl_->frame->scene_queries.queries;
+  if (std::none_of(queries.begin(), queries.end(), [&](const auto &query) {
+        return same_query_source(query.source, requested);
+      })) return false;
+  impl_->selected_query = requested;
+  impl_->selected.reset();
+  impl_->selected_deformable.reset();
+  impl_->inspected.reset();
+  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
+  impl_->update_selection();
+  return true;
+}
+bool Document::fit_query(OrbitCamera &camera, double aspect) const {
+  if (!impl_->selected_query) return false;
+  const auto &source = *impl_->selected_query;
+  std::optional<render::Bounds> bound;
+  auto point = [&](Vec3 p) {
+    include(bound, render::Bounds{p, p});
+  };
+  for (const auto &line : impl_->frame->scene_queries.lines)
+    if (same_query_source(line.source, source)) { point(line.position0); point(line.position1); }
+  for (const auto &volume : impl_->frame->query_volumes)
+    if (volume.mesh && same_query_source(volume.source, source))
+      for (const auto &p : volume.mesh->positions) point(render::transform_point(volume.pose, p));
+  for (const auto &query : impl_->frame->scene_queries.queries)
+    if (same_query_source(query.source, source))
+      for (const auto &hit : query.hits) if (hit.position_available) point(hit.position);
+  if (!bound) return false;
+  camera.fit(*bound, aspect);
+  return true;
+}
 bool Document::select_deformable(const deformables::SelectionKey &requested) {
   auto key = requested;
   if (!deformable_key_valid(*impl_->frame, key))
@@ -1117,6 +1314,7 @@ bool Document::select_deformable(const deformables::SelectionKey &requested) {
     key.sample_event_count = 0;
   }
   impl_->selected.reset();
+  impl_->selected_query.reset();
   impl_->selected_deformable = key;
   impl_->inspected =
       ObjectKey{key.object.owner.id, key.object.owner.generation};
@@ -1140,6 +1338,7 @@ bool Document::select(const PickingKey &key) {
   if (it == impl_->frame->render.instances.end())
     return false;
   impl_->selected = key;
+  impl_->selected_query.reset();
   impl_->selected_deformable.reset();
   impl_->inspected = key.shape;
   impl_->frame = std::make_shared<FrameState>(*impl_->frame);
@@ -1150,6 +1349,7 @@ bool Document::inspect(std::uint64_t id) {
   auto object = impl_->frame->snapshot.instance(id);
   if (!object)
     return false;
+  impl_->selected_query.reset();
   impl_->inspected = ObjectKey{id, object->generation};
   for (const auto &draw : impl_->frame->deformable_draws)
     if (draw.key.owner.id == id &&
@@ -1202,6 +1402,7 @@ bool Document::inspect(std::uint64_t id) {
 
 void Document::clear_selection() {
   impl_->selected.reset();
+  impl_->selected_query.reset();
   impl_->selected_deformable.reset();
   impl_->inspected.reset();
   impl_->frame = std::make_shared<FrameState>(*impl_->frame);
@@ -1261,6 +1462,7 @@ bool Document::fit_scene(OrbitCamera &c, double aspect) const {
   return true;
 }
 bool Document::fit_selected(OrbitCamera &c, double aspect) const {
+  if (impl_->selected_query) return fit_query(c, aspect);
   if (impl_->selected_deformable) {
     if (!deformable_visible(impl_->selected_deformable->object))
       return false;

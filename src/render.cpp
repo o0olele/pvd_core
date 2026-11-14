@@ -770,6 +770,25 @@ Frame Extractor::extract(const Metadata &m, const Snapshot &s,
                          ExtractOptions o) {
   return impl_->extract(m, s, o);
 }
+GeometryExtraction Extractor::extract_geometry(const Metadata &metadata,
+                                               const Snapshot &snapshot,
+                                               ObjectKey requested) {
+  GeometryExtraction result;
+  result.source = requested;
+  const auto *object = snapshot.instance(requested.id);
+  if (!object || object->generation != requested.generation) {
+    result.diagnostics.push_back({Severity::error, DiagnosticCode::dangling_reference,
+        requested.id, 0, 0, "Geometry", "recorded geometry is absent or its generation is stale"});
+    return result;
+  }
+  try {
+    result.geometry = impl_->geometry(metadata, snapshot, *object);
+  } catch (const Failure &failure) {
+    result.diagnostics.push_back({Severity::error, failure.code, failure.id,
+        0, 0, failure.property, failure.message});
+  }
+  return result;
+}
 void Extractor::clear_cache() noexcept {
   impl_->cache.clear();
   impl_->clock = 0;

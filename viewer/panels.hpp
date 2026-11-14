@@ -1,4 +1,5 @@
 ﻿#pragma once
+#include "inspection_preferences.hpp"
 #include "model.hpp"
 #include <array>
 #include <limits>
@@ -13,7 +14,8 @@ struct PanelState {
   std::optional<ObjectKey> reveal_object;
   std::optional<PickingKey> last_selection;
   std::string error;
-  std::size_t array_page_size = 32;
+  InspectorPreferences inspector_preferences;
+  std::size_t array_visible_rows = 0;
   // Value-only cache: safe across immutable FrameState replacement/selection.
   const Session *category_source = nullptr;
   std::size_t category_prefix = std::numeric_limits<std::size_t>::max(),
@@ -37,6 +39,7 @@ void drawEmptyState(const char *title, const char *description);
 
 // Bounded, endian-aware property summary shared by inspector rows and tooltips.
 // Wrong/incomplete typed data is represented explicitly rather than throwing.
-std::string propertyValueText(const PropertyValue &, std::size_t item = 0);
+std::string propertyValueText(const PropertyValue &, std::size_t item = 0,
+                              const InspectorPreferences & = {});
 
 } // namespace pvd::viewer

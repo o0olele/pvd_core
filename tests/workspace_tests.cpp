@@ -1,5 +1,6 @@
 #include "pvd/writer.hpp"
 #include "workspace.hpp"
+#include "workspace_v1_fixture.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -9,6 +10,8 @@
 #include <map>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
+#include <limits>
 
 namespace {
 using namespace pvd;
@@ -128,8 +131,54 @@ void camera_equal(const OrbitCamera &a, const OrbitCamera &b) {
             a.reference_up.z == b.reference_up.z && a.yaw == b.yaw &&
             a.pitch == b.pitch && a.distance == b.distance &&
             a.vertical_fov == b.vertical_fov && a.near_plane == b.near_plane &&
-            a.far_plane == b.far_plane,
+              a.far_plane == b.far_plane && a.handedness == b.handedness,
         "camera persistence lost values/reference up");
+}
+bool preferences_equal(const ViewPreferences &a, const ViewPreferences &b) {
+  const auto rendering = [](const RenderOptions &r) {
+    return std::make_tuple(
+        r.background_color, r.antialiasing, r.point_size,
+        r.contact_normal_length, r.particle_velocity_scale, r.rigid_velocity_scale,
+        r.show_bounds, r.show_linear_velocity, r.show_angular_velocity,
+        r.show_grid, r.show_axes, r.show_solids, r.show_wireframe,
+        r.show_debug_points, r.show_debug_lines, r.show_debug_triangles,
+        r.show_contacts, r.show_joint_frames, r.show_joint_limits,
+        r.show_scene_queries, r.show_query_normals, r.show_query_volumes,
+        r.show_cloth, r.show_particles, r.show_cloth_constraints,
+        r.show_cloth_pins, r.show_particle_velocity);
+  };
+  return rendering(a.rendering) == rendering(b.rendering) &&
+      std::tie(a.inspection.number_format, a.inspection.float_precision,
+               a.inspection.double_precision, a.inspection.array_page_size,
+               a.show_debug_text) ==
+      std::tie(b.inspection.number_format, b.inspection.float_precision,
+               b.inspection.double_precision, b.inspection.array_page_size,
+               b.show_debug_text);
+}
+ViewPreferences distinct_preferences(bool second = false) {
+  ViewPreferences v;
+  auto &r = v.rendering;
+  r.background_color = second ? std::array<float,4>{1, .75f, .5f, 0} :
+      std::array<float,4>{0, std::nextafter(.25f, 1.f), .5f, 1};
+  r.antialiasing = second ? Antialiasing::off : Antialiasing::msaa4x;
+  r.show_grid = r.show_axes = r.show_solids = second;
+  r.show_wireframe = !second;
+  r.show_debug_points = r.show_debug_lines = r.show_debug_triangles = second;
+  r.show_contacts = r.show_joint_frames = r.show_joint_limits = second;
+  r.show_scene_queries = r.show_query_normals = r.show_query_volumes = second;
+  r.show_bounds = r.show_linear_velocity = r.show_angular_velocity = !second;
+  r.show_cloth = r.show_particles = r.show_cloth_constraints = r.show_cloth_pins = second;
+  r.show_particle_velocity = !second;
+  r.point_size = second ? 64.f : std::nextafter(1.f, 2.f);
+  r.contact_normal_length = second ? 1000000.f : std::nextafter(.125f, 1.f);
+  r.particle_velocity_scale = second ? 1000000.f : std::nextafter(.5f, 1.f);
+  r.rigid_velocity_scale = second ? .875f : 0;
+  v.inspection.number_format = second ? NumberFormat::fixed : NumberFormat::scientific;
+  v.inspection.float_precision = second ? 17 : 3;
+  v.inspection.double_precision = second ? 1 : 12;
+  v.inspection.array_page_size = second ? 128 : 2048;
+  v.show_debug_text = second;
+  return v;
 }
 void ownership_and_locks() {
   Fixture f;
@@ -269,6 +318,59 @@ void bookmarks_and_identity() {
             workspace_source_identity(*d->session()),
         "wire repacking changed canonical source fingerprint");
 }
+void rejected_identity_does_not_reserve_archive() {
+  Fixture fixture;
+  WorkspaceLimits limits;
+  limits.max_captures = 1;
+  Workspace workspace({}, limits);
+  const auto target = workspace.create_empty();
+  auto incoming = fixture.document();
+  auto *candidate = incoming.get();
+  auto wrong = workspace_source_identity(*incoming->session());
+  ++wrong.event_count;
+  rejects([&] { workspace.replace(target, incoming, "bad.pxd2", nullptr, wrong); },
+          "invalid precomputed identity accepted");
+  check(incoming.get() == candidate && workspace.settings().captures.empty(),
+        "rejected identity consumed candidate or leaked archive quota");
+  check(workspace.replace(target, incoming, "retry.pxd2") && !incoming &&
+            workspace.settings().captures.size() == 1,
+        "valid retry failed after rejected identity");
+  Workspace added({}, limits);
+  rejects([&] { added.add(fixture.document(), "bad.pxd2", {}, wrong); },
+          "add accepted invalid identity");
+  check(added.settings().captures.empty() && added.slots().empty(),
+        "failed add leaked an archive or slot");
+  check(added.add(fixture.document(), "retry.pxd2") != 0,
+        "valid add failed after rejected identity");
+}
+void bookmark_camera_collision_preserves_both_views() {
+  Fixture fixture;
+  Workspace seed;
+  auto slot = seed.add(fixture.document(), "source-A.pxd2");
+  seed.find(slot)->camera().target = {1, 2, 3};
+  seed.add_bookmark(slot, "Same recorded frame", true);
+  auto settings = seed.settings();
+  auto second = settings.captures.front();
+  second.source_path = "source-B.pxd2";
+  second.bookmarks[0].camera->target = {9, 8, 7};
+  second.bookmarks[0].camera->handedness = DisplayHandedness::left_handed;
+  settings.captures.push_back(second);
+  Workspace restored;
+  restored.restore(settings);
+  auto incoming = fixture.document();
+  check(restored.replace(slot, incoming, "source-A.pxd2"), "camera-collision source load");
+  check(restored.bind_source(slot, "source-B.pxd2"), "camera-collision source bind");
+  const auto &books = restored.find(slot)->bookmarks();
+  check(books.size() == 2 && books[0].id != books[1].id &&
+            books[0].camera && books[1].camera,
+        "camera-distinct colliding bookmarks were merged");
+  check(books[0].camera->target.x == 9 && books[1].camera->target.x == 1 &&
+            books[0].camera->handedness == DisplayHandedness::left_handed &&
+            books[1].camera->handedness == DisplayHandedness::right_handed,
+        "bookmark camera fields were not preserved exactly");
+  check(restored.bind_source(slot, "source-B.pxd2") && restored.find(slot)->bookmarks().size() == 2,
+        "rebinding the same archive duplicated bookmarks");
+}
 void stopped_live_binding() {
   Fixture f;
   Workspace w;
@@ -307,6 +409,92 @@ void stopped_live_binding() {
   rejects([&] { w.bind_source(target, "wrong.pxd2", wrong); },
           "stale precomputed identity accepted");
 }
+void preferences_and_source_identity() {
+  Fixture original, changed(true);
+  const auto defaults = distinct_preferences(), saved = distinct_preferences(true);
+  const ViewPreferences builtin;
+  Workspace w;
+  w.set_default_preferences(defaults);
+  const auto empty = w.create_empty();
+  const auto a = w.add(original.document(), "prefs.pxd2");
+  check(preferences_equal(w.find(empty)->preferences(), defaults) &&
+        preferences_equal(w.find(a)->preferences(), defaults),
+        "new empty/source slots did not inherit global preferences");
+  w.find(a)->preferences() = saved;
+  w.set_default_preferences(builtin);
+  const auto another = w.add(original.document(), "new.pxd2");
+  check(preferences_equal(w.find(a)->preferences(), saved) &&
+        preferences_equal(w.find(empty)->preferences(), defaults) &&
+        preferences_equal(w.find(another)->preferences(), builtin),
+        "global defaults mutated existing slots or were not inherited");
+  auto incoming = original.document();
+  check(w.replace(a, incoming, "prefs.pxd2") && preferences_equal(w.find(a)->preferences(), saved),
+        "same-identity replacement lost slot preferences");
+  const auto book = w.add_bookmark(a, "Camera only", true);
+  const auto camera = w.find(a)->camera();
+  w.find(a)->preferences() = defaults;
+  w.find(a)->camera().distance = 99;
+  check(w.jump_to_bookmark(a, book) && preferences_equal(w.find(a)->preferences(), defaults),
+        "camera bookmark unexpectedly restored view preferences");
+  camera_equal(w.find(a)->camera(), camera);
+  w.find(a)->preferences() = saved;
+  check(w.close(a), "close preferences source");
+  const auto reopened = w.add(original.document(), "prefs.pxd2");
+  check(preferences_equal(w.find(reopened)->preferences(), saved),
+        "matching archived last_view preferences were not restored");
+  auto wrong = *w.find(reopened)->source_identity(); ++wrong.event_count;
+  auto invalid_document = original.document();
+  auto *unchanged = invalid_document.get();
+  rejects([&]{ w.replace(reopened, invalid_document, "never-reserved.pxd2", nullptr, wrong); },
+          "invalid precomputed identity accepted while restoring preferences");
+  check(invalid_document.get() == unchanged &&
+        preferences_equal(w.find(reopened)->preferences(), saved),
+        "invalid identity changed slot preferences or consumed incoming source");
+  incoming = changed.document(); std::vector<std::string> warnings;
+  check(w.replace(reopened, incoming, "prefs.pxd2", &warnings) && !warnings.empty() &&
+        preferences_equal(w.find(reopened)->preferences(), builtin),
+        "changed identity reused old view preferences instead of defaults");
+
+  Workspace seed; seed.set_default_preferences(defaults);
+  const auto stored = seed.add(original.document(), "stored.pxd2");
+  seed.find(stored)->preferences() = saved;
+  const auto encoded = encode_workspace(seed.settings());
+  const auto decoded = decode_workspace(encoded);
+  check(preferences_equal(decoded.default_preferences, defaults) &&
+        preferences_equal(decoded.slots[0].view.preferences, saved) &&
+        decoded.captures[0].last_view && preferences_equal(decoded.captures[0].last_view->preferences, saved) &&
+        encode_workspace(decoded) == encoded,
+        "v2 did not exactly round-trip all slot/archive/default preference fields");
+  Workspace restored;
+  restored.restore(decoded);
+  check(preferences_equal(restored.default_preferences(), defaults) &&
+        preferences_equal(restored.find(stored)->preferences(), saved),
+        "placeholder restore lost defaults or pending preference state");
+  incoming = original.document();
+  check(restored.replace(stored, incoming, "stored.pxd2") &&
+        preferences_equal(restored.find(stored)->preferences(), saved),
+        "verified restored source did not retain preferences");
+  restored.restore(decoded); incoming = changed.document();
+  check(restored.replace(stored, incoming, "stored.pxd2") &&
+        preferences_equal(restored.find(stored)->preferences(), defaults),
+        "pending view preferences applied to a changed capture identity");
+  const auto fallback = restored.create_empty();
+  check(preferences_equal(restored.find(fallback)->preferences(), defaults),
+        "restored global defaults were not applied to a new empty slot");
+
+  const auto live = seed.create_empty("Recorded live");
+  auto *slot = seed.find(live); slot->document().begin_live(original.header);
+  slot->document().append_live(original.events); slot->document().finish_live();
+  slot->preferences() = saved;
+  const auto *stable = &slot->document();
+  check(seed.bind_source(live, "stored.pxd2") && &slot->document() == stable &&
+        preferences_equal(slot->preferences(), saved),
+        "binding a recording replaced its current preferences or Document");
+  check(seed.close(live), "close bound recording");
+  const auto bound_reopen = seed.add(original.document(), "stored.pxd2");
+  check(preferences_equal(seed.find(bound_reopen)->preferences(), saved),
+        "bound recording preference archive was not recoverable");
+}
 WorkspaceSettings minimal() {
   Fixture f;
   Workspace w;
@@ -314,8 +502,11 @@ WorkspaceSettings minimal() {
                   u8"\u8c03\u8bd5 capture");
   auto *s = w.find(id);
   s->document().set_frame(2);
+  w.set_default_preferences(distinct_preferences());
+  s->preferences() = distinct_preferences(true);
   s->camera().set_look_at({{5, 2, 10}, {0, 0, 1}, {0, 0, 0}});
   s->camera().distance = std::nextafter(123.0, 124.0);
+  s->camera().handedness = DisplayHandedness::left_handed;
   auto options = s->document().view_options();
   options.show_static = false;
   options.color_mode = ColorMode::uniform;
@@ -337,6 +528,83 @@ void fix_crc(Bytes &b) {
   auto n = crc(b, 28);
   for (unsigned i = 0; i < 4; ++i)
     b[20 + i] = static_cast<std::uint8_t>(n >> (8 * i));
+}
+void invalid_preferences_are_atomic() {
+  Fixture fixture;
+  Workspace w; w.set_default_preferences(distinct_preferences());
+  const auto id = w.add(fixture.document(), "validated.pxd2");
+  w.find(id)->preferences() = distinct_preferences(true);
+  const auto original = w.settings();
+  auto *stable = w.find(id);
+  const auto baseline = encode_workspace(original);
+  std::vector<ViewPreferences> invalid;
+  const auto bad = [&](auto change) {
+    auto prefs = distinct_preferences(); change(prefs); invalid.push_back(prefs);
+  };
+  const auto nan = std::numeric_limits<float>::quiet_NaN();
+  const auto inf = std::numeric_limits<float>::infinity();
+  bad([](auto &v){v.rendering.antialiasing=static_cast<Antialiasing>(99);});
+  bad([&](auto &v){v.rendering.background_color[0]=nan;});
+  bad([](auto &v){v.rendering.background_color[1]=-0.1f;});
+  bad([](auto &v){v.rendering.background_color[3]=1.01f;});
+  bad([&](auto &v){v.rendering.point_size=nan;});
+  bad([](auto &v){v.rendering.point_size=0;});
+  bad([](auto &v){v.rendering.point_size=65;});
+  bad([&](auto &v){v.rendering.contact_normal_length=inf;});
+  bad([](auto &v){v.rendering.contact_normal_length=-1;});
+  bad([&](auto &v){v.rendering.particle_velocity_scale=nan;});
+  bad([](auto &v){v.rendering.particle_velocity_scale=-1;});
+  bad([](auto &v){v.rendering.particle_velocity_scale=1000001.f;});
+  bad([&](auto &v){v.rendering.rigid_velocity_scale=inf;});
+  bad([](auto &v){v.rendering.rigid_velocity_scale=-1;});
+  bad([](auto &v){v.rendering.rigid_velocity_scale=1000001.f;});
+  bad([](auto &v){v.inspection.number_format=static_cast<NumberFormat>(99);});
+  bad([](auto &v){v.inspection.float_precision=0;});
+  bad([](auto &v){v.inspection.double_precision=18;});
+  bad([](auto &v){v.inspection.array_page_size=33;});
+  bad([](auto &v){v.inspection.array_page_size=std::numeric_limits<std::size_t>::max();});
+  for (const auto &prefs : invalid) {
+    check(!valid_view_preferences(prefs), "invalid preferences reported valid");
+    rejects([&]{w.set_default_preferences(prefs);}, "invalid defaults accepted");
+    auto settings=original; settings.default_preferences=prefs;
+    rejects([&]{encode_workspace(settings);}, "invalid defaults encoded");
+    rejects([&]{w.restore(settings);}, "invalid defaults replaced workspace");
+    settings=original; settings.slots[0].view.preferences=prefs;
+    rejects([&]{encode_workspace(settings);}, "invalid per-slot preferences encoded");
+    rejects([&]{w.restore(settings);}, "invalid per-slot preferences replaced workspace");
+    settings=original; settings.captures[0].last_view->preferences=prefs;
+    rejects([&]{encode_workspace(settings);}, "invalid archived preferences encoded");
+    rejects([&]{w.restore(settings);}, "invalid archive preferences replaced workspace");
+    check(w.find(id)==stable && encode_workspace(w.settings())==baseline,
+          "rejected preferences changed slot/default/archive state");
+  }
+  WorkspaceLimits limits; limits.max_file_bytes=baseline.size()-1;
+  rejects([&]{encode_workspace(original,limits);}, "preferences bypassed encode byte budget");
+
+  // Hostile but correctly checksummed v2 defaults. Fixed offsets belong to the
+  // documented 62-byte preference wire record, not native struct layout.
+  const auto empty = encode_workspace(WorkspaceSettings{});
+  const auto base = empty.size()-62;
+  auto wire=empty; wire[base+16]=99; fix_crc(wire);
+  rejects([&]{decode_workspace(wire);}, "wire AA enum bypassed validation");
+  wire=empty; wire.back()=2; fix_crc(wire);
+  rejects([&]{decode_workspace(wire);}, "wire debug-text boolean accepted 2");
+  wire=empty; wire[base+50]=0; wire[base+51]=0; wire[base+52]=0xC0; wire[base+53]=0x7F; fix_crc(wire);
+  rejects([&]{decode_workspace(wire);}, "wire NaN point size accepted");
+  wire=empty; for(unsigned i=0;i<4;++i)wire[base+57+i]=255; fix_crc(wire);
+  rejects([&]{decode_workspace(wire);}, "wire inspector page count bypassed budget policy");
+
+  WorkspaceLimits quota; quota.max_captures=1;
+  Workspace bounded({},quota); const auto temporary=bounded.add(fixture.document());
+  bounded.find(temporary)->preferences().rendering.point_size=nan;
+  rejects([&]{bounded.bind_source(temporary,"invalid-bind.pxd2");}, "invalid current preferences archived by bind");
+  auto incoming=fixture.document(); auto *incoming_ptr=incoming.get();
+  rejects([&]{bounded.replace(temporary,incoming,"invalid-replace.pxd2");}, "invalid current preferences archived by replace");
+  check(incoming.get()==incoming_ptr && bounded.find(temporary)->source_path().empty(),
+        "rejected preference publication consumed incoming or bound source");
+  bounded.find(temporary)->preferences()=distinct_preferences();
+  check(bounded.bind_source(temporary,"valid-bind.pxd2"),
+        "invalid preference validation leaked archived source quota");
 }
 void codec_and_corruption() {
   auto settings = minimal();
@@ -365,7 +633,7 @@ void codec_and_corruption() {
     rejects([&] { decode_workspace(cut); }, "truncated workspace accepted");
   }
   auto version = bytes;
-  version[8] = 2;
+  version[8] = 99;
   rejects([&] { decode_workspace(version); }, "unknown version accepted");
   auto broken = bytes;
   broken.back() ^= 1;
@@ -395,6 +663,9 @@ void codec_and_corruption() {
   auto bad = settings;
   bad.slots[0].title = std::string("\xc0\xaf", 2);
   rejects([&] { encode_workspace(bad); }, "invalid UTF8 accepted");
+  bad = settings;
+  bad.slots[0].view.camera.handedness = static_cast<DisplayHandedness>(99);
+  rejects([&] { encode_workspace(bad); }, "unknown handedness accepted");
   bad = settings;
   bad.slots[0].view.camera.reference_up = {0, 0, 0};
   rejects([&] { encode_workspace(bad); }, "invalid camera accepted");
@@ -438,10 +709,16 @@ void file_and_strong_restore() {
           "workspace silently overwritten");
   check(read(file) == original, "default save changed existing file");
   auto invalid = changed;
-  invalid.version = 2;
+  invalid.version = 99;
   rejects([&] { save_workspace_file(file.u8string(), invalid, true); },
           "invalid overwrite accepted");
   check(read(file) == original, "failed overwrite damaged workspace");
+  invalid = changed;
+  invalid.slots[0].view.preferences.rendering.point_size =
+      std::numeric_limits<float>::quiet_NaN();
+  rejects([&] { save_workspace_file(file.u8string(), invalid, true); },
+          "invalid preferences were published to workspace file");
+  check(read(file) == original, "invalid preferences damaged existing workspace file");
   save_workspace_file(file.u8string(), changed, true);
   check(load_workspace_file(file.u8string()).slots[0].title == "different",
         "authorized atomic replace failed");
@@ -473,9 +750,27 @@ void file_and_strong_restore() {
 } // namespace
 int main() {
   try {
+    const Bytes old(std::begin(test_fixtures::workspace_v1), std::end(test_fixtures::workspace_v1));
+    const auto migrated = decode_workspace(old);
+    check(migrated.version == 2 && migrated.slots.size() == 1 &&
+              migrated.slots[0].view.camera.handedness == DisplayHandedness::right_handed &&
+              migrated.captures[0].bookmarks[0].camera &&
+              migrated.captures[0].bookmarks[0].camera->handedness == DisplayHandedness::right_handed,
+          "v1 cameras/bookmarks did not migrate to right-handed display");
+    camera_equal(migrated.slots[0].view.camera,
+                 decode_workspace(encode_workspace(migrated)).slots[0].view.camera);
+    check(preferences_equal(migrated.default_preferences, ViewPreferences{}) &&
+              preferences_equal(migrated.slots[0].view.preferences, ViewPreferences{}) &&
+              migrated.captures[0].last_view &&
+              preferences_equal(migrated.captures[0].last_view->preferences, ViewPreferences{}),
+          "v1 migration fabricated nondefault view preferences");
     ownership_and_locks();
     bookmarks_and_identity();
+    rejected_identity_does_not_reserve_archive();
+    bookmark_camera_collision_preserves_both_views();
     stopped_live_binding();
+    preferences_and_source_identity();
+    invalid_preferences_are_atomic();
     codec_and_corruption();
     file_and_strong_restore();
     std::cout << "workspace tests passed\n";

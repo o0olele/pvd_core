@@ -1,13 +1,17 @@
 #pragma once
+#include "pvd/constraint_builder.hpp"
 #include "pvd/debug_render.hpp"
 #include "pvd/deformables.hpp"
 #include "pvd/mesh_builder.hpp"
+#include "pvd/scene_queries.hpp"
 #include <array>
 #include <memory>
 
 namespace pvd::viewer {
 using render::ObjectKey;
 using render::PickingKey;
+bool same_query_source(const render::SceneQuerySource &,
+                       const render::SceneQuerySource &) noexcept;
 // Column-major m[column*4+row], column vectors, right-handed world, Y up.
 // Projection has D3D depth 0..1. HLSL: column_major matrix; mul(MVP,position).
 struct Mat4 {
@@ -34,10 +38,22 @@ struct PickHit {
   std::size_t triangle_index = 0;
 };
 std::optional<PickHit> pick(const std::vector<DrawItem> &, const Ray &);
+enum class DisplayHandedness { right_handed, left_handed };
+enum class DisplayUp {
+  positive_x,
+  negative_x,
+  positive_y,
+  negative_y,
+  positive_z,
+  negative_z
+};
 class OrbitCamera {
 public:
   Vec3 target{0, 0, 0};
   Vec3 reference_up{0, 1, 0}; // Recorded arbitrary up; default SDK Y-up.
+  // Horizontal display mirror only. Source coordinates, poses and exports are
+  // unchanged; projection, ray picking, panning and winding agree on this view.
+  DisplayHandedness handedness = DisplayHandedness::right_handed;
   double yaw = 0.75, pitch = 0.45, distance = 10;
   double vertical_fov = 0.7853981633974483, near_plane = 0.01,
          far_plane = 1000000;
@@ -54,6 +70,12 @@ public:
   // Exact look-at basis. Rejects non-finite/coincident/collinear input.
   void set_look_at(const CameraState &);
 };
+struct DisplayAxes {
+  Vec3 horizontal, up, depth;
+};
+DisplayAxes display_axes(const OrbitCamera &);
+void set_display_up(OrbitCamera &, DisplayUp);
+std::optional<DisplayUp> display_up(const OrbitCamera &);
 enum class ColorMode {
   recorded_status,
   actor_kind,
@@ -109,6 +131,15 @@ struct FrameState {
   Snapshot snapshot;
   render::Frame render;
   render::DebugResult debug;
+  std::vector<render::DebugLine> joint_frame_lines, joint_limit_lines;
+  render::SceneQueries scene_queries;
+  struct QueryVolume {
+    render::SceneQuerySource source;
+    std::shared_ptr<const render::TriangleBuffer> mesh;
+    Transform pose;
+  };
+  std::vector<QueryVolume> query_volumes;
+  std::optional<render::SceneQuerySource> scene_query_selection;
   deformables::Frame deformables;
   struct DeformableDraw {
     deformables::OwnerKey key;
@@ -127,6 +158,9 @@ struct ModelOptions {
   render::ExtractorOptions extractor;
   render::MeshBuildOptions mesh;
   render::DebugOptions debug;
+  render::ConstraintBuildOptions constraints;
+  render::SceneQueryOptions scene_queries;
+  std::size_t max_query_volume_triangles = 200000;
   deformables::Options deformables;
   std::size_t max_tessellation_cache_entries = 128;
 };
@@ -180,6 +214,9 @@ public:
   std::shared_ptr<const FrameState> frame() const noexcept;
   std::optional<PickingKey> selected_key() const noexcept;
   std::optional<deformables::SelectionKey> selected_deformable() const noexcept;
+  std::optional<render::SceneQuerySource> selected_query() const noexcept;
+  bool select_query(const render::SceneQuerySource &);
+  bool fit_query(OrbitCamera &, double aspect = 1.0) const;
   // Owner selection survives matching live generations. Element selection is
   // scoped to the exact current sample, so slot reuse/seeking cannot retarget
   // it.

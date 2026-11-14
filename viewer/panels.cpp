@@ -20,11 +20,30 @@ std::string real(double n) {
   std::snprintf(out, sizeof(out), "%.6g", n);
   return out;
 }
-std::string vec(Vec3 v) {
-  return real(v.x) + ", " + real(v.y) + ", " + real(v.z);
+std::string numeric(double n, bool wide,
+                    const InspectorPreferences &preferences) {
+  if (!valid_inspector_preferences(preferences))
+    return "<invalid display preferences>";
+  const char *format =
+      preferences.number_format == NumberFormat::scientific ? "%.*e"
+      : preferences.number_format == NumberFormat::fixed    ? "%.*f"
+                                                            : "%.*g";
+  char out[512];
+  const auto precision =
+      wide ? preferences.double_precision : preferences.float_precision;
+  const auto written =
+      std::snprintf(out, sizeof(out), format, static_cast<int>(precision), n);
+  return written < 0 || static_cast<std::size_t>(written) >= sizeof(out)
+             ? "<unavailable>"
+             : std::string(out);
 }
-std::string quat(Quat q) {
-  return real(q.x) + ", " + real(q.y) + ", " + real(q.z) + ", " + real(q.w);
+std::string vec(Vec3 v, const InspectorPreferences &p) {
+  return numeric(v.x, false, p) + ", " + numeric(v.y, false, p) + ", " +
+         numeric(v.z, false, p);
+}
+std::string quat(Quat q, const InspectorPreferences &p) {
+  return numeric(q.x, false, p) + ", " + numeric(q.y, false, p) + ", " +
+         numeric(q.z, false, p) + ", " + numeric(q.w, false, p);
 }
 std::string lower(std::string value) {
   for (auto &c : value)
@@ -137,7 +156,8 @@ float raw_float(const PropertyValue &v, std::size_t offset) {
   return value;
 }
 void property_value(Document &doc, PanelState &state,
-                    const PropertyValue &value, std::size_t item) {
+                    const PropertyValue &value, std::size_t item,
+                    bool compact = false) {
   if (value.reference_ids) {
     if (item >= value.reference_ids->size()) {
       muted("Unavailable reference");
@@ -160,8 +180,14 @@ void property_value(Document &doc, PanelState &state,
     }
     return;
   }
-  const auto summary = propertyValueText(value, item);
-  text(summary);
+  const auto summary =
+      propertyValueText(value, item, state.inspector_preferences);
+  auto display = summary;
+  if (compact) {
+    std::replace(display.begin(), display.end(), '\n', ' ');
+    std::replace(display.begin(), display.end(), '\r', ' ');
+  }
+  text(display);
   tooltip(clipped(summary, 1024) + "\n" +
           std::to_string(value.raw_bytes().size()) + " captured bytes");
 }
@@ -211,8 +237,7 @@ void properties(Document &doc, PanelState &state, const InstanceState &object) {
     muted(value.incoming_type.name);
     tooltip(value.incoming_type.str());
     if (expanded && value.item_count) {
-      const auto page_size =
-          std::clamp<std::size_t>(state.array_page_size, 1, 128);
+      const auto page_size = state.inspector_preferences.array_page_size;
       auto &page =
           state.array_pages[std::to_string(object.id) + ":" +
                             std::to_string(object.generation) + ":" + name];
@@ -243,18 +268,25 @@ void properties(Document &doc, PanelState &state, const InstanceState &object) {
       const auto start = page * page_size;
       const auto count =
           std::min<std::uint64_t>(page_size, value.item_count - start);
-      for (std::uint64_t offset = 0; offset < count; ++offset) {
-        const auto item = start + offset;
-        IdScope row(std::to_string(item));
-        ImGui::TableNextRow();
-        ImGui::TableSetColumnIndex(0);
-        muted("  [" + std::to_string(item) + "]");
-        ImGui::TableSetColumnIndex(1);
-        if (item > std::numeric_limits<std::size_t>::max())
-          muted("Index unavailable on this host");
-        else
-          property_value(doc, state, value, static_cast<std::size_t>(item));
-      }
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(count));
+      while (clipper.Step())
+        for (int row_offset = clipper.DisplayStart;
+             row_offset < clipper.DisplayEnd; ++row_offset) {
+          const auto offset = static_cast<std::uint64_t>(row_offset);
+          ++state.array_visible_rows;
+          const auto item = start + offset;
+          IdScope row(std::to_string(item));
+          ImGui::TableNextRow();
+          ImGui::TableSetColumnIndex(0);
+          muted("  [" + std::to_string(item) + "]");
+          ImGui::TableSetColumnIndex(1);
+          if (item > std::numeric_limits<std::size_t>::max())
+            muted("Index unavailable on this host");
+          else
+            property_value(doc, state, value, static_cast<std::size_t>(item),
+                           true);
+        }
     }
   }
 }
@@ -481,7 +513,8 @@ void object_categories(Document &doc, PanelState &state,
 }
 } // namespace
 
-std::string propertyValueText(const PropertyValue &value, std::size_t item) {
+std::string propertyValueText(const PropertyValue &value, std::size_t item,
+                              const InspectorPreferences &preferences) {
   try {
     if (item >= value.item_count)
       return "<unavailable>";
@@ -505,13 +538,14 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item) {
       if (auto n = value.as_int(item))
         return std::to_string(*n);
       if (auto n = value.as_double(item))
-        return real(*n);
+        return numeric(*n, name == "PvdF64", preferences);
       if (auto n = value.as_vec3(item))
-        return vec(*n);
+        return vec(*n, preferences);
       if (auto n = value.as_quat(item))
-        return quat(*n);
+        return quat(*n, preferences);
       if (auto n = value.as_transform(item))
-        return "P: " + vec(n->position) + "\nQ: " + quat(n->rotation);
+        return "P: " + vec(n->position, preferences) +
+               "\nQ: " + quat(n->rotation, preferences);
       if (name == "PxVec2" || name == "PxVec4") {
         const auto components = name == "PxVec2" ? 2u : 4u;
         const auto stride = components * 4;
@@ -521,7 +555,8 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item) {
         for (unsigned j = 0; j < components; ++j) {
           if (j)
             s += ", ";
-          s += real(raw_float(value, item * stride + j * 4));
+          s += numeric(raw_float(value, item * stride + j * 4), false,
+                       preferences);
         }
         return s;
       }
@@ -533,10 +568,12 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item) {
         const auto base = item * 24;
         return "Min: " +
                vec({raw_float(value, base), raw_float(value, base + 4),
-                    raw_float(value, base + 8)}) +
+                    raw_float(value, base + 8)},
+                   preferences) +
                "\nMax: " +
                vec({raw_float(value, base + 12), raw_float(value, base + 16),
-                    raw_float(value, base + 20)});
+                    raw_float(value, base + 20)},
+                   preferences);
       }
       if (name == "PxMat33" || name == "PxMat44") {
         const std::size_t n = name == "PxMat33" ? 3 : 4, stride = n * n * 4;
@@ -549,7 +586,9 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item) {
           for (std::size_t col = 0; col < n; ++col) {
             if (col)
               out += ", ";
-            out += real(raw_float(value, item * stride + (col * n + row) * 4));
+            out +=
+                numeric(raw_float(value, item * stride + (col * n + row) * 4),
+                        false, preferences);
           }
         }
         return out;
@@ -760,6 +799,66 @@ void drawHierarchy(Document &doc, PanelState &state) {
 
 void drawInspector(Document &doc, PanelState &state) {
   try {
+    state.array_visible_rows = 0;
+    if (ImGui::SmallButton("Inspector settings"))
+      ImGui::OpenPopup("Inspector preferences");
+    ImGui::SetNextWindowSizeConstraints(
+        {280, 0},
+        {std::max(280.f, std::min(440.f, ImGui::GetIO().DisplaySize.x - 16)),
+         std::numeric_limits<float>::max()});
+    if (ImGui::BeginPopup("Inspector preferences")) {
+      auto &preferences = state.inspector_preferences;
+      bool changed = false;
+      int format = static_cast<int>(preferences.number_format);
+      ImGui::SetNextItemWidth(180);
+      if (ImGui::Combo("Number format", &format,
+                       "General\0Scientific\0Fixed\0")) {
+        preferences.number_format = static_cast<NumberFormat>(format);
+        changed = true;
+      }
+      int fp = static_cast<int>(preferences.float_precision),
+          dp = static_cast<int>(preferences.double_precision);
+      ImGui::SetNextItemWidth(180);
+      if (ImGui::SliderInt("Float precision", &fp, 1, 17)) {
+        preferences.float_precision = static_cast<unsigned>(fp);
+        changed = true;
+      }
+      ImGui::SetNextItemWidth(180);
+      if (ImGui::SliderInt("Double precision", &dp, 1, 17)) {
+        preferences.double_precision = static_cast<unsigned>(dp);
+        changed = true;
+      }
+      ImGui::TextWrapped(
+          "General uses significant digits; scientific/fixed use decimal "
+          "places. Defaults (float 9, double 17) retain round-trip precision "
+          "in General. Integer values and IDs are always exact.");
+      const std::size_t groups[] = {32, 128, 512, 2048};
+      int group = 0;
+      for (int i = 0; i < 4; ++i)
+        if (preferences.array_page_size == groups[i])
+          group = i;
+      ImGui::SetNextItemWidth(180);
+      if (ImGui::Combo("Array group size", &group,
+                       "32\0"
+                       "128\0"
+                       "512\0"
+                       "2048\0")) {
+        preferences.array_page_size = groups[group];
+        changed = true;
+      }
+      ImGui::TextWrapped("Only one array group is displayed at a time; visible "
+                         "rows are clipped even for 2048-item groups.");
+      if (ImGui::Button("Reset defaults")) {
+        preferences = {};
+        changed = true;
+      }
+      if (changed)
+        state.array_pages.clear();
+      ImGui::EndPopup();
+    }
+    if (!valid_inspector_preferences(state.inspector_preferences))
+      throw std::invalid_argument(
+          "Inspector display preferences are outside supported limits");
     if (!doc.loaded()) {
       drawEmptyState("Inspector",
                      "Object properties appear after a capture is opened.");
@@ -846,7 +945,8 @@ void drawTimeline(Document &doc, PanelState &state) {
     const auto total = doc.timeline().size();
     // Keep the fixed-height host panel to three rows at the supported window
     // sizes.
-    ImGui::SameLine(0, 16);
+    if (width > 850)
+      ImGui::SameLine(0, 16);
     {
       DisabledScope disabled(total == 0);
       if (ImGui::Button("First"))
@@ -871,15 +971,26 @@ void drawTimeline(Document &doc, PanelState &state) {
           p.loop = loop;
           doc.set_playback(p);
         });
+      if (width > 500)
+        ImGui::SameLine();
+      bool reverse = doc.playback().frames_per_second < 0;
+      if (ImGui::Checkbox("Reverse", &reverse))
+        command(state, [&] {
+          auto p = doc.playback();
+          p.frames_per_second =
+              std::abs(p.frames_per_second) * (reverse ? -1 : 1);
+          doc.set_playback(p);
+        });
       if (width > 900) {
         ImGui::SameLine();
-        float fps = static_cast<float>(doc.playback().frames_per_second);
+        float fps =
+            static_cast<float>(std::abs(doc.playback().frames_per_second));
         ImGui::SetNextItemWidth(80);
         if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
                              ImGuiSliderFlags_AlwaysClamp))
           command(state, [&] {
             auto p = doc.playback();
-            p.frames_per_second = fps;
+            p.frames_per_second = fps * (p.frames_per_second < 0 ? -1 : 1);
             doc.set_playback(p);
           });
       }
@@ -906,14 +1017,16 @@ void drawTimeline(Document &doc, PanelState &state) {
               "Captured marker interval, not an inferred simulation timestep.");
         }
       if (width <= 900) {
-        ImGui::SameLine();
-        float fps = static_cast<float>(doc.playback().frames_per_second);
+        if (width > 650)
+          ImGui::SameLine();
+        float fps =
+            static_cast<float>(std::abs(doc.playback().frames_per_second));
         ImGui::SetNextItemWidth(65);
         if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
                              ImGuiSliderFlags_AlwaysClamp))
           command(state, [&] {
             auto p = doc.playback();
-            p.frames_per_second = fps;
+            p.frames_per_second = fps * (p.frames_per_second < 0 ? -1 : 1);
             doc.set_playback(p);
           });
       }

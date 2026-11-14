@@ -61,7 +61,7 @@ endif()
 
 if(PVD_BUILD_RENDER)
     add_library(pvd_render src/render.cpp src/debug_render.cpp src/mesh_builder.cpp src/deformables.cpp
-        src/constraint_builder.cpp)
+        src/constraint_builder.cpp src/scene_queries.cpp)
     add_library(pvd::render ALIAS pvd_render)
     set_target_properties(pvd_render PROPERTIES EXPORT_NAME render VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -131,7 +131,7 @@ if(BUILD_TESTING)
         set_tests_properties(capture PROPERTIES TIMEOUT 30)
     endif()
     if(PVD_BUILD_RENDER)
-        foreach(render_test IN ITEMS render debug_render mesh_builder deformables constraint_builder)
+        foreach(render_test IN ITEMS render debug_render mesh_builder deformables constraint_builder scene_queries)
             add_executable(pvd_${render_test}_tests tests/${render_test}_tests.cpp)
             target_link_libraries(pvd_${render_test}_tests PRIVATE pvd::render)
             add_test(NAME ${render_test} COMMAND pvd_${render_test}_tests)
@@ -145,6 +145,17 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
     pvd_add_physx34_capture(pvd_physx34_capture)
     if(PVD_BUILD_RENDER)
         pvd_add_physx34_render_capture(pvd_physx34_render_capture)
+        pvd_add_physx34_render_capture(pvd_physx34_scene_queries_capture
+            ${PROJECT_SOURCE_DIR}/examples/physx34_scene_queries_capture.cpp)
+        target_compile_options(pvd_physx34_scene_queries_capture PRIVATE /utf-8)
+        add_library(pvd_physx34_scene_query_layout OBJECT tests/physx34_scene_query_layout.cpp)
+        target_compile_features(pvd_physx34_scene_query_layout PRIVATE cxx_std_17)
+        target_compile_definitions(pvd_physx34_scene_query_layout PRIVATE PX_SUPPORT_PVD=1 PX_DEBUG=1 PX_CHECKED=1)
+        target_include_directories(pvd_physx34_scene_query_layout SYSTEM PRIVATE
+            ${PHYSX34_ROOT}/PhysX_3.4/Include ${PHYSX34_ROOT}/PhysX_3.4/Include/common
+            ${PHYSX34_ROOT}/PhysX_3.4/Include/geometry ${PHYSX34_ROOT}/PxShared/include
+            ${PHYSX34_ROOT}/PxShared/src/foundation/include ${PHYSX34_ROOT}/PhysX_3.4/Source/Common/src
+            ${PHYSX34_ROOT}/PhysX_3.4/Source/PhysX/src ${PROJECT_SOURCE_DIR}/examples/physx34_compat)
         pvd_add_physx34_capture(pvd_physx34_deformables_capture
             ${PROJECT_SOURCE_DIR}/examples/physx34_deformables_capture.cpp)
         set_property(TARGET pvd_physx34_deformables_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
@@ -196,6 +207,14 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_custom.pxd2)
         set_tests_properties(physx34_writer PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
         if(PVD_BUILD_RENDER)
+            add_executable(pvd_physx34_scene_queries tests/physx34_scene_queries.cpp)
+            target_link_libraries(pvd_physx34_scene_queries PRIVATE pvd::render)
+            add_test(NAME physx34_scene_queries_generate COMMAND pvd_physx34_scene_queries_capture
+                ${PROJECT_BINARY_DIR}/fixtures/queries)
+            set_tests_properties(physx34_scene_queries_generate PROPERTIES FIXTURES_SETUP physx34_scene_queries TIMEOUT 30)
+            add_test(NAME physx34_scene_queries COMMAND pvd_physx34_scene_queries
+                ${PROJECT_BINARY_DIR}/fixtures/queries_capture.pxd2 ${PROJECT_BINARY_DIR}/fixtures/queries_expected.csv)
+            set_tests_properties(physx34_scene_queries PROPERTIES FIXTURES_REQUIRED physx34_scene_queries TIMEOUT 30)
             add_test(NAME physx34_joints_generate COMMAND pvd_physx34_joints_capture
                 ${PROJECT_BINARY_DIR}/fixtures/joints)
             set_tests_properties(physx34_joints_generate PROPERTIES FIXTURES_SETUP physx34_joints TIMEOUT 30)

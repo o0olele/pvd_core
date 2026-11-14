@@ -11,6 +11,7 @@
 #include <map>
 #include <set>
 #include <system_error>
+#include <tuple>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -29,6 +30,19 @@ namespace pvd::viewer {
 namespace {
 constexpr std::uint8_t magic[8] = {'P', 'V', 'D', 'W', 'S', 10, 13, 26};
 constexpr std::size_t header_size = 28;
+// Explicit field order is the v2 wire schema, independent of struct padding.
+constexpr std::array<bool RenderOptions::*, 21> rendering_switches = {
+    &RenderOptions::show_grid, &RenderOptions::show_axes,
+    &RenderOptions::show_solids, &RenderOptions::show_wireframe,
+    &RenderOptions::show_debug_points, &RenderOptions::show_debug_lines,
+    &RenderOptions::show_debug_triangles, &RenderOptions::show_contacts,
+    &RenderOptions::show_joint_frames, &RenderOptions::show_joint_limits,
+    &RenderOptions::show_scene_queries, &RenderOptions::show_query_normals,
+    &RenderOptions::show_query_volumes, &RenderOptions::show_bounds,
+    &RenderOptions::show_linear_velocity, &RenderOptions::show_angular_velocity,
+    &RenderOptions::show_cloth, &RenderOptions::show_particles,
+    &RenderOptions::show_cloth_constraints, &RenderOptions::show_cloth_pins,
+    &RenderOptions::show_particle_velocity};
 void require(bool value, const char *message) {
   if (!value)
     throw WorkspaceError(message);
@@ -72,6 +86,9 @@ void sample(SamplePoint s) {
           "workspace sample mode is unsupported");
 }
 void camera(const OrbitCamera &c) {
+  require(c.handedness == DisplayHandedness::right_handed ||
+              c.handedness == DisplayHandedness::left_handed,
+          "workspace camera handedness is unsupported");
   try {
     auto p = c.position();
     require(std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z),
@@ -85,6 +102,19 @@ void camera(const OrbitCamera &c) {
     throw WorkspaceError(std::string("workspace camera invalid: ") + e.what());
   }
 }
+bool same_camera(const std::optional<OrbitCamera> &a,
+                 const std::optional<OrbitCamera> &b) {
+  if (a.has_value() != b.has_value()) return false;
+  if (!a) return true;
+  return std::tie(a->target.x, a->target.y, a->target.z,
+      a->reference_up.x, a->reference_up.y, a->reference_up.z,
+      a->handedness, a->yaw, a->pitch, a->distance, a->vertical_fov,
+      a->near_plane, a->far_plane) ==
+      std::tie(b->target.x, b->target.y, b->target.z,
+      b->reference_up.x, b->reference_up.y, b->reference_up.z,
+      b->handedness, b->yaw, b->pitch, b->distance, b->vertical_fov,
+      b->near_plane, b->far_plane);
+}
 void view_options(const ViewOptions &v) {
   require(v.color_mode >= ColorMode::recorded_status &&
               v.color_mode <= ColorMode::uniform,
@@ -94,6 +124,7 @@ void view(const StoredView &v) {
   sample(v.sample_point);
   camera(v.camera);
   view_options(v.options);
+  require(valid_view_preferences(v.preferences), "workspace view preferences are invalid");
   require(v.scene_id || (v.frame_index == 0 &&
                          v.sample_point == SamplePoint::native_frame),
           "workspace view without scene has a frame/sample selection");
@@ -105,6 +136,7 @@ void identity(const std::optional<SourceIdentity> &i) {
 void valid(const WorkspaceSettings &s, const WorkspaceLimits &l) {
   require(s.version == workspace_format_version,
           "unsupported workspace version");
+  require(valid_view_preferences(s.default_preferences), "workspace default preferences are invalid");
   require(s.slots.size() <= l.max_slots, "workspace slot count exceeds budget");
   require(s.captures.size() <= l.max_captures,
           "workspace capture-state count exceeds budget");
@@ -216,6 +248,21 @@ struct Encoder {
     d(c.vertical_fov);
     d(c.near_plane);
     d(c.far_plane);
+    u(static_cast<unsigned>(c.handedness), 1);
+  }
+  void preferences(const ViewPreferences &v) {
+    for (float component : v.rendering.background_color) f(component);
+    u(static_cast<unsigned>(v.rendering.antialiasing), 1);
+    for (auto member : rendering_switches) u(v.rendering.*member, 1);
+    f(v.rendering.rigid_velocity_scale);
+    f(v.rendering.particle_velocity_scale);
+    f(v.rendering.contact_normal_length);
+    f(v.rendering.point_size);
+    u(static_cast<unsigned>(v.inspection.number_format), 1);
+    u(v.inspection.float_precision, 1);
+    u(v.inspection.double_precision, 1);
+    u(v.inspection.array_page_size, 4);
+    u(v.show_debug_text, 1);
   }
   void view(const StoredView &v) {
     u(v.scene_id.has_value(), 1);
@@ -234,12 +281,14 @@ struct Encoder {
     u(v.options.uniform_color.g, 1);
     u(v.options.uniform_color.b, 1);
     u(v.options.uniform_color.a, 1);
+    preferences(v.preferences);
   }
 };
 struct Decoder {
   const Bytes &bytes;
   const WorkspaceLimits &limits;
   std::size_t at = 0;
+  std::uint32_t version = workspace_format_version;
   std::uint64_t u(std::size_t n) {
     require(n <= bytes.size() - at, "workspace file is truncated");
     std::uint64_t v = 0;
@@ -299,7 +348,24 @@ struct Decoder {
     c.vertical_fov = d();
     c.near_plane = d();
     c.far_plane = d();
+    if (version >= 2) c.handedness = static_cast<DisplayHandedness>(u(1));
     return c;
+  }
+  ViewPreferences preferences() {
+    ViewPreferences v;
+    for (auto &component : v.rendering.background_color) component = f();
+    v.rendering.antialiasing = static_cast<Antialiasing>(u(1));
+    for (auto member : rendering_switches) v.rendering.*member = boolean();
+    v.rendering.rigid_velocity_scale = f();
+    v.rendering.particle_velocity_scale = f();
+    v.rendering.contact_normal_length = f();
+    v.rendering.point_size = f();
+    v.inspection.number_format = static_cast<NumberFormat>(u(1));
+    v.inspection.float_precision = static_cast<unsigned>(u(1));
+    v.inspection.double_precision = static_cast<unsigned>(u(1));
+    v.inspection.array_page_size = static_cast<std::size_t>(u(4));
+    v.show_debug_text = boolean();
+    return v;
   }
   StoredView view() {
     StoredView v;
@@ -317,6 +383,7 @@ struct Decoder {
     v.options.uniform_color = {
         static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1)),
         static_cast<std::uint8_t>(u(1)), static_cast<std::uint8_t>(u(1))};
+    if (version >= 2) v.preferences = preferences();
     return v;
   }
 };
@@ -511,6 +578,7 @@ Bytes encode_workspace(const WorkspaceSettings &s,
   p.u(s.recent_files.size(), 4);
   for (const auto &r : s.recent_files)
     p.str(r);
+  p.preferences(s.default_preferences);
   Encoder out{{}, limits.max_file_bytes};
   out.bytes.insert(out.bytes.end(), std::begin(magic), std::end(magic));
   out.u(s.version, 4);
@@ -529,7 +597,7 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
           "workspace magic is invalid");
   Decoder h{bytes, limits, 8};
   auto version = h.u(4);
-  require(version == workspace_format_version, "unsupported workspace version");
+  require(version == 1 || version == workspace_format_version, "unsupported workspace version");
   auto size = h.u(8);
   auto checksum = h.u(4);
   require(h.u(4) == 0, "workspace header reserved field is unsupported");
@@ -538,9 +606,9 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
   require(checksum ==
               crc32(bytes.data() + header_size, bytes.size() - header_size),
           "workspace checksum does not match");
-  Decoder p{bytes, limits, header_size};
+  Decoder p{bytes, limits, header_size, static_cast<std::uint32_t>(version)};
   WorkspaceSettings s;
-  s.version = static_cast<std::uint32_t>(version);
+  s.version = workspace_format_version;
   auto active = p.u(8);
   if (active)
     s.active_slot = active;
@@ -583,6 +651,7 @@ WorkspaceSettings decode_workspace(const Bytes &bytes,
   s.recent_files.reserve(count);
   while (count--)
     s.recent_files.push_back(p.str());
+  if (version >= 2) s.default_preferences = p.preferences();
   require(p.at == bytes.size(), "workspace file contains trailing payload");
   valid(s, limits);
   return s;
@@ -620,6 +689,7 @@ struct WorkspaceSlot::Impl {
   std::string title, path;
   std::unique_ptr<Document> document;
   OrbitCamera camera;
+  ViewPreferences preferences;
   bool camera_ready = false;
   std::optional<SlotLock> lock;
   std::shared_ptr<CaptureData> capture;
@@ -635,6 +705,7 @@ struct WorkspaceSlot::Impl {
       v.options = document->view_options();
     }
     v.camera = camera;
+    v.preferences = preferences;
     return v;
   }
 };
@@ -655,6 +726,8 @@ OrbitCamera &WorkspaceSlot::camera() noexcept { return impl_->camera; }
 const OrbitCamera &WorkspaceSlot::camera() const noexcept {
   return impl_->camera;
 }
+ViewPreferences &WorkspaceSlot::preferences() noexcept { return impl_->preferences; }
+const ViewPreferences &WorkspaceSlot::preferences() const noexcept { return impl_->preferences; }
 bool WorkspaceSlot::camera_ready() const noexcept {
   return impl_->camera_ready;
 }
@@ -753,6 +826,7 @@ struct Workspace::Impl {
   std::vector<std::unique_ptr<WorkspaceSlot>> slots;
   std::map<std::string, std::shared_ptr<CaptureData>> captures;
   std::vector<std::string> recent;
+  ViewPreferences default_preferences;
   std::optional<SlotId> active;
   SlotId next_slot = 1;
   BookmarkId next_bookmark = 1;
@@ -778,8 +852,11 @@ struct Workspace::Impl {
   void preserve(WorkspaceSlot &slot) {
     if (!slot.impl_->path.empty() && slot.impl_->identity &&
         slot.impl_->capture->identity &&
-        *slot.impl_->identity == *slot.impl_->capture->identity)
-      slot.impl_->capture->last_view = slot.impl_->view();
+        *slot.impl_->identity == *slot.impl_->capture->identity) {
+      auto current = slot.impl_->view();
+      view(current);
+      slot.impl_->capture->last_view = std::move(current);
+    }
   }
 };
 Workspace::Workspace(ModelOptions m, WorkspaceLimits l)
@@ -803,7 +880,7 @@ SlotId Workspace::add(std::unique_ptr<Document> document, std::string path,
   p->title = t.empty() ? title(path) : std::move(t);
   p->path = path;
   p->document = std::move(document);
-  p->capture = impl_->capture(path);
+  p->preferences = impl_->default_preferences;
   if (!path.empty() && p->document->loaded()) {
     if (precomputed) {
       require(precomputed->event_count == p->document->session()->event_count(),
@@ -811,6 +888,11 @@ SlotId Workspace::add(std::unique_ptr<Document> document, std::string path,
       p->identity = precomputed;
     } else
       p->identity = workspace_source_identity(*p->document->session());
+  }
+  // Validate/compute the identity before reserving an archived source path.
+  // A rejected precomputed identity must not exhaust the archive budget.
+  p->capture = impl_->capture(path);
+  if (p->identity) {
     if (!p->capture->identity && p->capture->bookmarks.empty() &&
         !p->capture->last_view)
       p->capture->identity = p->identity;
@@ -822,6 +904,7 @@ SlotId Workspace::add(std::unique_ptr<Document> document, std::string path,
     if ((!p->document->loaded() || matches) && p->capture->identity &&
         apply(*p->document, v)) {
       p->camera = v.camera;
+      p->preferences = v.preferences;
       p->camera_ready = true;
       if (!p->document->loaded()) {
         p->pending_view = v;
@@ -859,9 +942,9 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
   if (!slot || slot->impl_->lock)
     return false;
   require(bool(incoming), "workspace replacement document is null");
+  require(valid_view_preferences(slot->preferences()), "workspace view preferences are invalid");
   utf8(path, impl_->limits.max_string_bytes);
   identity(precomputed);
-  auto data = impl_->capture(path);
   std::optional<SourceIdentity> actual;
   if (!path.empty() && incoming->loaded()) {
     if (precomputed) {
@@ -870,6 +953,9 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
       actual = precomputed;
     } else
       actual = workspace_source_identity(*incoming->session());
+  }
+  auto data = impl_->capture(path);
+  if (actual) {
     if (!data->identity && data->bookmarks.empty() && !data->last_view)
       data->identity = actual;
   }
@@ -886,6 +972,7 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
     expected = data->identity;
   }
   OrbitCamera next_camera;
+  ViewPreferences next_preferences = impl_->default_preferences;
   bool ready = false;
   std::string warning;
   std::optional<StoredView> pending;
@@ -895,6 +982,7 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
     if ((!incoming->loaded() || matches) && expected &&
         apply(*incoming, *saved)) {
       next_camera = saved->camera;
+      next_preferences = saved->preferences;
       ready = true;
       if (!incoming->loaded()) {
         pending = saved;
@@ -925,6 +1013,7 @@ bool Workspace::replace(SlotId id, std::unique_ptr<Document> &incoming,
   slot->impl_->path = path;
   slot->impl_->capture = std::move(data);
   slot->impl_->camera = next_camera;
+  slot->impl_->preferences = next_preferences;
   slot->impl_->camera_ready = ready;
   slot->impl_->pending_view = pending;
   slot->impl_->pending_identity = pending_identity;
@@ -950,10 +1039,10 @@ bool Workspace::bind_source(SlotId id, std::string path,
             "precomputed source identity has a different event count");
   else
     actual = workspace_source_identity(*slot->document().session());
-  auto target = impl_->capture(path);
-  auto merged = std::make_shared<CaptureData>(*target);
   auto current = slot->impl_->view();
   view(current);
+  auto target = impl_->capture(path);
+  auto merged = std::make_shared<CaptureData>(*target);
   auto next_bookmark = impl_->next_bookmark;
   if (target != slot->impl_->capture)
     for (const auto &original : slot->bookmarks()) {
@@ -969,7 +1058,7 @@ bool Workspace::bind_source(SlotId id, std::string path,
         if (collision->name == b.name && collision->scene_id == b.scene_id &&
             collision->frame_index == b.frame_index &&
             collision->sample_point == b.sample_point &&
-            collision->identity == b.identity)
+            collision->identity == b.identity && same_camera(collision->camera, b.camera))
           continue;
         require(next_bookmark != 0, "workspace bookmark ID space exhausted");
         b.id = next_bookmark;
@@ -1090,6 +1179,14 @@ std::vector<const WorkspaceSlot *> Workspace::slots() const {
 const std::vector<std::string> &Workspace::recent_files() const noexcept {
   return impl_->recent;
 }
+const ViewPreferences &Workspace::default_preferences() const noexcept {
+  return impl_->default_preferences;
+}
+void Workspace::set_default_preferences(ViewPreferences value) {
+  require(valid_view_preferences(value), "workspace default preferences are invalid");
+  impl_->default_preferences = value;
+}
+
 void Workspace::remember_recent(std::string path) {
   utf8(path, impl_->limits.max_string_bytes, true);
   auto copy = impl_->recent;
@@ -1176,6 +1273,7 @@ bool Workspace::jump_to_bookmark(SlotId id, BookmarkId book) {
 }
 WorkspaceSettings Workspace::settings() const {
   WorkspaceSettings result;
+  result.default_preferences = impl_->default_preferences;
   result.recent_files = impl_->recent;
   std::map<std::string, CaptureSettings> captures;
   for (const auto &c : impl_->captures)
@@ -1212,6 +1310,7 @@ WorkspaceRestore Workspace::restore(const WorkspaceSettings &settings) {
       "cannot replace workspace while a slot is loading, live, or exporting");
   valid(settings, impl_->limits);
   auto next = std::make_unique<Impl>(impl_->model, impl_->limits);
+  next->default_preferences = settings.default_preferences;
   WorkspaceRestore result;
   for (const auto &c : settings.captures) {
     auto data = std::make_shared<CaptureData>();
@@ -1234,6 +1333,7 @@ WorkspaceRestore Workspace::restore(const WorkspaceSettings &settings) {
     p->document = std::make_unique<Document>(next->model);
     p->document->set_view_options(saved.view.options);
     p->camera = saved.view.camera;
+    p->preferences = saved.view.preferences;
     p->camera_ready = true;
     p->pending_view = saved.view;
     p->pending_identity = saved.identity;

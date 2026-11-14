@@ -1,4 +1,6 @@
 #include "deformable_panel.hpp"
+#include "display_panel.hpp"
+#include "scene_query_panel.hpp"
 #include "export_panel.hpp"
 #include "imgui_internal.h"
 #include "load_job.hpp"
@@ -57,6 +59,7 @@ struct Options {
   bool live_smoke = false;
   bool analysis_smoke = false;
   bool deformable_smoke = false;
+  bool query_smoke = false;
   bool export_smoke = false, repx_smoke = false, allow_partial = false;
   bool workspace_smoke = false, no_settings = false;
   std::filesystem::path workspace_state;
@@ -115,6 +118,9 @@ Options arguments() {
         result.capture = value();
       } else if (a == L"--deformable-smoke") {
         result.deformable_smoke = true;
+        result.capture = value();
+      } else if (a == L"--query-smoke") {
+        result.query_smoke = true;
         result.capture = value();
       } else if (a == L"--analysis-smoke") {
         result.analysis_smoke = true;
@@ -211,7 +217,7 @@ Options arguments() {
   if (unsigned(result.smoke) + unsigned(result.live_smoke) +
           unsigned(result.analysis_smoke) + unsigned(result.export_smoke) +
           unsigned(result.repx_smoke) + unsigned(result.workspace_smoke) +
-          unsigned(result.deformable_smoke) >
+          unsigned(result.deformable_smoke) + unsigned(result.query_smoke) >
       1)
     throw std::runtime_error("Choose one smoke mode");
   if (result.workspace_smoke && result.workspace_state.empty())
@@ -311,7 +317,7 @@ public:
 #endif
     if (!options_.capture.empty()) {
       if (options_.smoke || options_.analysis_smoke || options_.export_smoke ||
-          options_.repx_smoke || options_.deformable_smoke) {
+          options_.repx_smoke || options_.deformable_smoke || options_.query_smoke) {
         auto incoming = std::make_unique<Document>();
         const auto path =
             std::filesystem::absolute(options_.capture).lexically_normal();
@@ -415,6 +421,8 @@ public:
         smoke_step();
       else if (options_.deformable_smoke)
         deformable_smoke_step();
+      else if (options_.query_smoke)
+        query_smoke_step();
       else if (options_.export_smoke)
         export_smoke_step();
       else if (options_.workspace_smoke)
@@ -460,6 +468,8 @@ private:
     PanelState panels;
     RenderOptions render_options;
     SceneToolState scene_tools;
+    DisplayPanelState display;
+    SceneQueryPanelState scene_queries;
     ExportPanelState export_panel;
     bool diagnostics = false, show_debug_text = true;
     int page = 0, synchronized_page = -1;
@@ -553,7 +563,7 @@ private:
   bool smoke_mode() const {
     return options_.smoke || options_.analysis_smoke || options_.live_smoke ||
            options_.export_smoke || options_.repx_smoke ||
-           options_.workspace_smoke || options_.deformable_smoke;
+           options_.workspace_smoke || options_.deformable_smoke || options_.query_smoke;
   }
   WorkspaceSlot &active_slot() {
     if (!workspace_.active())
@@ -564,10 +574,31 @@ private:
   OrbitCamera &camera() { return active_slot().camera(); }
   bool fitted() { return active_slot().camera_ready(); }
   void set_fitted(bool value) { active_slot().set_camera_ready(value); }
+  void apply_preferences(SlotId id, SlotUiState &state) {
+    if (const auto *slot = workspace_.find(id)) {
+      const auto &preferences = slot->preferences();
+      state.render_options = preferences.rendering;
+      state.panels.inspector_preferences = preferences.inspection;
+      state.show_debug_text = preferences.show_debug_text;
+    }
+  }
+  void store_preferences(SlotId id) {
+    auto *slot = workspace_.find(id);
+    auto cached = slot_ui_.find(id);
+    if (!slot || cached == slot_ui_.end() || !cached->second) return;
+    ViewPreferences preferences;
+    preferences.rendering = cached->second->render_options;
+    preferences.inspection = cached->second->panels.inspector_preferences;
+    preferences.show_debug_text = cached->second->show_debug_text;
+    if (!valid_view_preferences(preferences)) return;
+    slot->preferences() = preferences;
+    if (workspace_.active_id() == id) workspace_.set_default_preferences(preferences);
+  }
   SlotUiState &ui_for(SlotId id) {
     auto &value = slot_ui_[id];
     if (!value) {
       value = std::make_unique<SlotUiState>();
+      apply_preferences(id, *value);
       if (options_.analysis_smoke)
         value->page = options_.analysis_page;
     }
@@ -1288,6 +1319,7 @@ private:
     if (!slot)
       return;
     slot_ui_[id] = std::make_unique<SlotUiState>();
+    apply_preferences(id, *slot_ui_[id]);
     auto &state = ui_for(id);
     if (options_.analysis_smoke)
       state.page = options_.analysis_page;
@@ -1298,6 +1330,16 @@ private:
         throw std::runtime_error("Native smoke needs a recorded cloth");
       slot->document().fit_deformable(frame->deformables.cloths.front().key,
                                       slot->camera(), 1.5);
+      slot->set_camera_ready();
+    }
+    if (options_.query_smoke) {
+      state.page = 9;
+      auto &doc = slot->document();
+      if (doc.frame()->scene_queries.queries.empty())
+        throw std::runtime_error("Query smoke needs recorded native queries");
+      doc.select_query(doc.frame()->scene_queries.queries.front().source);
+      doc.fit_query(slot->camera(), 1.5);
+      doc.clear_selection();
       slot->set_camera_ready();
     }
     if (renderer_)
@@ -1883,8 +1925,7 @@ private:
       return;
     const auto status = repx_job_.status();
     if (status.stage != RepxStage::completed ||
-        (!status.complete && !options_.allow_partial) || !status.actors ||
-        !status.shapes)
+        (!status.complete && !options_.allow_partial) || !status.actors)
       throw std::runtime_error("RepX export failed: " + status.error);
     if (std::filesystem::file_size(options_.output) != status.xml_bytes)
       throw std::runtime_error(
@@ -1900,6 +1941,7 @@ private:
              << ",\"event_count\":" << status.event_count
              << ",\"actors\":" << status.actors
              << ",\"shapes\":" << status.shapes
+             << ",\"joints\":" << status.joints
              << ",\"xml_bytes\":" << status.xml_bytes
              << ",\"auto_settings_io\":"
              << (automatic_settings_ ? "true" : "false") << "}\n";
@@ -2054,6 +2096,11 @@ private:
       view.color_mode = ColorMode::uniform;
       view.uniform_color = {42, 177, 160, 255};
       document().set_view_options(view);
+      ui().render_options.antialiasing = Antialiasing::msaa4x;
+      ui().render_options.background_color = {.12f, .08f, .17f, 1};
+      ui().panels.inspector_preferences.number_format = NumberFormat::scientific;
+      ui().panels.inspector_preferences.array_page_size = 512;
+      store_preferences(smoke_slot_b_);
       activate_slot(smoke_slot_a_);
       smoke_workspace_state_ =
           document().frame_index() == 2 &&
@@ -2114,6 +2161,11 @@ private:
                   b->document().view_options().color_mode == ColorMode::uniform,
               "Workspace did not restore its active frame, camera and "
               "visibility color");
+      require(ui_for(smoke_slot_b_).render_options.antialiasing == Antialiasing::msaa4x &&
+                  ui_for(smoke_slot_b_).render_options.background_color[0] == .12f &&
+                  ui_for(smoke_slot_b_).panels.inspector_preferences.number_format == NumberFormat::scientific &&
+                  ui_for(smoke_slot_b_).panels.inspector_preferences.array_page_size == 512,
+              "Workspace did not restore display and inspector preferences");
       require(a->bookmark_verified(smoke_bookmark_),
               "Restored bookmark source identity was not verified");
       workspace_actions().jump_bookmark(smoke_slot_a_, smoke_bookmark_);
@@ -2306,6 +2358,40 @@ private:
     }
     quit_ = true;
   }
+  void query_smoke_step() {
+    if (host_frames_ < 6) return;
+    const auto frame = document().frame();
+    const auto stats = renderer_->stats();
+    if (ui().page != 9 || !frame || frame->scene_queries.queries.empty() ||
+        !stats.query_lines || !stats.query_volumes || !ui().scene_queries.visible_row_count)
+      throw std::runtime_error("Recorded scene queries/volumes did not reach the GPU viewport");
+    if (!native_smoke_phase_) {
+      unselected_ = readTextureRgba8(device_.Get(), context_.Get(), renderer_->texture());
+      if (!document().select_query(frame->scene_queries.queries.front().source))
+        throw std::runtime_error("Recorded query selection was rejected");
+      native_smoke_phase_ = 1;
+      return;
+    }
+    auto selected = readTextureRgba8(device_.Get(), context_.Get(), renderer_->texture());
+    if (selected.pixels.size() != unselected_.pixels.size())
+      throw std::runtime_error("Query viewport changed dimensions during selection");
+    for (std::size_t i=0;i<selected.pixels.size();i+=4)
+      if (selected.pixels[i]!=unselected_.pixels[i] || selected.pixels[i+1]!=unselected_.pixels[i+1] ||
+          selected.pixels[i+2]!=unselected_.pixels[i+2]) ++selection_pixels_;
+    if (!selection_pixels_) throw std::runtime_error("Query selection did not change GPU pixels");
+    if (!options_.screenshot.empty()) screenshot();
+    if (!options_.report.empty()) {
+      std::size_t hits=0;for(const auto &query:frame->scene_queries.queries)hits+=query.hits.size();
+      std::ofstream report(options_.report);
+      report << "{\"passed\":true,\"queries\":" << frame->scene_queries.queries.size()
+             << ",\"hits\":" << hits << ",\"query_lines\":" << stats.query_lines
+             << ",\"query_volumes\":" << stats.query_volumes
+             << ",\"selection_pixels\":" << selection_pixels_
+             << ",\"auto_settings_io\":" << (automatic_settings_ ? "true" : "false") << "}\n";
+      if (!report) throw std::runtime_error("Cannot write query GPU smoke report");
+    }
+    quit_ = true;
+  }
   void draw() {
     shortcuts();
     const auto *main = ImGui::GetMainViewport();
@@ -2460,6 +2546,7 @@ private:
       tab("Event curves", 7);
 #endif
       tab("Deformables", 8);
+      tab("Scene queries", 9);
       tab("Workspace", 6);
       ImGui::EndTabBar();
       ui().synchronized_page = requested;
@@ -2501,8 +2588,8 @@ private:
       ImGui::EndChild();
       ImGui::EndTable();
     }
-    if (ui().page == 8) {
-      if (ImGui::BeginTable("Deformable layout", 2,
+    if (ui().page == 8 || ui().page == 9) {
+      if (ImGui::BeginTable(ui().page == 8 ? "Deformable layout" : "Query layout", 2,
           ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("Native objects", ImGuiTableColumnFlags_WidthFixed, 390);
         ImGui::TableSetupColumn("Native viewport", ImGuiTableColumnFlags_WidthStretch);
@@ -2510,7 +2597,12 @@ private:
         ImGui::TableNextColumn();
         ImGui::BeginChild("Deformable workspace", {0, body_height}, ImGuiChildFlags_Borders);
         ui().deformables.viewport_aspect = viewport_size_.x / std::max(1.f, viewport_size_.y);
-        drawDeformables(document(), camera(), ui().render_options, ui().deformables);
+        if (ui().page == 8)
+          drawDeformables(document(), camera(), ui().render_options, ui().deformables);
+        else {
+          ui().scene_queries.viewport_aspect = ui().deformables.viewport_aspect;
+          drawSceneQueries(document(), camera(), ui().render_options, ui().scene_queries);
+        }
         ImGui::EndChild();
         ImGui::TableNextColumn();
         ImGui::BeginChild("Native scene", {0, body_height}, ImGuiChildFlags_Borders,
@@ -2565,6 +2657,7 @@ private:
     ImGui::TextDisabled("D3D11 %s", using_warp_ ? "WARP" : "GPU");
     ImGui::SameLine();
     ImGui::Checkbox("Diagnostics", &ui().diagnostics);
+    store_preferences(active_slot().id());
     ImGui::PopID();
     ImGui::End();
   }
@@ -2588,6 +2681,10 @@ private:
           viewport_size_.x / std::max(1.f, viewport_size_.y);
       drawSceneTools(document(), camera(), ui().scene_tools);
       ImGui::Separator();
+      ui().display.viewport_aspect = viewport_size_.x / std::max(1.f, viewport_size_.y);
+      drawDisplaySettings(document(), camera(), ui().render_options,
+                          renderer_->stats(), ui().display);
+      ImGui::Separator();
       ImGui::TextUnformatted("RENDER LAYERS");
       auto &options = ui().render_options;
       ImGui::Checkbox("Grid", &options.show_grid);
@@ -2604,6 +2701,9 @@ private:
       ImGui::Checkbox("Debug triangles", &options.show_debug_triangles);
       ImGui::SameLine();
       ImGui::Checkbox("Debug text", &ui().show_debug_text);
+      ImGui::Checkbox("Joint frames", &options.show_joint_frames);
+      ImGui::SameLine();
+      ImGui::Checkbox("Joint limits", &options.show_joint_limits);
       ImGui::EndPopup();
     }
     const auto frame = document().frame();

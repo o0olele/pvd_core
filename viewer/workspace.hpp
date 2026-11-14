@@ -1,5 +1,6 @@
 #pragma once
 #include "model.hpp"
+#include "view_preferences.hpp"
 #include <functional>
 #include <iosfwd>
 #include <limits>
@@ -7,7 +8,7 @@
 namespace pvd::viewer {
 using SlotId = std::uint64_t;
 using BookmarkId = std::uint64_t;
-inline constexpr std::uint32_t workspace_format_version = 1;
+inline constexpr std::uint32_t workspace_format_version = 2;
 enum class SlotLock { loading, live, exporting };
 struct SourceIdentity {
   std::uint32_t algorithm =
@@ -43,6 +44,7 @@ struct StoredView {
   std::uint64_t frame_index = 0;
   OrbitCamera camera;
   ViewOptions options;
+  ViewPreferences preferences;
 };
 struct CaptureSettings {
   std::string source_path;
@@ -62,6 +64,7 @@ struct WorkspaceSettings {
   std::vector<SlotSettings> slots;
   std::vector<CaptureSettings> captures;
   std::vector<std::string> recent_files;
+  ViewPreferences default_preferences;
 };
 struct WorkspaceLimits {
   std::size_t max_slots = 32, max_captures = 256, max_recent_files = 32;
@@ -93,6 +96,8 @@ public:
   const Document &document() const noexcept;
   OrbitCamera &camera() noexcept;
   const OrbitCamera &camera() const noexcept;
+  ViewPreferences &preferences() noexcept;
+  const ViewPreferences &preferences() const noexcept;
   bool camera_ready() const noexcept;
   void set_camera_ready(bool value = true) noexcept;
   std::optional<SlotLock> lock_reason() const noexcept;
@@ -154,6 +159,10 @@ public:
   std::vector<WorkspaceSlot *> slots();
   std::vector<const WorkspaceSlot *> slots() const;
   const std::vector<std::string> &recent_files() const noexcept;
+  const ViewPreferences &default_preferences() const noexcept;
+  // Applies only to future empty/source slots without a verified saved view.
+  // Invalid values throw before changing defaults or any existing slot.
+  void set_default_preferences(ViewPreferences);
   void remember_recent(std::string utf8_path);
   BookmarkId add_bookmark(SlotId, std::string name, bool include_camera = true);
   bool remove_bookmark(SlotId, BookmarkId);

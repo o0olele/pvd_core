@@ -164,6 +164,11 @@ struct Frame {
   // change handedness.
   std::map<std::uint64_t, Vec3> origin_shifts;
 };
+struct GeometryExtraction {
+  ObjectKey source;
+  std::optional<Geometry> geometry;
+  std::vector<Diagnostic> diagnostics;
+};
 PVD_RENDER_API Vec3 rotate(const Quat &rotation, const Vec3 &point);
 PVD_RENDER_API Vec3 transform_point(const Transform &pose, const Vec3 &point);
 PVD_RENDER_API Transform compose(const Transform &parent,
@@ -183,6 +188,11 @@ public:
   Extractor &operator=(const Extractor &) = delete;
   PVD_RENDER_API Frame extract(const Metadata &, const Snapshot &,
                                ExtractOptions options = {});
+  // Decode an actual recorded geometry object without actor/shape ownership.
+  // Useful for scene-query volumes. Reuses this extractor's validated resource
+  // cache and budgets; stale generations fail without inventing scene objects.
+  PVD_RENDER_API GeometryExtraction extract_geometry(const Metadata &,
+      const Snapshot &, ObjectKey);
   PVD_RENDER_API void clear_cache() noexcept;
   PVD_RENDER_API CacheStats cache_stats() const noexcept;
 
