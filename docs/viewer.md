@@ -45,6 +45,14 @@ cmake --build build-physx34 --config Debug --parallel 4
 
 关闭 `PVD_BUILD_TRANSPORT` 时仍可构建完整离线查看器，界面不会显示实时采集入口。
 
+## 保存与裁剪
+
+**Save / crop** 或 Ctrl+S 打开保存面板，可保存当前完整安全事件前缀，或选择当前 scene 的原生帧范围（含首尾，界面从 1 开始）。同一全局事件区间内其他 scene/stream 的数据仍保留。裁剪会重建起点元数据、活动对象和属性，不复制全部旧运动历史来冒充裁剪。
+
+任务在后台准备和写出，界面显示实际阶段、耗时、取消请求及最终事件/字节数量。任务期间源 Session 不追加或替换；在线接收和直接 raw 录制独立继续，视图在保存后追上新数据。不能把快照写到正在使用的 raw 录制文件路径。取消、写出失败和被拒绝的覆盖均保持已有目标文件不变。
+
+内存裁剪只合成起点字典和活动分配，累计/峰值从该基线重新计数，allocation generation 在新录制内重基。默认拒绝不完整内存源；显式允许 partial 时仅接受已有分配未被观察到的 free，并把警告写进标准 ErrorMessage，重开后仍可在 Errors 查看。CPU 裁剪保留未闭合 scope 和最新计数器，跨包 stop 不丢失。详情见 [保存 API](saving.md) 和 [分析状态重建](crop-analysis.md)。
+
 ## 工程分析工作区
 
 顶部 **Scene / Profiler / Memory / Errors** 切换工作区。分析通过可选的 `pvd::analysis` 库提供；关闭 `PVD_BUILD_ANALYSIS` 时仍可使用场景查看及实时采集。
@@ -81,6 +89,8 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 `analysis_panels` 通过真实 ImGui widget 验证历史前缀切换、分页、错误过滤及 1440/1060 宽度布局。`analysis_panels_physx34` 读取真实 memory/error 捕获。`viewer_profile_gpu`、`viewer_memory_gpu`、`viewer_errors_gpu` 渲染实际分析工作区并保存 GPU backbuffer 截图，路径为 `build-physx34/fixtures/viewer-{profile,memory,errors}.png`；JSON 同名。
 
 `curve_panels` / `curve_panels_physx34` 使用真实 ImGui 鼠标输入验证点选定位、缩放、scene/sample mode、生命周期、CSV 按钮及窄布局。`viewer_curves_gpu` / `viewer_diff_gpu` 渲染真实物理捕获的曲线和状态差异，输出 `viewer-curves.png` / `viewer-diff.png`。
+
+`export_job` 验证真实异步写出、覆盖保护、取消、安全尾及两种分析 provider。`viewer_export_gpu` 通过真实窗口后台任务保存整份录制和第 3–15 帧，重开并与源结束前缀逐状态核对；最新输出索引为 `viewer-export-latest.json`。`viewer_live_gpu` 还在接收期间独立保存快照并核对其原始前缀，同时验证完整 TCP 录制继续写完。
 
 这些是程序内模型及渲染验证，未替代系统鼠标、文件对话框及高 DPI 多显示器的人工交互验收。性能、内存、曲线、工程剪辑和旧版容器等完整应用功能按 [实施清单](application-roadmap.md) 继续建设。
 

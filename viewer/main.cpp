@@ -1,6 +1,7 @@
 #include "model.hpp"
 #include "panels.hpp"
 #include "renderer.hpp"
+#include "export_panel.hpp"
 #ifdef PVD_VIEWER_HAS_ANALYSIS
 #include "analysis_panels.hpp"
 #include "curve_panels.hpp"
@@ -35,9 +36,13 @@ namespace {
 struct Options {
     std::filesystem::path capture, screenshot, report;
     std::filesystem::path recording, ready;
+    std::filesystem::path live_snapshot;
+    std::filesystem::path output;
     bool smoke = false, warp = false, hidden = false;
     bool live_smoke = false;
     bool analysis_smoke = false;
+    bool export_smoke = false;
+    std::size_t crop_first = 0, crop_last = 0;
     int analysis_page = 0;
     int listen_port = -1;
 };
@@ -77,6 +82,12 @@ Options arguments() {
             };
             if (a == L"--smoke") { result.smoke = true; result.capture = value(); }
             else if (a == L"--analysis-smoke") { result.analysis_smoke=true; result.capture=value(); result.analysis_page=1; }
+            else if(a==L"--export-smoke"){result.export_smoke=true;result.capture=value();}
+            else if(a==L"--output")result.output=value();
+            else if(a==L"--crop"){
+                result.crop_first=std::stoull(value().wstring());result.crop_last=std::stoull(value().wstring());
+                if(!result.crop_first||result.crop_last<result.crop_first)throw std::runtime_error("Crop frames are inclusive and start at 1");
+            }
             else if (a == L"--page") {
                 const auto page=value().wstring();
                 if(page==L"profile")result.analysis_page=1;
@@ -93,6 +104,7 @@ Options arguments() {
             else if (a == L"--capture") result.capture = value();
             else if (a == L"--record") result.recording = value();
             else if (a == L"--ready") result.ready = value();
+            else if(a==L"--live-snapshot")result.live_snapshot=value();
             else if (a == L"--live-smoke") result.live_smoke = true;
             else if (a == L"--listen") {
                 const auto number=value().wstring(); std::size_t used=0;
@@ -105,6 +117,8 @@ Options arguments() {
         }
     } catch (...) { LocalFree(args); throw; }
     LocalFree(args);
+    if(unsigned(result.smoke)+unsigned(result.live_smoke)+unsigned(result.analysis_smoke)+unsigned(result.export_smoke)>1)throw std::runtime_error("Choose one smoke mode");
+    if(result.export_smoke&&result.output.empty())throw std::runtime_error("Export smoke requires --output");
     if (result.listen_port>=0 && !result.capture.empty()) throw std::runtime_error("Choose a file or a live listener as the initial source");
     if (result.live_smoke && (result.listen_port<0 || result.recording.empty())) throw std::runtime_error("Live smoke requires --listen and --record");
 #ifndef PVD_VIEWER_HAS_TRANSPORT
@@ -120,6 +134,7 @@ class App {
 public:
     explicit App(Options options) : options_(std::move(options)) {}
     ~App() {
+        export_job_.cancel();export_job_.wait();
 #ifdef PVD_VIEWER_HAS_TRANSPORT
         live_.stop();
 #endif
@@ -152,8 +167,15 @@ public:
         }
 #endif
         if (!options_.capture.empty()) {
-            if (options_.smoke || options_.analysis_smoke) { document_.open_file(utf8(options_.capture.wstring())); loaded(); }
+            if (options_.smoke || options_.analysis_smoke || options_.export_smoke) { document_.open_file(utf8(options_.capture.wstring())); loaded(); }
             else open(options_.capture);
+        }
+        if(options_.export_smoke){
+            ExportRequest request;request.destination=utf8(options_.output.wstring());
+            if(options_.crop_first){request.mode=ExportMode::native_frame_range;request.scene_id=document_.scene_id();request.first_native_frame=options_.crop_first-1;request.last_native_frame=options_.crop_last-1;}
+            export_job_.start(*document_.session(),request);export_status_visible_=true;export_popup_requested_=true;
+            export_panel_.source=document_.session();export_panel_.scene_id=document_.scene_id();export_panel_.mode=request.mode;
+            export_panel_.first_native_frame=static_cast<int>(request.first_native_frame+1);export_panel_.last_native_frame=static_cast<int>(request.last_native_frame+1);
         }
         const auto started = std::chrono::steady_clock::now();
         auto previous = started;
@@ -176,7 +198,7 @@ public:
             if (IsIconic(window_)) { std::this_thread::sleep_for(std::chrono::milliseconds(16)); continue; }
             auto now = std::chrono::steady_clock::now();
             document_.advance(std::min(0.1, std::chrono::duration<double>(now - previous).count())); previous = now;
-            if ((options_.smoke || options_.live_smoke || options_.analysis_smoke) && std::chrono::duration<double>(now - started).count() > 30)
+            if ((options_.smoke || options_.live_smoke || options_.analysis_smoke || options_.export_smoke) && std::chrono::duration<double>(now - started).count() > 30)
                 throw std::runtime_error("Viewer smoke test timed out");
             ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
             draw();
@@ -188,6 +210,7 @@ public:
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             ++host_frames_;
             if (options_.smoke) smoke_step();
+            else if(options_.export_smoke)export_smoke_step();
 #ifdef PVD_VIEWER_HAS_ANALYSIS
             else if(options_.analysis_smoke) analysis_smoke_step();
 #endif
@@ -197,7 +220,7 @@ public:
             else if (!options_.screenshot.empty() && document_.loaded() && host_frames_ > 8) {
                 screenshot(); options_.screenshot.clear();
             }
-            const HRESULT present = swapchain_->Present((options_.smoke || options_.live_smoke || options_.analysis_smoke) ? 0 : 1, 0);
+            const HRESULT present = swapchain_->Present((options_.smoke || options_.live_smoke || options_.analysis_smoke || options_.export_smoke) ? 0 : 1, 0);
             if (FAILED(present)) check(present, "Present frame");
             if (options_.live_smoke || present==DXGI_STATUS_OCCLUDED) std::this_thread::sleep_for(std::chrono::milliseconds(8));
         }
@@ -215,6 +238,9 @@ private:
     ComPtr<ID3D11RenderTargetView> backbuffer_;
     std::unique_ptr<Renderer> renderer_;
     Document document_;
+    ExportJob export_job_;
+    ExportPanelState export_panel_;
+    bool export_popup_requested_=false,export_status_visible_=false;
     OrbitCamera camera_;
     RenderOptions render_options_;
     PanelState panels_;
@@ -238,6 +264,7 @@ private:
     std::array<char,4096> capture_path_{};
     int capture_port_=5425;
     bool record_capture_=true, live_document_seen_=false, capture_setup_requested_=false;
+    bool live_snapshot_started_=false;
     std::chrono::steady_clock::time_point next_live_poll_{};
     std::size_t online_render_frames_=0, live_display_changes_=0;
     std::optional<std::size_t> last_live_event_count_;
@@ -354,8 +381,13 @@ private:
         c[ImGuiCol_TabHovered] = {0.12f,0.33f,0.35f,1};
         c[ImGuiCol_TabSelected] = {0.10f,0.28f,0.30f,1};
         c[ImGuiCol_TabSelectedOverline] = {0.24f,0.82f,0.72f,1};
+        c[ImGuiCol_TitleBg] = {0.06f,0.10f,0.14f,1};
+        c[ImGuiCol_TitleBgActive] = {0.08f,0.18f,0.20f,1};
+        c[ImGuiCol_PopupBg] = {0.063f,0.082f,0.110f,1};
+        c[ImGuiCol_ModalWindowDimBg] = {0,0,0,.62f};
     }
     void choose_file() {
+        if(export_job_.running()){error_="Wait for the export to finish or cancel it before opening another capture.";return;}
         std::wstring buffer(32768, L'\0');
         OPENFILENAMEW dialog{sizeof(OPENFILENAMEW)};
         dialog.hwndOwner = window_; dialog.lpstrFile = buffer.data(); dialog.nMaxFile = static_cast<DWORD>(buffer.size());
@@ -365,6 +397,7 @@ private:
         if (GetOpenFileNameW(&dialog)) { buffer.resize(wcslen(buffer.c_str())); open(buffer); }
     }
     void open(const std::filesystem::path& path) {
+        if(export_job_.running()){error_="The capture is being exported; wait or cancel before replacing it.";return;}
 #ifdef PVD_VIEWER_HAS_TRANSPORT
         if (live_.active()) { error_="Stop the live capture and wait for its remaining events before opening a file."; return; }
 #endif
@@ -376,6 +409,7 @@ private:
         });
     }
     void poll_load() {
+        if(export_job_.running())return;
         if (!pending_.valid() || pending_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
         try { document_ = std::move(*pending_.get()); loaded(); }
         catch (const std::exception& e) { error_ = e.what(); }
@@ -383,6 +417,7 @@ private:
     }
     void loaded() {
         fitted_ = false; panels_ = {}; renderer_->clear_mesh_cache();
+        export_panel_={};
 #ifdef PVD_VIEWER_HAS_ANALYSIS
         analysis_.reset();
         curves_.reset();
@@ -431,6 +466,7 @@ private:
     }
     void start_capture() {
         try {
+            if(export_job_.running())throw std::runtime_error("Wait for the export to finish before starting another capture");
             if (pending_.valid()) throw std::runtime_error("Wait for the file load to finish before listening");
             pvd::CaptureOptions options;
             options.address=capture_address_.data();
@@ -448,6 +484,7 @@ private:
         } catch (const std::exception& e) { error_=e.what(); }
     }
     void poll_live() {
+        if(export_job_.running())return;
         const auto now=std::chrono::steady_clock::now();
         if (now<next_live_poll_) return;
         next_live_poll_=now+std::chrono::milliseconds(100);
@@ -508,11 +545,16 @@ private:
     }
     void live_smoke_step() {
         const auto& status=live_.status();
+        if(!options_.live_snapshot.empty()&&!live_snapshot_started_&&status.state==pvd::CaptureState::receiving&&status.frame_count>=40&&document_.loaded()){
+            ExportRequest request;request.destination=utf8(options_.live_snapshot.wstring());
+            export_job_.start(*document_.session(),request);live_snapshot_started_=true;
+        }
         if (document_.loaded() && !document_.frame()->draws.empty() && status.state==pvd::CaptureState::receiving) {
             ++online_render_frames_;
             last_live_event_count_=document_.frame()->snapshot.event_count;
         }
         if (!status.terminal() || live_.active() || !live_.caught_up()) return;
+        if(export_job_.running())return;
         if (status.state!=pvd::CaptureState::completed || !status.errors.empty() || !live_.error().empty())
             throw std::runtime_error("Live GPU capture did not finish cleanly");
         if (online_render_frames_<3 || live_display_changes_<2 || !renderer_->stats().triangles)
@@ -522,13 +564,25 @@ private:
         Document replay; replay.open_file(utf8(options_.recording.wstring()));
         if (!replay.session() || replay.session()->event_count()!=document_.session()->event_count() || replay.scenes().size()!=document_.scenes().size())
             throw std::runtime_error("Live recording cannot be reopened with identical indices");
+        std::size_t snapshot_events=0;
+        if(!options_.live_snapshot.empty()){
+            if(!live_snapshot_started_||export_job_.status().stage!=ExportStage::completed)throw std::runtime_error("Live snapshot export did not complete");
+            Document snapshot;snapshot.open_file(utf8(options_.live_snapshot.wstring()));snapshot_events=snapshot.session()->event_count();
+            if(!snapshot_events||snapshot_events>=document_.session()->event_count())throw std::runtime_error("The snapshot was not captured during reception");
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+            const auto difference=pvd::analysis::diff_snapshots(document_.session()->snapshot_at_event(snapshot_events),snapshot.session()->latest());
+            if(!difference.complete||!difference.objects.empty()||!difference.cameras.empty()||!difference.origin_shifts.empty())throw std::runtime_error("Live snapshot changed source state");
+#endif
+        }
         if (!options_.screenshot.empty()) screenshot();
         if (!options_.report.empty()) {
             std::ofstream report(options_.report);
             report << "{\n  \"passed\":true,\n  \"state\":\"completed\",\n  \"online_render_frames\":" << online_render_frames_
                 << ",\n  \"live_display_changes\":" << live_display_changes_ << ",\n  \"wire_bytes\":" << status.wire_bytes
                 << ",\n  \"recorded_bytes\":" << status.recorded_bytes << ",\n  \"events\":" << status.event_count
-                << ",\n  \"frames\":" << status.frame_count << ",\n  \"reopened\":true\n}\n";
+                << ",\n  \"frames\":" << status.frame_count << ",\n  \"reopened\":true";
+            if(snapshot_events)report<<",\n  \"snapshot_events\":"<<snapshot_events;
+            report<<"\n}\n";
             if (!report) throw std::runtime_error("Cannot write live GPU smoke report");
         }
         quit_=true;
@@ -538,6 +592,7 @@ private:
         const auto& io = ImGui::GetIO();
         if (io.WantTextInput) return;
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) choose_file();
+        if(io.KeyCtrl&&ImGui::IsKeyPressed(ImGuiKey_S)&&document_.loaded())export_popup_requested_=true;
         if (!document_.loaded()) return;
         if (ImGui::IsKeyPressed(ImGuiKey_Space)) document_.set_playing(!document_.playback().playing);
         if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) { document_.set_playing(false); document_.step(-1); }
@@ -545,6 +600,60 @@ private:
         if (ImGui::IsKeyPressed(ImGuiKey_Home)) document_.set_frame(0);
         if (ImGui::IsKeyPressed(ImGuiKey_End) && !document_.timeline().empty()) document_.set_frame(document_.timeline().size()-1);
         if (ImGui::IsKeyPressed(ImGuiKey_F)) document_.fit_scene(camera_, viewport_size_.x / std::max(1.0f, viewport_size_.y));
+    }
+    std::optional<ExportDestination> choose_export_path(const char* name) {
+        std::wstring buffer(32768,L'\0');const auto initial=std::filesystem::u8path(name).wstring();std::copy(initial.begin(),initial.end(),buffer.begin());
+        OPENFILENAMEW dialog{sizeof(OPENFILENAMEW)};dialog.hwndOwner=window_;dialog.lpstrFile=buffer.data();dialog.nMaxFile=static_cast<DWORD>(buffer.size());
+        dialog.lpstrFilter=L"PhysX raw capture (*.pxd2)\0*.pxd2\0All files\0*.*\0";dialog.lpstrDefExt=L"pxd2";dialog.lpstrTitle=L"Save raw capture";
+        dialog.Flags=OFN_PATHMUSTEXIST|OFN_OVERWRITEPROMPT|OFN_NOCHANGEDIR;
+        if(!GetSaveFileNameW(&dialog))return std::nullopt;
+        buffer.resize(wcslen(buffer.c_str()));
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        if(live_.active()&&record_capture_&&capture_path_[0]){
+            std::error_code ec;
+            if(std::filesystem::equivalent(std::filesystem::path(buffer),std::filesystem::u8path(capture_path_.data()),ec)&&!ec)
+                throw std::runtime_error("Choose a different path from the active raw recording.");
+        }
+#endif
+        return ExportDestination{utf8(buffer),std::filesystem::exists(std::filesystem::path(buffer))};
+    }
+    void export_popup() {
+        if(export_popup_requested_){ImGui::OpenPopup("Save / crop capture");export_popup_requested_=false;}
+        ImGui::SetNextWindowSize({660,530},ImGuiCond_Appearing);
+        if(!ImGui::BeginPopupModal("Save / crop capture",nullptr,ImGuiWindowFlags_None))return;
+        bool blocked=pending_.valid();
+        if(blocked){
+            ImGui::TextWrapped("Finish the current load before exporting this session.");
+            if(ImGui::Button("Close"))ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();return;
+        }
+        const auto result=draw_export_panel(document_,export_job_,export_panel_,[&](const char* name){return choose_export_path(name);});
+        if(result.started)export_status_visible_=true;
+        if(result.close_requested)ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    void export_smoke_step() {
+        if(host_frames_<6||export_job_.running())return;
+        const auto status=export_job_.status();
+        if(status.stage!=ExportStage::completed)throw std::runtime_error("Export failed: "+status.error);
+        Document replay;replay.open_file(utf8(options_.output.wstring()));
+        std::size_t expected_prefix=document_.session()->event_count();
+        if(options_.crop_first){
+            std::size_t seen=0;bool found=false;
+            for(const auto& f:document_.session()->frames())if(document_.scene_id()==f.scene_id){if(++seen==options_.crop_last){expected_prefix=f.event_count;found=true;break;}}
+            if(!found)throw std::runtime_error("Export smoke source frame was not found");
+        }
+        bool verified=false;
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+        const auto difference=pvd::analysis::diff_snapshots(document_.session()->snapshot_at_event(expected_prefix),replay.session()->latest());
+        if(!difference.complete||!difference.objects.empty()||!difference.cameras.empty()||!difference.origin_shifts.empty())throw std::runtime_error("Saved capture state differs from its source prefix");
+        verified=true;
+#endif
+        if(!options_.screenshot.empty())screenshot();
+        if(!options_.report.empty()){
+            std::ofstream report(options_.report);report<<"{\"passed\":true,\"state_verified\":"<<(verified?"true":"false")<<",\"events\":"<<replay.session()->event_count()<<",\"frames\":"<<replay.session()->frames().size()<<",\"bytes\":"<<status.result.bytes_written<<",\"warnings\":"<<status.warnings.size()<<"}\n";
+            if(!report)throw std::runtime_error("Cannot write export smoke report");
+        }quit_=true;
     }
 #ifdef PVD_VIEWER_HAS_ANALYSIS
     void export_csv(const char* name,const std::function<void(std::ostream&)>& writer) {
@@ -582,7 +691,7 @@ private:
         ImGui::Begin("PVD Studio##root", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::TextColored({0.28f,0.86f,0.75f,1}, "PVD"); ImGui::SameLine(); ImGui::TextUnformatted("STUDIO");
-        ImGui::SameLine(170); ImGui::BeginDisabled(pending_.valid()
+        ImGui::SameLine(170); ImGui::BeginDisabled(pending_.valid()||export_job_.running()
 #ifdef PVD_VIEWER_HAS_TRANSPORT
             || live_.active()
 #endif
@@ -592,11 +701,19 @@ private:
         ImGui::SameLine(); if (ImGui::Button("Live capture")) capture_setup_requested_=true;
         capture_setup();
 #endif
+        ImGui::SameLine();ImGui::BeginDisabled(!document_.loaded()||pending_.valid());
+        if(ImGui::Button("Save / crop"))export_popup_requested_=true;ImGui::EndDisabled();
+        export_popup();
         ImGui::SameLine();
         if (!loading_.empty()) ImGui::TextDisabled("Opening %s ...", loading_.c_str());
         else if (document_.loaded()) ImGui::TextDisabled("%s", std::filesystem::u8path(document_.source_label()).filename().u8string().c_str());
         else ImGui::TextDisabled("PhysX 3.4  /  capture viewer");
         ImGui::Separator();
+        if(export_status_visible_){
+            draw_export_progress(export_job_,true);
+            if(!export_job_.running()){ImGui::SameLine();if(ImGui::SmallButton("Dismiss export"))export_status_visible_=false;}
+            ImGui::Separator();
+        }
 #ifdef PVD_VIEWER_HAS_TRANSPORT
         capture_bar();
 #endif

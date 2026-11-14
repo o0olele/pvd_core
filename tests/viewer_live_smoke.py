@@ -14,9 +14,11 @@ def run(viewer: Path, producer: Path, fixtures: Path) -> None:
     report = directory / "report.json"
     screenshot = directory / "live.png"
     capture = directory / "received.pxd2"
+    snapshot = directory / "snapshot.pxd2"
     command = [str(viewer), "--listen", "0", "--record", str(capture),
                "--ready", str(ready), "--live-smoke", "--warp", "--hidden",
-               "--report", str(report), "--screenshot", str(screenshot)]
+               "--report", str(report), "--screenshot", str(screenshot),
+               "--live-snapshot", str(snapshot)]
     with subprocess.Popen(command, cwd=directory) as application:
         try:
             deadline = time.monotonic() + 12
@@ -39,6 +41,7 @@ def run(viewer: Path, producer: Path, fixtures: Path) -> None:
             assert result["frames"] == 240, result
             assert result["recorded_bytes"] == capture.stat().st_size == result["wire_bytes"], result
             assert result["reopened"] and result["online_render_frames"] >= 3, result
+            assert 0 < result["snapshot_events"] < result["events"] and snapshot.stat().st_size > 1000, result
             assert screenshot.stat().st_size > 10000
             # Stable pointers to the latest unique output; recordings remain exclusive.
             (fixtures / "viewer-live-latest.json").write_text(json.dumps({
