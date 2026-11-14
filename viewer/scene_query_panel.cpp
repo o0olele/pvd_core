@@ -1,4 +1,5 @@
 #include "scene_query_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include "renderer.hpp"
 #include <algorithm>
@@ -177,7 +178,7 @@ void hit_details(Document &doc, SceneQueryPanelState &s, const SceneQueryHit &h,
 }
 void auxiliary(const SceneQuery &q) {
   if (!q.filter_data.empty() && ImGui::TreeNode("Recorded filter data")) {
-    ImGui::BeginChild("filter data", {0, 120}, ImGuiChildFlags_Borders);
+    ImGui::BeginChild("filter data", {0, ui_pixels(120)}, ImGuiChildFlags_Borders);
     ImGuiListClipper clip;
     clip.Begin(static_cast<int>(q.filter_data.size()));
     while (clip.Step())
@@ -190,7 +191,7 @@ void auxiliary(const SceneQuery &q) {
     ImGui::TreePop();
   }
   if (!q.poses.empty() && ImGui::TreeNode("Recorded poses")) {
-    ImGui::BeginChild("poses", {0, 150}, ImGuiChildFlags_Borders);
+    ImGui::BeginChild("poses", {0, ui_pixels(150)}, ImGuiChildFlags_Borders);
     // Fixed two-line height keeps the auxiliary list virtualized.
     ImGuiListClipper clip;
     clip.Begin(static_cast<int>(q.poses.size()),
@@ -209,7 +210,7 @@ void auxiliary(const SceneQuery &q) {
   if (!q.geometries.empty() && ImGui::TreeNode("Recorded query geometry")) {
     ImGui::TextWrapped(
         "Geometry belongs to this publication, not an invented actor.");
-    ImGui::BeginChild("geometries", {0, 180}, ImGuiChildFlags_Borders);
+    ImGui::BeginChild("geometries", {0, ui_pixels(180)}, ImGuiChildFlags_Borders);
     ImGuiListClipper clip;
     clip.Begin(static_cast<int>(q.geometries.size()),
                ImGui::GetTextLineHeightWithSpacing() * 3);
@@ -313,17 +314,17 @@ void drawSceneQueries(Document &doc, OrbitCamera &camera,
   int type = state.kind_filter ? static_cast<int>(*state.kind_filter) + 1 : 0;
   int batch = state.batched_filter ? (*state.batched_filter ? 2 : 1) : 0;
   ImGui::SetNextItemWidth(
-      std::min(160.f, ImGui::GetContentRegionAvail().x - 55));
+      std::min(ui_pixels(160.f), ImGui::GetContentRegionAvail().x - ui_pixels(55)));
   if (ImGui::Combo("Kind", &type, "All kinds\0Raycast\0Sweep\0Overlap\0"))
     state.kind_filter = type ? std::optional<SceneQueryKind>(
                                    static_cast<SceneQueryKind>(type - 1))
                              : std::nullopt;
   ImGui::SetNextItemWidth(
-      std::min(160.f, ImGui::GetContentRegionAvail().x - 55));
+      std::min(ui_pixels(160.f), ImGui::GetContentRegionAvail().x - ui_pixels(55)));
   if (ImGui::Combo("Mode", &batch, "Native + Batch\0Native\0Batch\0"))
     state.batched_filter =
         batch ? std::optional<bool>(batch == 2) : std::nullopt;
-  ImGui::SetNextItemWidth(std::max(1.f, ImGui::GetContentRegionAvail().x));
+  ImGui::SetNextItemWidth(std::max(ui_pixels(1.f), ImGui::GetContentRegionAvail().x));
   ImGui::InputTextWithHint("##query-search",
                            "Filter type, raw ID, array or flags",
                            state.text_filter.data(), state.text_filter.size());
@@ -354,7 +355,7 @@ void drawSceneQueries(Document &doc, OrbitCamera &camera,
     state.selected_hit.reset();
     state.cached_selection = selection;
   }
-  ImGui::BeginChild("Scene query rows", {0, 190}, ImGuiChildFlags_Borders);
+  ImGui::BeginChild("Scene query rows", {0, ui_pixels(190)}, ImGuiChildFlags_Borders);
   ImGuiListClipper clip;
   clip.Begin(static_cast<int>(state.matching_queries.size()));
   while (clip.Step())
@@ -453,8 +454,8 @@ void drawSceneQueries(Document &doc, OrbitCamera &camera,
                             ImGuiTableFlags_BordersInnerH |
                                 ImGuiTableFlags_ScrollY |
                                 ImGuiTableFlags_SizingStretchProp,
-                            {0, 170})) {
-        ImGui::TableSetupColumn("Hit", ImGuiTableColumnFlags_WidthFixed, 35);
+                            {0, ui_pixels(170)})) {
+        ImGui::TableSetupColumn("Hit", ImGuiTableColumnFlags_WidthFixed, ui_pixels(35));
         ImGui::TableSetupColumn("Actor / shape source IDs",
                                 ImGuiTableColumnFlags_WidthStretch, .65f);
         ImGui::TableSetupColumn("Role / distance",

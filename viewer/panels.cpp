@@ -1,4 +1,5 @@
 ﻿#include "panels.hpp"
+#include "ui_scale.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -482,7 +483,7 @@ void object_categories(Document &doc, PanelState &state,
             "##class-objects", 2,
             ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
                 ImGuiTableFlags_SizingStretchProp,
-            {0, std::min(165.f, ImGui::GetFrameHeightWithSpacing() *
+            {0, std::min(ui_pixels(165), ImGui::GetFrameHeightWithSpacing() *
                                     static_cast<float>(count + 1))})) {
       ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("ID / generation",
@@ -637,7 +638,7 @@ std::string propertyValueText(const PropertyValue &value, std::size_t item,
 void drawEmptyState(const char *title, const char *description) {
   auto avail = ImGui::GetContentRegionAvail();
   ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                       std::max(0.0f, (avail.y - 60.0f) * .35f));
+                       std::max(0.0f, (avail.y - ui_pixels(60)) * .35f));
   ImGui::TextUnformatted(title);
   ImGui::Spacing();
   ImGui::PushStyleColor(ImGuiCol_Text,
@@ -803,14 +804,14 @@ void drawInspector(Document &doc, PanelState &state) {
     if (ImGui::SmallButton("Inspector settings"))
       ImGui::OpenPopup("Inspector preferences");
     ImGui::SetNextWindowSizeConstraints(
-        {280, 0},
-        {std::max(280.f, std::min(440.f, ImGui::GetIO().DisplaySize.x - 16)),
+        {ui_pixels(280), 0},
+        {std::max(ui_pixels(280), std::min(ui_pixels(440), ImGui::GetIO().DisplaySize.x - ui_pixels(16))),
          std::numeric_limits<float>::max()});
     if (ImGui::BeginPopup("Inspector preferences")) {
       auto &preferences = state.inspector_preferences;
       bool changed = false;
       int format = static_cast<int>(preferences.number_format);
-      ImGui::SetNextItemWidth(180);
+      ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::Combo("Number format", &format,
                        "General\0Scientific\0Fixed\0")) {
         preferences.number_format = static_cast<NumberFormat>(format);
@@ -818,12 +819,12 @@ void drawInspector(Document &doc, PanelState &state) {
       }
       int fp = static_cast<int>(preferences.float_precision),
           dp = static_cast<int>(preferences.double_precision);
-      ImGui::SetNextItemWidth(180);
+      ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::SliderInt("Float precision", &fp, 1, 17)) {
         preferences.float_precision = static_cast<unsigned>(fp);
         changed = true;
       }
-      ImGui::SetNextItemWidth(180);
+      ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::SliderInt("Double precision", &dp, 1, 17)) {
         preferences.double_precision = static_cast<unsigned>(dp);
         changed = true;
@@ -837,7 +838,7 @@ void drawInspector(Document &doc, PanelState &state) {
       for (int i = 0; i < 4; ++i)
         if (preferences.array_page_size == groups[i])
           group = i;
-      ImGui::SetNextItemWidth(180);
+      ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::Combo("Array group size", &group,
                        "32\0"
                        "128\0"
@@ -912,7 +913,7 @@ void drawTimeline(Document &doc, PanelState &state) {
       if (doc.scene_id() && scene.key.id == *doc.scene_id())
         current_scene = scene_label(scene);
     const auto width = ImGui::GetContentRegionAvail().x;
-    ImGui::SetNextItemWidth(width > 850 ? 180.0f : 150.0f);
+    ImGui::SetNextItemWidth(width > ui_pixels(850) ? ui_pixels(180) : ui_pixels(150));
     if (ImGui::BeginCombo("##scene", clipped(current_scene).c_str())) {
       for (const auto &scene : doc.scenes()) {
         IdScope id(std::to_string(scene.key.id));
@@ -926,7 +927,7 @@ void drawTimeline(Document &doc, PanelState &state) {
     tooltip("Recorded scene");
     ImGui::SameLine();
     const bool after = doc.sample_point() == SamplePoint::after_fetch;
-    ImGui::SetNextItemWidth(width > 850 ? 150.0f : 135.0f);
+    ImGui::SetNextItemWidth(width > ui_pixels(850) ? ui_pixels(150) : ui_pixels(135));
     if (ImGui::BeginCombo("##sample-point",
                           after ? "After simulation" : "Frame end")) {
       if (ImGui::Selectable("Frame end", !after))
@@ -945,8 +946,8 @@ void drawTimeline(Document &doc, PanelState &state) {
     const auto total = doc.timeline().size();
     // Keep the fixed-height host panel to three rows at the supported window
     // sizes.
-    if (width > 850)
-      ImGui::SameLine(0, 16);
+    if (width > ui_pixels(850))
+      ImGui::SameLine(0, ui_pixels(16));
     {
       DisabledScope disabled(total == 0);
       if (ImGui::Button("First"))
@@ -971,7 +972,7 @@ void drawTimeline(Document &doc, PanelState &state) {
           p.loop = loop;
           doc.set_playback(p);
         });
-      if (width > 500)
+      if (width > ui_pixels(500))
         ImGui::SameLine();
       bool reverse = doc.playback().frames_per_second < 0;
       if (ImGui::Checkbox("Reverse", &reverse))
@@ -981,11 +982,11 @@ void drawTimeline(Document &doc, PanelState &state) {
               std::abs(p.frames_per_second) * (reverse ? -1 : 1);
           doc.set_playback(p);
         });
-      if (width > 900) {
+      if (width > ui_pixels(900)) {
         ImGui::SameLine();
         float fps =
             static_cast<float>(std::abs(doc.playback().frames_per_second));
-        ImGui::SetNextItemWidth(80);
+        ImGui::SetNextItemWidth(ui_pixels(80));
         if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
                              ImGuiSliderFlags_AlwaysClamp))
           command(state, [&] {
@@ -1016,12 +1017,12 @@ void drawTimeline(Document &doc, PanelState &state) {
           tooltip(
               "Captured marker interval, not an inferred simulation timestep.");
         }
-      if (width <= 900) {
-        if (width > 650)
+      if (width <= ui_pixels(900)) {
+        if (width > ui_pixels(650))
           ImGui::SameLine();
         float fps =
             static_cast<float>(std::abs(doc.playback().frames_per_second));
-        ImGui::SetNextItemWidth(65);
+        ImGui::SetNextItemWidth(ui_pixels(65));
         if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
                              ImGuiSliderFlags_AlwaysClamp))
           command(state, [&] {

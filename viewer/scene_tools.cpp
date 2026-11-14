@@ -1,4 +1,5 @@
 #include "scene_tools.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <stdexcept>
@@ -71,7 +72,7 @@ void drawSceneTools(Document &doc, OrbitCamera &camera, SceneToolState &state) {
   int mode = static_cast<int>(options.color_mode);
   const char *modes[] = {"Recorded / status", "Actor kind", "Geometry kind",
                          "Actor lifetime", "Uniform"};
-  ImGui::SetNextItemWidth(std::min(220.f, ImGui::GetContentRegionAvail().x));
+  ImGui::SetNextItemWidth(std::min(ui_pixels(220.f), ImGui::GetContentRegionAvail().x));
   if (ImGui::Combo("Color mode", &mode, modes, 5))
     action(state, [&] {
       options.color_mode = static_cast<ColorMode>(mode);
@@ -98,7 +99,7 @@ void drawSceneTools(Document &doc, OrbitCamera &camera, SceneToolState &state) {
   ImGui::PushID("color-legend");
   for (const auto &entry : view_legend(options)) {
     ImGui::ColorButton(entry.label.c_str(), rgba(entry.color),
-                       ImGuiColorEditFlags_NoTooltip, {12, 12});
+                       ImGuiColorEditFlags_NoTooltip, {ui_pixels(12), ui_pixels(12)});
     ImGui::SameLine();
     ImGui::TextUnformatted(entry.label.c_str());
   }
@@ -140,7 +141,7 @@ void drawSceneTools(Document &doc, OrbitCamera &camera, SceneToolState &state) {
     ImGui::TextWrapped(
         "Tracking active; orbit, zoom and pan offsets are retained.");
   ImGui::TextWrapped("%s", state.message.c_str());
-  ImGui::SetNextItemWidth(std::min(220.f, ImGui::GetContentRegionAvail().x));
+  ImGui::SetNextItemWidth(std::min(ui_pixels(220.f), ImGui::GetContentRegionAvail().x));
   if (ImGui::BeginCombo("Recorded camera",
                         state.recorded_camera.empty()
                             ? "Choose captured camera"

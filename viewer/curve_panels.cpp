@@ -1,4 +1,5 @@
 #include "curve_panels.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <array>
@@ -296,10 +297,10 @@ struct CurvePanels::Impl {
       ImGui::TextWrapped("Select an object in the Inspector, or enter its "
                          "hexadecimal ID and generation.");
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x * .5f));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x * .5f));
     ImGui::InputText("Object ID (hex)", object_input.data(),
                      object_input.size(), ImGuiInputTextFlags_CharsHexadecimal);
-    ImGui::SetNextItemWidth(120);
+    ImGui::SetNextItemWidth(ui_pixels(120));
     ImGui::InputScalar("Generation", ImGuiDataType_U64, &generation);
     std::uint64_t id = 0;
     const bool valid = parse_hex(object_input.data(), id);
@@ -307,7 +308,9 @@ struct CurvePanels::Impl {
                            ? properties(d, id)
                            : std::vector<std::pair<std::string, std::string>>{};
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 80));
+        std::max(ui_pixels(100), ImGui::GetContentRegionAvail().x -
+                                    ImGui::CalcTextSize("Property").x -
+                                    ImGui::GetStyle().ItemInnerSpacing.x));
     if (ImGui::BeginCombo("Property", property_input[0]
                                           ? property_input.data()
                                           : "Choose recorded property")) {
@@ -323,7 +326,9 @@ struct CurvePanels::Impl {
       ImGui::EndCombo();
     }
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 105));
+        std::max(ui_pixels(100), ImGui::GetContentRegionAvail().x -
+                                    ImGui::CalcTextSize("Property name").x -
+                                    ImGui::GetStyle().ItemInnerSpacing.x));
     ImGui::InputText("Property name", property_input.data(),
                      property_input.size());
     std::vector<std::string> cs{"value"};
@@ -333,7 +338,9 @@ struct CurvePanels::Impl {
         break;
       }
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 105));
+        std::max(ui_pixels(100), ImGui::GetContentRegionAvail().x -
+                                    ImGui::CalcTextSize("Component").x -
+                                    ImGui::GetStyle().ItemInnerSpacing.x));
     if (ImGui::BeginCombo("Component", component_input[0]
                                            ? component_input.data()
                                            : "value")) {
@@ -344,10 +351,12 @@ struct CurvePanels::Impl {
       ImGui::EndCombo();
     }
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 105));
+        std::max(ui_pixels(100), ImGui::GetContentRegionAvail().x -
+                                    ImGui::CalcTextSize("Component path").x -
+                                    ImGui::GetStyle().ItemInnerSpacing.x));
     ImGui::InputText("Component path", component_input.data(),
                      component_input.size());
-    ImGui::SetNextItemWidth(120);
+    ImGui::SetNextItemWidth(ui_pixels(120));
     ImGui::InputScalar("Array item", ImGuiDataType_U64, &item);
     ImGui::BeginDisabled(!valid || property_input[0] == 0 ||
                          entries.size() >= series_limit);
@@ -370,10 +379,10 @@ struct CurvePanels::Impl {
     if (ImGui::BeginTable("Curve list", 4,
                           ImGuiTableFlags_SizingFixedFit |
                               ImGuiTableFlags_BordersInnerH)) {
-      ImGui::TableSetupColumn("Show", 0, 35);
-      ImGui::TableSetupColumn("Color", 0, 30);
+      ImGui::TableSetupColumn("Show", 0, ui_pixels(35));
+      ImGui::TableSetupColumn("Color", 0, ui_pixels(30));
       ImGui::TableSetupColumn("Series", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Remove", 0, 22);
+      ImGui::TableSetupColumn("Remove", 0, ui_pixels(22));
       std::optional<std::size_t> remove;
       for (std::size_t i = 0; i < entries.size(); ++i) {
         auto &e = entries[i];
@@ -479,10 +488,10 @@ struct CurvePanels::Impl {
       return;
     }
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    const float width = std::max(160.f, ImGui::GetContentRegionAvail().x),
-                height = 260;
-    const ImVec2 lo{start.x + 55, start.y + 12},
-        hi{start.x + width - 12, start.y + height - 30};
+    const float width = std::max(ui_pixels(160.f), ImGui::GetContentRegionAvail().x),
+                height = ui_pixels(260);
+    const ImVec2 lo{start.x + ui_pixels(55), start.y + ui_pixels(12)},
+        hi{start.x + width - ui_pixels(12), start.y + height - ui_pixels(30)};
     plot = {lo.x, lo.y, hi.x - lo.x, hi.y - lo.y, xlo,
             xhi,  ylo,  yhi,         time_axis,   true};
     ImGui::InvisibleButton("Curve canvas", {width, height},
@@ -514,7 +523,7 @@ struct CurvePanels::Impl {
     if (ImGui::IsItemActive() && plot_pressed) {
       const float dx = io.MousePos.x - press_pos.x,
                   dy = io.MousePos.y - press_pos.y;
-      if (dx * dx + dy * dy > 16)
+      if (dx * dx + dy * dy > ui_pixels(4) * ui_pixels(4))
         plot_dragged = true;
       if (plot_dragged) {
         const double shift =
@@ -558,15 +567,15 @@ struct CurvePanels::Impl {
                   {hi.x, lo.y + (hi.y - lo.y) * t}, IM_COL32(53, 61, 70, 255));
       char label[48];
       std::snprintf(label, sizeof label, "%.4g", yhi - (yhi - ylo) * t);
-      dl->AddText({start.x, lo.y + (hi.y - lo.y) * t - 6},
+      dl->AddText({start.x, lo.y + (hi.y - lo.y) * t - ui_pixels(6)},
                   IM_COL32(180, 185, 195, 255), label);
       std::snprintf(label, sizeof label, "%.4g", xlo + (xhi - xlo) * t);
-      dl->AddText({lo.x + (hi.x - lo.x) * t - 10, hi.y + 4},
+      dl->AddText({lo.x + (hi.x - lo.x) * t - ui_pixels(10), hi.y + ui_pixels(4)},
                   IM_COL32(180, 185, 195, 255), label);
     }
     dl->AddRect(lo, hi, IM_COL32(100, 111, 125, 255));
     dl->PushClipRect(lo, hi, true);
-    float nearest = 100;
+    float nearest = ui_pixels(10) * ui_pixels(10);
     std::optional<std::pair<std::size_t, std::size_t>> nearest_sample;
     for (std::size_t ei = 0; ei < entries.size(); ++ei) {
       const auto &e = entries[ei];
@@ -594,12 +603,12 @@ struct CurvePanels::Impl {
         ImVec2 p{lo.x + static_cast<float>(px) * (hi.x - lo.x),
                  hi.y - static_cast<float>(py) * (hi.y - lo.y)};
         if (previous && !s.break_before)
-          dl->AddLine(*previous, p, color, 1.8f);
+          dl->AddLine(*previous, p, color, ui_pixels(1.8f));
         previous = p;
         if (*x >= xlo && *x <= xhi && y >= ylo && y <= yhi) {
           ++curve_visible;
           if (e.data.samples.size() <= 200)
-            dl->AddCircleFilled(p, 3, color);
+            dl->AddCircleFilled(p, ui_pixels(3), color);
           const float dx = p.x - io.MousePos.x, dy = p.y - io.MousePos.y,
                       dist = dx * dx + dy * dy;
           if (dist < nearest) {
@@ -607,7 +616,7 @@ struct CurvePanels::Impl {
             nearest_sample = {{ei, si}};
           }
           if (selected_sample == std::make_optional(std::make_pair(ei, si)))
-            dl->AddCircle(p, 6, IM_COL32_WHITE, 0, 1.5f);
+            dl->AddCircle(p, ui_pixels(6), IM_COL32_WHITE, 0, ui_pixels(1.5f));
         }
       }
     }
@@ -655,15 +664,15 @@ struct CurvePanels::Impl {
     if (ImGui::SmallButton("Fit view"))
       manual_x = false;
     if (!auto_y) {
-      ImGui::SetNextItemWidth(110);
+      ImGui::SetNextItemWidth(ui_pixels(110));
       ImGui::InputDouble("Y min", &ylo, 0, 0, "%.6g");
       ImGui::SameLine();
-      ImGui::SetNextItemWidth(110);
+      ImGui::SetNextItemWidth(ui_pixels(110));
       ImGui::InputDouble("Y max", &yhi, 0, 0, "%.6g");
     }
     if (ImGui::CollapsingHeader("Sampling budget")) {
       int n = static_cast<int>(max_samples);
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputInt("Max samples / curve", &n)) {
         max_samples = static_cast<std::size_t>(std::clamp(n, 1, 20000));
       }
@@ -746,14 +755,14 @@ struct CurvePanels::Impl {
     }
     std::uint64_t ai = static_cast<std::uint64_t>(std::min(diff_a, n - 1)) + 1,
                   bi = static_cast<std::uint64_t>(std::min(diff_b, n - 1)) + 1;
-    ImGui::SetNextItemWidth(110);
+    ImGui::SetNextItemWidth(ui_pixels(110));
     if (ImGui::InputScalar("A frame", ImGuiDataType_U64, &ai)) {
       diff_a =
           static_cast<std::size_t>(std::clamp<std::uint64_t>(ai, 1, n) - 1);
       diff_dirty = true;
     }
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110);
+    ImGui::SetNextItemWidth(ui_pixels(110));
     if (ImGui::InputScalar("B frame", ImGuiDataType_U64, &bi)) {
       diff_b =
           static_cast<std::size_t>(std::clamp<std::uint64_t>(bi, 1, n) - 1);
@@ -818,12 +827,12 @@ struct CurvePanels::Impl {
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_ScrollY |
                               ImGuiTableFlags_SizingFixedFit,
-                          {0, 180})) {
-      ImGui::TableSetupColumn("Change", 0, 68);
+                          {0, ui_pixels(180)})) {
+      ImGui::TableSetupColumn("Change", 0, ui_pixels(68));
       ImGui::TableSetupColumn("Object / generation",
                               ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Properties", 0, 70);
-      ImGui::TableSetupColumn("Inspect", 0, 48);
+      ImGui::TableSetupColumn("Properties", 0, ui_pixels(70));
+      ImGui::TableSetupColumn("Inspect", 0, ui_pixels(48));
       ImGui::TableHeadersRow();
       const auto first = diff_page * page_size,
                  count = std::min(page_size, diff_rows - first);
@@ -894,7 +903,7 @@ struct CurvePanels::Impl {
                             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY |
                                 ImGuiTableFlags_SizingStretchProp,
-                            {0, 170})) {
+                            {0, ui_pixels(170)})) {
         ImGui::TableSetupColumn("Property");
         ImGui::TableSetupColumn("Before");
         ImGui::TableSetupColumn("After");

@@ -1,4 +1,5 @@
 #include "analysis_panels.hpp"
+#include "ui_scale.hpp"
 #include "pvd/profile.hpp"
 #include "pvd/memory.hpp"
 #include "pvd/errors.hpp"
@@ -107,14 +108,14 @@ struct AnalysisPanels::Impl {
   void profile_view(Document& doc,const CsvExport& save) {
     ImGui::TextUnformatted("CPU PROFILER");ImGui::SameLine();
     if(ImGui::Checkbox("Current frame",&profile_current)){profile_dirty=true;view_manual=false;}
-    ImGui::SameLine();ImGui::SetNextItemWidth(185);
+    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(185));
     const auto thread_name=thread?std::to_string(*thread):"All threads";
     if(ImGui::BeginCombo("##thread",thread_name.c_str())) {
       if(ImGui::Selectable("All threads",!thread)){thread.reset();profile_dirty=true;}
       for(auto id:threads)if(ImGui::Selectable(std::to_string(id).c_str(),thread&&*thread==id)){thread=id;profile_dirty=true;}
       ImGui::EndCombo();
     }
-    ImGui::SameLine();ImGui::SetNextItemWidth(190);
+    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(190));
     std::string zone_name="All zones";for(const auto& z:profile->zones())if(zone&&z.first.id==*zone)zone_name=z.second.name;
     if(ImGui::BeginCombo("##zone",zone_name.c_str())) {
       if(ImGui::Selectable("All zones",!zone)){zone.reset();profile_dirty=true;}
@@ -124,7 +125,7 @@ struct AnalysisPanels::Impl {
         ImGui::PopID();ImGui::PopID();
       }ImGui::EndCombo();
     }
-    ImGui::SetNextItemWidth(300);if(ImGui::InputTextWithHint("##profile-search","Filter event names...",profile_search.data(),profile_search.size()))profile_dirty=true;
+    ImGui::SetNextItemWidth(ui_pixels(300));if(ImGui::InputTextWithHint("##profile-search","Filter event names...",profile_search.data(),profile_search.size()))profile_dirty=true;
     ImGui::SameLine();if(ImGui::SmallButton("Fit timeline")){view_manual=false;profile_dirty=true;}
     pvd::profile::Query q;q.thread_id=thread;q.zone_id=zone;q.text=profile_search.data();
     q.end_event_count=prefix(doc,profile_current);
@@ -148,7 +149,7 @@ struct AnalysisPanels::Impl {
     if(ImGui::BeginTabBar("profile-pages")) {
       if(ImGui::BeginTabItem("Thread timeline")){timeline(doc);ImGui::EndTabItem();}
       if(ImGui::BeginTabItem("Summary")) {
-        if(ImGui::BeginTable("profile-summary",6,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_ScrollY|ImGuiTableFlags_Resizable,{0,ImGui::GetContentRegionAvail().y-60})){
+        if(ImGui::BeginTable("profile-summary",6,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_ScrollY|ImGuiTableFlags_Resizable,{0,ImGui::GetContentRegionAvail().y-ui_pixels(60)})){
           for(auto name:{"Event","Zone / thread","Count","Inclusive total","Mean","Max"})ImGui::TableSetupColumn(name);ImGui::TableHeadersRow();
           ImGuiListClipper clipper;clipper.Begin(static_cast<int>(aggregates.size()));
           while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto& a=aggregates[std::size_t(row)];ImGui::TableNextRow();ImGui::TableNextColumn();text(a.event_name);ImGui::TableNextColumn();text(a.zone_name+" / "+(a.thread_id?std::to_string(*a.thread_id):"all"));ImGui::TableNextColumn();ImGui::Text("%zu",a.count);ImGui::TableNextColumn();text(duration(a.total_nanoseconds));ImGui::TableNextColumn();text(duration(a.mean_nanoseconds));ImGui::TableNextColumn();text(duration(a.maximum_nanoseconds));}
@@ -156,7 +157,7 @@ struct AnalysisPanels::Impl {
         }ImGui::EndTabItem();
       }
       if(ImGui::BeginTabItem("Intervals")) {
-        if(ImGui::BeginTable("profile-intervals",5,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_ScrollY|ImGuiTableFlags_Resizable,{0,ImGui::GetContentRegionAvail().y-60})) {
+        if(ImGui::BeginTable("profile-intervals",5,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_ScrollY|ImGuiTableFlags_Resizable,{0,ImGui::GetContentRegionAvail().y-ui_pixels(60)})) {
           for(auto name:{"Event","Thread","Context","Duration","Source event"})ImGui::TableSetupColumn(name);ImGui::TableHeadersRow();
           ImGuiListClipper clipper;clipper.Begin(static_cast<int>(intervals.size()));
           while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto id=intervals[std::size_t(row)];const auto& e=profile->intervals()[id];ImGui::PushID(static_cast<int>(id));ImGui::TableNextRow();ImGui::TableNextColumn();if(ImGui::Selectable(profile->event_name(e.start_source.zone,e.event_id).c_str(),selected_interval&&*selected_interval==id,ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick)){selected_interval=id;if(ImGui::IsMouseDoubleClicked(0))jump(doc,e.stop_source.event_index);}ImGui::TableNextColumn();ImGui::Text("%u",e.thread_id);ImGui::TableNextColumn();text(hex(e.context_id));ImGui::TableNextColumn();text(duration(e.duration_nanoseconds));ImGui::TableNextColumn();ImGui::Text("%zu",e.stop_source.event_index);ImGui::PopID();}ImGui::EndTable();
@@ -172,27 +173,27 @@ struct AnalysisPanels::Impl {
   void timeline(Document& doc) {
     std::map<Lane,std::size_t> depths;
     for(auto i:intervals){const auto& e=profile->intervals()[i];depths[lane(e)]=std::max(depths[lane(e)],std::min<std::size_t>(e.depth,15)+1);}
-    std::map<Lane,float> lanes;float height=30;
-    for(const auto& lane:depths){lanes[lane.first]=height;height+=25+float(lane.second)*19;}
+    std::map<Lane,float> lanes;float height=ui_pixels(30);
+    for(const auto& lane:depths){lanes[lane.first]=height;height+=ui_pixels(25)+float(lane.second)*ui_pixels(19);}
     ImGui::TextDisabled("Wheel to zoom  |  Middle drag to pan  |  Double-click an interval to locate its received frame");
     ImGui::TextDisabled("Visible origin: %llu native ticks; axis is elapsed time from this origin",static_cast<unsigned long long>(view_begin));
-    ImGui::BeginChild("thread-timeline",{0,std::max(140.0f,ImGui::GetContentRegionAvail().y-90)},ImGuiChildFlags_Borders);
-    const auto origin=ImGui::GetCursorScreenPos();const float width=std::max(300.0f,ImGui::GetContentRegionAvail().x),gutter=240,graph=width-gutter;
+    ImGui::BeginChild("thread-timeline",{0,std::max(ui_pixels(140),ImGui::GetContentRegionAvail().y-ui_pixels(90))},ImGuiChildFlags_Borders);
+    const auto origin=ImGui::GetCursorScreenPos();const float width=std::max(ui_pixels(300),ImGui::GetContentRegionAvail().x),gutter=ui_pixels(240),graph=width-gutter;
     ImGui::InvisibleButton("timeline-canvas",{width,std::max(height,ImGui::GetContentRegionAvail().y)},ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonMiddle);
     auto* draw=ImGui::GetWindowDrawList();
     const long double span=std::max(1.0L,static_cast<long double>(view_end)-view_begin);
     auto x=[&](std::uint64_t t){return origin.x+gutter+float((static_cast<long double>(t)-view_begin)/span)*graph;};
-    for(int i=0;i<=5;++i){const float at=origin.x+gutter+graph*float(i)/5;draw->AddLine({at,origin.y},{at,origin.y+height},IM_COL32(42,55,70,255));auto label=duration(profile->nanoseconds(tick(span*i/5)));draw->AddText({at+3,origin.y},IM_COL32(115,139,160,255),label.c_str());}
-    for(const auto& entry:lanes){const auto label="T"+std::to_string(std::get<0>(entry.first))+"  "+profile->zone_name({std::get<1>(entry.first),std::get<2>(entry.first)})+" / "+hex(std::get<3>(entry.first));draw->PushClipRect(origin,{origin.x+gutter-5,origin.y+height},true);draw->AddText({origin.x,origin.y+entry.second},IM_COL32(195,213,225,255),label.c_str());draw->PopClipRect();}
+    for(int i=0;i<=5;++i){const float at=origin.x+gutter+graph*float(i)/5;draw->AddLine({at,origin.y},{at,origin.y+height},IM_COL32(42,55,70,255));auto label=duration(profile->nanoseconds(tick(span*i/5)));draw->AddText({at+ui_pixels(3),origin.y},IM_COL32(115,139,160,255),label.c_str());}
+    for(const auto& entry:lanes){const auto label="T"+std::to_string(std::get<0>(entry.first))+"  "+profile->zone_name({std::get<1>(entry.first),std::get<2>(entry.first)})+" / "+hex(std::get<3>(entry.first));draw->PushClipRect(origin,{origin.x+gutter-ui_pixels(5),origin.y+height},true);draw->AddText({origin.x,origin.y+entry.second},IM_COL32(195,213,225,255),label.c_str());draw->PopClipRect();}
     std::size_t painted=0;
     for(auto i:intervals){const auto& e=profile->intervals()[i];if(e.end_ticks<view_begin||e.begin_ticks>view_end)continue;if(++painted>100000)break;
-      const float y=origin.y+lanes[lane(e)]+float(std::min<std::size_t>(e.depth,15))*19;
-      if(y+17<ImGui::GetWindowPos().y||y>ImGui::GetWindowPos().y+ImGui::GetWindowHeight())continue;
-      const ImVec2 a{std::clamp(x(e.begin_ticks),origin.x+gutter,origin.x+width),y},b{std::clamp(std::max(x(e.end_ticks),a.x+2),a.x+2,origin.x+width+2),y+17};
+      const float y=origin.y+lanes[lane(e)]+float(std::min<std::size_t>(e.depth,15))*ui_pixels(19);
+      if(y+ui_pixels(17)<ImGui::GetWindowPos().y||y>ImGui::GetWindowPos().y+ImGui::GetWindowHeight())continue;
+      const ImVec2 a{std::clamp(x(e.begin_ticks),origin.x+gutter,origin.x+width),y},b{std::clamp(std::max(x(e.end_ticks),a.x+ui_pixels(2)),a.x+ui_pixels(2),origin.x+width+ui_pixels(2)),y+ui_pixels(17)};
       const auto color=ImColor::HSV(float((e.event_id*37u)%255u)/255.0f,.50f,.68f);
-      draw->AddRectFilled(a,b,color,2);
-      if(selected_interval&&*selected_interval==i)draw->AddRect(a,b,IM_COL32(255,218,90,255),2,0,2);
-      if(b.x-a.x>45){const auto label=profile->event_name(e.start_source.zone,e.event_id);draw->PushClipRect(a,b,true);draw->AddText({a.x+3,a.y},IM_COL32(245,248,250,255),label.c_str());draw->PopClipRect();}
+      draw->AddRectFilled(a,b,color,ui_pixels(2));
+      if(selected_interval&&*selected_interval==i)draw->AddRect(a,b,IM_COL32(255,218,90,255),ui_pixels(2),0,ui_pixels(2));
+      if(b.x-a.x>ui_pixels(45)){const auto label=profile->event_name(e.start_source.zone,e.event_id);draw->PushClipRect(a,b,true);draw->AddText({a.x+ui_pixels(3),a.y},IM_COL32(245,248,250,255),label.c_str());draw->PopClipRect();}
       if(ImGui::IsItemHovered()&&ImGui::IsMouseHoveringRect(a,b)){
         ImGui::SetTooltip("%s\n%s\nThread %u / context %s\n%llu native ticks",profile->event_name(e.start_source.zone,e.event_id).c_str(),duration(e.duration_nanoseconds).c_str(),e.thread_id,hex(e.context_id).c_str(),static_cast<unsigned long long>(e.duration_ticks));
         if(ImGui::IsMouseClicked(0))selected_interval=i;
@@ -208,27 +209,29 @@ struct AnalysisPanels::Impl {
   void memory_view(Document& doc,const CsvExport& save) {
     ImGui::TextUnformatted("MEMORY");ImGui::SameLine();if(ImGui::Checkbox("At current frame",&memory_current))memory_dirty=true;
     ImGui::SameLine();if(ImGui::Checkbox("Active only",&memory_filter.active_only)){memory_page=0;memory_dirty=true;}
-    ImGui::SetNextItemWidth(300);if(ImGui::InputTextWithHint("##memory-search","History filter: type, file, address...",memory_search.data(),memory_search.size())){memory_filter.text=memory_search.data();memory_page=0;memory_dirty=true;}
-    ImGui::SameLine();ImGui::SetNextItemWidth(200);const char* groups[]={"Type","File","File and line","Type, file and line"};if(ImGui::Combo("Group by",&group_by,groups,4))memory_dirty=true;
+    ImGui::SetNextItemWidth(ui_pixels(300));if(ImGui::InputTextWithHint("##memory-search","History filter: type, file, address...",memory_search.data(),memory_search.size())){memory_filter.text=memory_search.data();memory_page=0;memory_dirty=true;}
+    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(200));const char* groups[]={"Type","File","File and line","Type, file and line"};if(ImGui::Combo("Group by",&group_by,groups,4))memory_dirty=true;
     const auto count=prefix(doc,memory_current);if(m_prefix!=count){m_prefix=count;memory_dirty=true;}
     if(memory_dirty){memory_snapshot=memory->summary_at_event(count,static_cast<pvd::memory::GroupBy>(group_by));std::sort(memory_snapshot.groups.begin(),memory_snapshot.groups.end(),[](const auto& a,const auto& b){return a.stats.current_bytes>b.stats.current_bytes;});matches_memory=memory->matching_count(count,memory_filter);memory_page=std::min(memory_page,matches_memory?(matches_memory-1)/256:0);memory_rows=memory->history_at_event(count,memory_filter,memory_page*256,256);memory_dirty=false;}
     ImGui::SameLine();if(ImGui::Button("Export allocations CSV..."))save("memory.csv",[&](std::ostream& out){memory->write_csv(out,count,memory_filter);});
+    ImGui::PushTextWrapPos(0);
     ImGui::TextDisabled("Totals and groups cover all allocations before event %zu. History filters apply to allocation rows and their CSV.",count);
     const auto& s=memory_snapshot.totals;
     ImGui::Text("Live %.3f MiB (%zu allocations)  |  Peak %.3f MiB  |  Allocated %.3f MiB  |  Freed %.3f MiB",double(s.current_bytes)/(1024*1024),s.current_allocations,double(s.peak_bytes)/(1024*1024),double(s.allocated_bytes)/(1024*1024),double(s.freed_bytes)/(1024*1024));
     if(!memory_snapshot.complete)ImGui::TextColored({1,.65f,.35f,1},"Incomplete memory data; inspect diagnostics before interpreting totals.");
+    ImGui::PopTextWrapPos();
     if(memory->events().empty()&&memory->diagnostics().empty()){ImGui::TextWrapped("No memory channel was captured. Enable PhysX PVD eMEMORY instrumentation in the producer.");return;}
     if(ImGui::BeginTabBar("memory-pages")){
       if(ImGui::BeginTabItem("Allocation history")){
         page_buttons(memory_page,matches_memory,memory_dirty);
-        if(ImGui::BeginTable("allocation-history",7,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_Resizable|ImGuiTableFlags_ScrollY,{0,ImGui::GetContentRegionAvail().y-60})){
+        if(ImGui::BeginTable("allocation-history",7,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_Resizable|ImGuiTableFlags_ScrollY,{0,ImGui::GetContentRegionAvail().y-ui_pixels(60)})){
           for(auto name:{"Address / generation","Bytes","Type","Source","Line","State","Allocated event"})ImGui::TableSetupColumn(name);ImGui::TableHeadersRow();
           ImGuiListClipper clipper;clipper.Begin(static_cast<int>(memory_rows.size()));while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto& a=memory_rows[std::size_t(row)];ImGui::PushID(row);ImGui::TableNextRow();ImGui::TableNextColumn();if(ImGui::Selectable((hex(a.address)+" / "+std::to_string(a.generation)).c_str(),false,ImGuiSelectableFlags_SpanAllColumns|ImGuiSelectableFlags_AllowDoubleClick)&&ImGui::IsMouseDoubleClicked(0))jump(doc,a.allocated_event_count? a.allocated_event_count-1:0);ImGui::TableNextColumn();text(std::to_string(a.size));ImGui::TableNextColumn();text(a.type_name.value_or("Unresolved string"));ImGui::TableNextColumn();text(a.file.value_or("Unresolved string"));ImGui::TableNextColumn();ImGui::Text("%u",a.line);ImGui::TableNextColumn();text(!a.ended_event_count||*a.ended_event_count>count?"Active":a.end_reason==pvd::memory::EndReason::freed?"Freed":"Replaced without free");ImGui::TableNextColumn();ImGui::Text("%zu",a.allocated_event_count);ImGui::PopID();}ImGui::EndTable();
         }ImGui::EndTabItem();
       }
       if(ImGui::BeginTabItem("Groups")){
         if(ImGui::Button("Export groups CSV..."))save("memory-groups.csv",[&](std::ostream& out){memory->write_groups_csv(out,count,static_cast<pvd::memory::GroupBy>(group_by));});
-        if(ImGui::BeginTable("memory-groups",6,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_Resizable|ImGuiTableFlags_ScrollY,{0,ImGui::GetContentRegionAvail().y-60})){
+        if(ImGui::BeginTable("memory-groups",6,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_Resizable|ImGuiTableFlags_ScrollY,{0,ImGui::GetContentRegionAvail().y-ui_pixels(60)})){
           for(auto name:{"Type","File / line","Current bytes","Peak bytes","Live count","Total allocated"})ImGui::TableSetupColumn(name);ImGui::TableHeadersRow();
           ImGuiListClipper clipper;clipper.Begin(static_cast<int>(memory_snapshot.groups.size()));while(clipper.Step())for(int row=clipper.DisplayStart;row<clipper.DisplayEnd;++row){const auto& a=memory_snapshot.groups[std::size_t(row)];ImGui::TableNextRow();ImGui::TableNextColumn();text(a.type_name.value_or(group_by==0||group_by==3?"Unresolved type":"All types"));ImGui::TableNextColumn();text(a.file.value_or(group_by!=0?"Unresolved file":"All files")+(group_by==2||group_by==3?":"+std::to_string(a.line):""));ImGui::TableNextColumn();text(std::to_string(a.stats.current_bytes));ImGui::TableNextColumn();text(std::to_string(a.stats.peak_bytes));ImGui::TableNextColumn();text(std::to_string(a.stats.current_allocations));ImGui::TableNextColumn();text(std::to_string(a.stats.allocated_bytes));}ImGui::EndTable();
         }ImGui::EndTabItem();
@@ -238,8 +241,8 @@ struct AnalysisPanels::Impl {
   }
   void error_view(Document& doc,const CsvExport& save) {
     ImGui::TextUnformatted("ERROR STREAM");ImGui::SameLine();if(ImGui::Checkbox("Up to current frame",&error_current))error_dirty=true;
-    ImGui::SetNextItemWidth(350);if(ImGui::InputTextWithHint("##error-search","Filter message or file...",error_search.data(),error_search.size())){error_filter.text=error_search.data();error_page=0;error_dirty=true;}
-    ImGui::SameLine();ImGui::SetNextItemWidth(210);
+    ImGui::SetNextItemWidth(ui_pixels(350));if(ImGui::InputTextWithHint("##error-search","Filter message or file...",error_search.data(),error_search.size())){error_filter.text=error_search.data();error_page=0;error_dirty=true;}
+    ImGui::SameLine();ImGui::SetNextItemWidth(ui_pixels(210));
     auto code_label=[](std::uint32_t code){return std::string(pvd::errors::code_name(code))+" ("+std::to_string(code)+")";};
     if(ImGui::BeginCombo("##error-code",error_filter.code?code_label(*error_filter.code).c_str():"All codes")){
       if(ImGui::Selectable("All codes",!error_filter.code)){error_filter.code.reset();error_dirty=true;}

@@ -1,4 +1,5 @@
 #include "profile_curve_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <array>
@@ -228,10 +229,10 @@ struct ProfileCurvePanel::Impl {
                            ImGuiTableFlags_SizingFixedFit |
                                ImGuiTableFlags_BordersInnerH))
       return;
-    ImGui::TableSetupColumn("Show", 0, 35);
-    ImGui::TableSetupColumn("Color", 0, 30);
+    ImGui::TableSetupColumn("Show", 0, ui_pixels(35));
+    ImGui::TableSetupColumn("Color", 0, ui_pixels(30));
     ImGui::TableSetupColumn("Curve", ImGuiTableColumnFlags_WidthStretch);
-    ImGui::TableSetupColumn("Remove", 0, 22);
+    ImGui::TableSetupColumn("Remove", 0, ui_pixels(22));
     std::optional<std::size_t> remove;
     for (std::size_t i = 0; i < entries.size(); ++i) {
       auto &e = entries[i];
@@ -338,10 +339,10 @@ struct ProfileCurvePanel::Impl {
       return;
     }
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    const float width = std::max(160.f, ImGui::GetContentRegionAvail().x),
-                height = 260;
-    const ImVec2 lo{start.x + 55, start.y + 12},
-        hi{start.x + width - 12, start.y + height - 30};
+    const float width = std::max(ui_pixels(160.f), ImGui::GetContentRegionAvail().x),
+                height = ui_pixels(260);
+    const ImVec2 lo{start.x + ui_pixels(55), start.y + ui_pixels(12)},
+        hi{start.x + width - ui_pixels(12), start.y + height - ui_pixels(30)};
     plot = {lo.x,
             lo.y,
             hi.x - lo.x,
@@ -383,7 +384,7 @@ struct ProfileCurvePanel::Impl {
     if (ImGui::IsItemActive() && plot_pressed) {
       const float dx = io.MousePos.x - press_pos.x,
                   dy = io.MousePos.y - press_pos.y;
-      if (dx * dx + dy * dy > 16)
+      if (dx * dx + dy * dy > ui_pixels(4) * ui_pixels(4))
         plot_dragged = true;
       if (plot_dragged) {
         const double shift =
@@ -429,15 +430,15 @@ struct ProfileCurvePanel::Impl {
                   {hi.x, lo.y + (hi.y - lo.y) * t}, IM_COL32(53, 61, 70, 255));
       char label[48];
       std::snprintf(label, sizeof label, "%.4g", yhi - (yhi - ylo) * t);
-      dl->AddText({start.x, lo.y + (hi.y - lo.y) * t - 6},
+      dl->AddText({start.x, lo.y + (hi.y - lo.y) * t - ui_pixels(6)},
                   IM_COL32(180, 185, 195, 255), label);
       std::snprintf(label, sizeof label, "%.4g", xlo + (xhi - xlo) * t);
-      dl->AddText({lo.x + (hi.x - lo.x) * t - 10, hi.y + 4},
+      dl->AddText({lo.x + (hi.x - lo.x) * t - ui_pixels(10), hi.y + ui_pixels(4)},
                   IM_COL32(180, 185, 195, 255), label);
     }
     dl->AddRect(lo, hi, IM_COL32(100, 111, 125, 255));
     dl->PushClipRect(lo, hi, true);
-    float nearest = 100;
+    float nearest = ui_pixels(10) * ui_pixels(10);
     std::optional<std::pair<std::size_t, std::size_t>> nearest_sample;
     for (std::size_t ei = 0; ei < entries.size(); ++ei) {
       const auto &e = entries[ei];
@@ -465,12 +466,12 @@ struct ProfileCurvePanel::Impl {
         ImVec2 p{lo.x + static_cast<float>(px) * (hi.x - lo.x),
                  hi.y - static_cast<float>(py) * (hi.y - lo.y)};
         if (previous && !s.break_before)
-          dl->AddLine(*previous, p, color, 1.8f);
+          dl->AddLine(*previous, p, color, ui_pixels(1.8f));
         previous = p;
         if (*x >= xlo && *x <= xhi && y >= ylo && y <= yhi) {
           ++curve_visible;
           if (e.data.samples.size() <= 200)
-            dl->AddCircleFilled(p, 3, color);
+            dl->AddCircleFilled(p, ui_pixels(3), color);
           const float dx = p.x - io.MousePos.x, dy = p.y - io.MousePos.y,
                       dist = dx * dx + dy * dy;
           if (dist < nearest) {
@@ -478,7 +479,7 @@ struct ProfileCurvePanel::Impl {
             nearest_sample = {{ei, si}};
           }
           if (selected_sample == std::make_optional(std::make_pair(ei, si)))
-            dl->AddCircle(p, 6, IM_COL32_WHITE, 0, 1.5f);
+            dl->AddCircle(p, ui_pixels(6), IM_COL32_WHITE, 0, ui_pixels(1.5f));
         }
       }
     }
@@ -535,7 +536,7 @@ struct ProfileCurvePanel::Impl {
                                std::to_string(f.zone->generation)
                          : hex(f.zone->id);
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (ImGui::BeginCombo("Zone", clipped(zone_label).c_str())) {
       if (ImGui::Selectable("All zones", !f.zone)) {
         f.zone.reset();
@@ -565,7 +566,7 @@ struct ProfileCurvePanel::Impl {
                     " (#" + std::to_string(*f.event_id) + ")"
               : "Event #" + std::to_string(*f.event_id);
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (ImGui::BeginCombo("Event", clipped(event_label).c_str())) {
       if (ImGui::Selectable("All events", !f.event_id))
         f.event_id.reset();
@@ -590,7 +591,7 @@ struct ProfileCurvePanel::Impl {
       ImGui::EndCombo();
     }
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (ImGui::BeginCombo("Thread", f.thread_id
                                         ? std::to_string(*f.thread_id).c_str()
                                         : "All observed CPU threads")) {
@@ -608,7 +609,7 @@ struct ProfileCurvePanel::Impl {
       ImGui::EndCombo();
     }
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (ImGui::BeginCombo("Context", f.context_id ? hex(*f.context_id).c_str()
                                                   : "All observed contexts")) {
       if (ImGui::Selectable("All contexts", !f.context_id))
@@ -631,7 +632,7 @@ struct ProfileCurvePanel::Impl {
                              "Maximum ns"};
     int metric = static_cast<int>(editor.metric);
     ImGui::SetNextItemWidth(
-        std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+        std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (ImGui::Combo("Metric", &metric, metrics, 9))
       editor.metric = static_cast<a::ProfileMetric>(metric);
     bool covered = editor.coverage == a::ProfileCoverage::assume_continuous;
@@ -659,12 +660,12 @@ struct ProfileCurvePanel::Impl {
       }
       auto z = f.zone.value_or(profile::ZoneKey{});
       ImGui::BeginDisabled(!zone);
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputScalar("Zone ID (hex)", ImGuiDataType_U64, &z.id, nullptr,
                              nullptr, "%llX",
                              ImGuiInputTextFlags_CharsHexadecimal))
         f.zone = z;
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputScalar("Generation", ImGuiDataType_U64, &z.generation))
         f.zone = z;
       ImGui::EndDisabled();
@@ -677,7 +678,7 @@ struct ProfileCurvePanel::Impl {
       }
       auto id = f.event_id.value_or(0);
       ImGui::BeginDisabled(!event);
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputScalar("Event ID", ImGuiDataType_U16, &id))
         f.event_id = id;
       ImGui::EndDisabled();
@@ -690,7 +691,7 @@ struct ProfileCurvePanel::Impl {
       }
       auto tid = f.thread_id.value_or(0);
       ImGui::BeginDisabled(!thread);
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputScalar("Thread ID", ImGuiDataType_U32, &tid))
         f.thread_id = tid;
       ImGui::EndDisabled();
@@ -703,14 +704,14 @@ struct ProfileCurvePanel::Impl {
       }
       auto cid = f.context_id.value_or(0);
       ImGui::BeginDisabled(!context);
-      ImGui::SetNextItemWidth(130);
+      ImGui::SetNextItemWidth(ui_pixels(130));
       if (ImGui::InputScalar("Context ID (hex)", ImGuiDataType_U64, &cid,
                              nullptr, nullptr, "%llX",
                              ImGuiInputTextFlags_CharsHexadecimal))
         f.context_id = cid;
       ImGui::EndDisabled();
       ImGui::SetNextItemWidth(
-          std::max(100.f, ImGui::GetContentRegionAvail().x - 85));
+          std::max(ui_pixels(100.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
       if (ImGui::InputText("Name text", filter_text.data(), filter_text.size()))
         f.text = filter_text.data();
       ImGui::TextWrapped(
@@ -982,10 +983,10 @@ void ProfileCurvePanel::draw(Document &doc, const CsvExport &export_csv) {
         impl_->load_editor();
     }
     if (!impl_->auto_y) {
-      ImGui::SetNextItemWidth(105);
+      ImGui::SetNextItemWidth(ui_pixels(105));
       ImGui::InputDouble("Y min", &impl_->ylo, 0, 0, "%.6g");
       ImGui::SameLine();
-      ImGui::SetNextItemWidth(105);
+      ImGui::SetNextItemWidth(ui_pixels(105));
       ImGui::InputDouble("Y max", &impl_->yhi, 0, 0, "%.6g");
     }
     impl_->legend();

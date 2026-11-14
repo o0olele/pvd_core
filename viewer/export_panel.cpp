@@ -1,4 +1,5 @@
 #include "export_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <limits>
@@ -121,10 +122,10 @@ ExportPanelResult draw_export_panel(Document &doc, ExportJob &job,
                           static_cast<unsigned long long>(*scene), frame_count);
     else
       ImGui::TextDisabled("Select a scene with native SDK frames.");
-    ImGui::SetNextItemWidth(110);
+    ImGui::SetNextItemWidth(ui_pixels(110));
     ImGui::InputInt("First frame", &state.first_native_frame);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(110);
+    ImGui::SetNextItemWidth(ui_pixels(110));
     ImGui::InputInt("Last frame", &state.last_native_frame);
     const int maximum = static_cast<int>(
         std::min<std::size_t>(frame_count, std::numeric_limits<int>::max()));

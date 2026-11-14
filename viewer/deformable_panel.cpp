@@ -1,4 +1,5 @@
 #include "deformable_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <cstdio>
@@ -199,7 +200,7 @@ void drawDeformables(Document &doc, OrbitCamera &camera, RenderOptions &options,
   ImGui::Checkbox("Fixed-point emphasis", &options.show_cloth_pins);
   ImGui::Checkbox("Particle velocity", &options.show_particle_velocity);
   if (options.show_particle_velocity) {
-    ImGui::SetNextItemWidth(150);
+    ImGui::SetNextItemWidth(ui_pixels(150));
     ImGui::SliderFloat("Velocity scale", &options.particle_velocity_scale, 0, 2,
                        "%.3g");
   }

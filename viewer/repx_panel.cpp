@@ -1,4 +1,5 @@
 #include "repx_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 
@@ -40,7 +41,7 @@ RepxRequest make_repx_request(const Document &doc, RepxScope scope,
     } else if (inspected) {
       request.options.selection = repx::Selection::objects;
       request.options.objects.push_back(key(*inspected));
-    } else throw std::invalid_argument("Select an actor or a shape first.");
+    } else throw std::invalid_argument("Select a rigid actor, shape, articulation or aggregate first.");
   } else if (scope != RepxScope::all_scenes)
     throw std::invalid_argument("Unknown RepX scope.");
   return request;
@@ -80,7 +81,7 @@ void draw_repx_progress(RepxJob &job, bool compact) {
     if (!status.diagnostics.empty()) {
       ImGui::TextColored({1, .7f, .35f, 1}, "%zu diagnostic(s), preserved in XML",
                          status.diagnostics.size());
-      if (ImGui::BeginChild("RepX diagnostics", {0, 95}, ImGuiChildFlags_Borders)) {
+      if (ImGui::BeginChild("RepX diagnostics", {0, ui_pixels(95)}, ImGuiChildFlags_Borders)) {
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(std::min<std::size_t>(status.diagnostics.size(), 10000)));
         while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
@@ -118,9 +119,10 @@ ExportPanelResult draw_repx_panel(Document &doc, RepxJob &job, RepxPanelState &s
   ImGui::BeginDisabled(job.running() || !doc.loaded());
   int scope = static_cast<int>(state.scope);
   ImGui::SetNextItemWidth(-1);
-  if (ImGui::Combo("##RepX scope", &scope, "Current scene\0All scenes\0Visible rigid attachments\0Selected actor or shape\0"))
+  if (ImGui::Combo("##RepX scope", &scope, "Current scene\0All scenes\0Visible rigid attachments\0Selected rigid/shape/articulation/aggregate\0"))
     state.scope = static_cast<RepxScope>(scope);
   ImGui::TextWrapped("Visible and selected shape scopes preserve the exact actor/shape attachment, including shared shapes.");
+  ImGui::TextWrapped("Explicitly selecting an articulation or aggregate owner authorizes its complete subgraph. A single link or visible-attachment scope does not expand to its owner.");
   ImGui::Checkbox("Allow partial export with persisted warnings", &state.allow_partial);
   ImGui::TextWrapped("Strict mode rejects unsupported content and native RepX losses. "
                      "Partial mode omits unsupported content and reports known losses; malformed geometry still fails.");

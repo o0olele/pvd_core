@@ -1,5 +1,6 @@
 #include "deformable_panel.hpp"
 #include "display_panel.hpp"
+#include "ui_scale.hpp"
 #include "pvd/body_overlays.hpp"
 #include "scene_query_panel.hpp"
 #include "export_panel.hpp"
@@ -61,6 +62,8 @@ struct Options {
   bool analysis_smoke = false;
   bool deformable_smoke = false;
   bool query_smoke = false;
+  bool dpi_smoke = false;
+  std::optional<float> ui_scale;
   bool export_smoke = false, repx_smoke = false, allow_partial = false;
   bool workspace_smoke = false, no_settings = false;
   std::filesystem::path workspace_state;
@@ -123,6 +126,16 @@ Options arguments() {
       } else if (a == L"--query-smoke") {
         result.query_smoke = true;
         result.capture = value();
+      } else if (a == L"--dpi-smoke") {
+        result.dpi_smoke = true;
+        result.capture = value();
+      } else if (a == L"--ui-scale") {
+        const auto text = value().wstring();
+        std::size_t used = 0;
+        const auto scale = std::stof(text, &used);
+        if (used != text.size() || !std::isfinite(scale) || scale < .5f || scale > 4)
+          throw std::runtime_error("UI scale must be a number in [0.5,4]");
+        result.ui_scale = scale;
       } else if (a == L"--analysis-smoke") {
         result.analysis_smoke = true;
         result.capture = value();
@@ -218,11 +231,13 @@ Options arguments() {
   if (unsigned(result.smoke) + unsigned(result.live_smoke) +
           unsigned(result.analysis_smoke) + unsigned(result.export_smoke) +
           unsigned(result.repx_smoke) + unsigned(result.workspace_smoke) +
-          unsigned(result.deformable_smoke) + unsigned(result.query_smoke) >
+          unsigned(result.deformable_smoke) + unsigned(result.query_smoke) + unsigned(result.dpi_smoke) >
       1)
     throw std::runtime_error("Choose one smoke mode");
   if (result.workspace_smoke && result.workspace_state.empty())
     throw std::runtime_error("Workspace smoke requires --workspace-state");
+  if (result.dpi_smoke && result.ui_scale)
+    throw std::runtime_error("DPI transition smoke controls its own UI scale");
   if ((result.export_smoke || result.repx_smoke) && result.output.empty())
     throw std::runtime_error("Export smoke requires --output");
   if (result.listen_port >= 0 && !result.capture.empty())
@@ -280,6 +295,7 @@ public:
       ImGui_ImplDX11_Shutdown();
     if (win32_backend_)
       ImGui_ImplWin32_Shutdown();
+    ui_scale_.reset();
     if (imgui_)
       ImGui::DestroyContext();
     if (context_)
@@ -318,7 +334,7 @@ public:
 #endif
     if (!options_.capture.empty()) {
       if (options_.smoke || options_.analysis_smoke || options_.export_smoke ||
-          options_.repx_smoke || options_.deformable_smoke || options_.query_smoke) {
+          options_.repx_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke) {
         auto incoming = std::make_unique<Document>();
         const auto path =
             std::filesystem::absolute(options_.capture).lexically_normal();
@@ -406,6 +422,7 @@ public:
       if (smoke_mode() &&
           std::chrono::duration<double>(now - started).count() > 30)
         throw std::runtime_error("Viewer smoke test timed out");
+      update_ui_scale();
       ImGui_ImplDX11_NewFrame();
       ImGui_ImplWin32_NewFrame();
       ImGui::NewFrame();
@@ -424,6 +441,8 @@ public:
         deformable_smoke_step();
       else if (options_.query_smoke)
         query_smoke_step();
+      else if (options_.dpi_smoke)
+        dpi_smoke_step();
       else if (options_.export_smoke)
         export_smoke_step();
       else if (options_.workspace_smoke)
@@ -466,6 +485,8 @@ private:
   ComPtr<ID3D11RenderTargetView> backbuffer_;
   std::unique_ptr<Renderer> renderer_;
   struct SlotUiState {
+    ImVec2 auto_fit_size{};
+    unsigned auto_fit_stable_frames = 0;
     PanelState panels;
     RenderOptions render_options;
     SceneToolState scene_tools;
@@ -524,6 +545,10 @@ private:
   bool automatic_settings_ = false, settings_writable_ = false,
        help_requested_ = false;
   int layout_generation_ = 0;
+  std::unique_ptr<UiScale> ui_scale_;
+  std::optional<float> pending_ui_scale_;
+  std::size_t dpi_smoke_phase_ = 0;
+  std::vector<std::array<unsigned,6>> dpi_smoke_samples_;
   std::string notice_;
   int workspace_smoke_phase_ = 0;
   SlotId smoke_slot_a_ = 0, smoke_slot_b_ = 0;
@@ -564,7 +589,7 @@ private:
   bool smoke_mode() const {
     return options_.smoke || options_.analysis_smoke || options_.live_smoke ||
            options_.export_smoke || options_.repx_smoke ||
-           options_.workspace_smoke || options_.deformable_smoke || options_.query_smoke;
+           options_.workspace_smoke || options_.deformable_smoke || options_.query_smoke || options_.dpi_smoke;
   }
   WorkspaceSlot &active_slot() {
     if (!workspace_.active())
@@ -969,7 +994,7 @@ private:
       ImGui::OpenPopup("Help and shortcuts");
       help_requested_ = false;
     }
-    ImGui::SetNextWindowSize({560, 0}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({ui_pixels(560), 0}, ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("Help and shortcuts", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
       ImGui::TextUnformatted("PVD Studio / PhysX 3.4 raw captures");
@@ -1058,6 +1083,16 @@ private:
         self->resize_height_ = HIWORD(lp);
         return 0;
       }
+      if (msg == WM_DPICHANGED) {
+        if (!self->options_.ui_scale && (!self->smoke_mode() || self->options_.dpi_smoke))
+          self->pending_ui_scale_ = ui_scale_from_dpi(LOWORD(wp));
+        const auto *suggested = reinterpret_cast<const RECT *>(lp);
+        if (suggested)
+          SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                       suggested->right-suggested->left, suggested->bottom-suggested->top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+      }
       if (msg == WM_DROPFILES) {
         const auto drop = reinterpret_cast<HDROP>(wp);
         const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
@@ -1073,7 +1108,9 @@ private:
       }
       if (msg == WM_GETMINMAXINFO) {
         auto *limits = reinterpret_cast<MINMAXINFO *>(lp);
-        limits->ptMinTrackSize = {1060, 700};
+        const auto minimum = self->window_plan(hwnd, self->effective_ui_scale(hwnd)).minimum_outer_pixels;
+        limits->ptMinTrackSize = {static_cast<LONG>(std::ceil(minimum.x)),
+                                 static_cast<LONG>(std::ceil(minimum.y))};
         return 0;
       }
       if (msg == WM_CLOSE) {
@@ -1095,6 +1132,54 @@ private:
     check(device_->CreateRenderTargetView(buffer.Get(), nullptr, &backbuffer_),
           "Create backbuffer view");
   }
+  float effective_ui_scale(HWND hwnd) const {
+    if (options_.ui_scale) return *options_.ui_scale;
+    if (pending_ui_scale_) return *pending_ui_scale_;
+    if (options_.dpi_smoke) return ui_scale_ ? ui_scale_->current().screen_scale : 1.f;
+    return smoke_mode() ? 1.f : ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
+  }
+  static ImVec2 native_chrome(float screen_scale) {
+    RECT rectangle{0,0,100,100};
+    using AdjustForDpi = BOOL(WINAPI *)(LPRECT,DWORD,BOOL,DWORD,UINT);
+    const auto user32 = GetModuleHandleW(L"user32.dll");
+    const auto adjust = reinterpret_cast<AdjustForDpi>(GetProcAddress(user32,"AdjustWindowRectExForDpi"));
+    if (adjust)
+      adjust(&rectangle,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_ACCEPTFILES,
+             static_cast<UINT>(std::lround(screen_scale*96)));
+    else AdjustWindowRectEx(&rectangle,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_ACCEPTFILES);
+    return {float(rectangle.right-rectangle.left-100),float(rectangle.bottom-rectangle.top-100)};
+  }
+  UiWindowPlan window_plan(HWND hwnd, float scale) const {
+    std::optional<ImVec2> area;
+    if (!options_.hidden) {
+      MONITORINFO monitor{sizeof(MONITORINFO)};
+      if (GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor))
+        area=ImVec2(float(monitor.rcWork.right-monitor.rcWork.left),
+                    float(monitor.rcWork.bottom-monitor.rcWork.top));
+    }
+    UiWindowPolicy policy;
+    policy.initial_client_dp={float(options_.window_width),float(options_.window_height)};
+    // Native chrome follows the actual OS DPI even when the user overrides UI
+    // font/layout scale. It must not be multiplied by the UI scale a second time.
+    return plan_ui_window(scale,area,native_chrome(ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd)),policy);
+  }
+  void update_ui_scale() {
+    if (!ui_scale_ || !pending_ui_scale_) return;
+    const auto scale=*pending_ui_scale_;pending_ui_scale_.reset();
+    if (!ui_scale_->needs_reload(scale)) return;
+    ImGui_ImplDX11_InvalidateDeviceObjects();
+    try {
+      ui_scale_->reload_fonts(scale);
+      if (!ImGui_ImplDX11_CreateDeviceObjects())
+        throw std::runtime_error("Cannot upload scaled UI fonts");
+      ++layout_generation_;
+    } catch (const std::exception &e) {
+      // The font helper stages before publication. Recreate backend objects for
+      // the retained atlas as well, so a rejected scale keeps the UI usable.
+      ImGui_ImplDX11_CreateDeviceObjects();
+      error_=std::string("UI scale: ")+e.what();
+    }
+  }
   void initialize() {
     ImGui_ImplWin32_EnableDpiAwareness();
     WNDCLASSEXW wc{sizeof(WNDCLASSEXW)};
@@ -1105,12 +1190,25 @@ private:
     wc.lpszClassName = L"PvdStudioWindow";
     if (!RegisterClassExW(&wc))
       throw std::runtime_error("Cannot register viewer window");
-    RECT rectangle{0, 0, options_.window_width, options_.window_height};
-    AdjustWindowRect(&rectangle, WS_OVERLAPPEDWINDOW, FALSE);
+    POINT cursor{};GetCursorPos(&cursor);
+    const auto monitor_handle=MonitorFromPoint(cursor,MONITOR_DEFAULTTOPRIMARY);
+    const auto initial_scale=options_.ui_scale.value_or(smoke_mode()?1.f:
+        ImGui_ImplWin32_GetDpiScaleForMonitor(monitor_handle));
+    MONITORINFO monitor{sizeof(MONITORINFO)};
+    const bool have_monitor=GetMonitorInfoW(monitor_handle,&monitor)!=FALSE;
+    UiWindowPolicy policy;
+    policy.initial_client_dp={float(options_.window_width),float(options_.window_height)};
+    const auto area=(!options_.hidden&&have_monitor)?
+        std::optional<ImVec2>{{float(monitor.rcWork.right-monitor.rcWork.left),
+                              float(monitor.rcWork.bottom-monitor.rcWork.top)}}:std::nullopt;
+    const auto plan=plan_ui_window(initial_scale,area,
+        native_chrome(ImGui_ImplWin32_GetDpiScaleForMonitor(monitor_handle)),policy);
     window_ = CreateWindowExW(
         WS_EX_ACCEPTFILES, wc.lpszClassName, L"PVD Studio", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, rectangle.right - rectangle.left,
-        rectangle.bottom - rectangle.top, nullptr, nullptr, wc.hInstance, this);
+        have_monitor?monitor.rcWork.left+16:CW_USEDEFAULT,
+        have_monitor?monitor.rcWork.top+16:CW_USEDEFAULT,
+        static_cast<int>(std::ceil(plan.initial_outer_pixels.x)),
+        static_cast<int>(std::ceil(plan.initial_outer_pixels.y)),nullptr,nullptr,wc.hInstance,this);
     if (!window_)
       throw std::runtime_error("Cannot create viewer window");
     BOOL dark = TRUE;
@@ -1147,22 +1245,21 @@ private:
         nullptr; // Viewer layout is deterministic; no cwd side effects.
     theme();
     configure_persistence();
-    ImFontConfig font;
-    font.SizePixels = 17;
-    const std::filesystem::path segoe = L"C:/Windows/Fonts/segoeui.ttf";
-    if (std::filesystem::exists(segoe))
-      io.Fonts->AddFontFromFileTTF(segoe.string().c_str(), 17, &font);
-    else
-      io.Fonts->AddFontDefault();
-    const std::filesystem::path cjk = L"C:/Windows/Fonts/msyh.ttc";
-    if (std::filesystem::exists(cjk)) {
-      ImFontConfig merge;
-      merge.MergeMode = true;
-      merge.PixelSnapH = true;
-      io.Fonts->AddFontFromFileTTF(
-          cjk.string().c_str(), 17, &merge,
-          io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
-    }
+    ui_scale_=std::make_unique<UiScale>(ImGui::GetStyle(),[](ImFontAtlas &atlas,float pixels) {
+      ImFontConfig font;font.SizePixels=pixels;
+      const std::filesystem::path segoe=L"C:/Windows/Fonts/segoeui.ttf";
+      auto *primary=std::filesystem::exists(segoe)?
+          atlas.AddFontFromFileTTF(segoe.string().c_str(),pixels,&font):nullptr;
+      const std::filesystem::path cjk=L"C:/Windows/Fonts/msyh.ttc";
+      if(primary&&std::filesystem::exists(cjk)) {
+        ImFontConfig merge;merge.MergeMode=true;merge.PixelSnapH=true;
+        atlas.AddFontFromFileTTF(cjk.string().c_str(),pixels,&merge,
+            atlas.GetGlyphRangesChineseSimplifiedCommon());
+      }
+      return primary;
+    });
+    ui_scale_->reload_fonts(effective_ui_scale(window_));
+    pending_ui_scale_.reset();
     if (!ImGui_ImplWin32_Init(window_))
       throw std::runtime_error("Initialize Win32 backend");
     win32_backend_ = true;
@@ -1529,7 +1626,7 @@ private:
       ImGui::OpenPopup("Live capture");
       capture_setup_requested_ = false;
     }
-    ImGui::SetNextWindowSize({580, 0}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({ui_pixels(580), 0}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Live capture", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize))
       return;
@@ -1538,23 +1635,23 @@ private:
                        "the address and port below.");
     ImGui::Spacing();
     ImGui::BeginDisabled(live_.active());
-    ImGui::SetNextItemWidth(290);
+    ImGui::SetNextItemWidth(ui_pixels(290));
     ImGui::InputText("Bind address", capture_address_.data(),
                      capture_address_.size());
-    ImGui::SetNextItemWidth(140);
+    ImGui::SetNextItemWidth(ui_pixels(140));
     ImGui::InputInt("Port", &capture_port_);
     ImGui::TextDisabled(
         "5425 is the PVD default; 0 chooses an available port.");
     ImGui::Checkbox("Record raw capture", &record_capture_);
     ImGui::BeginDisabled(!record_capture_);
-    ImGui::SetNextItemWidth(425);
+    ImGui::SetNextItemWidth(ui_pixels(425));
     ImGui::InputText("##recording", capture_path_.data(), capture_path_.size());
     ImGui::SameLine();
     if (ImGui::Button("Browse..."))
       choose_recording();
     ImGui::TextDisabled("Choose a new file. Existing recordings are kept.");
     ImGui::EndDisabled();
-    if (ImGui::Button("Start listening", {150, 0})) {
+    if (ImGui::Button("Start listening", {ui_pixels(150), 0})) {
       start_capture();
       if (error_.empty())
         ImGui::CloseCurrentPopup();
@@ -1815,7 +1912,7 @@ private:
       ImGui::OpenPopup("Save / crop capture");
       export_popup_requested_ = false;
     }
-    ImGui::SetNextWindowSize({660, 530}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({ui_pixels(660), ui_pixels(530)}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Save / crop capture", nullptr,
                                 ImGuiWindowFlags_None))
       return;
@@ -1973,7 +2070,7 @@ private:
       ImGui::OpenPopup("Export RepX");
       repx_popup_requested_ = false;
     }
-    ImGui::SetNextWindowSize({650, 600}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({ui_pixels(650), ui_pixels(600)}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Export RepX", nullptr, ImGuiWindowFlags_None))
       return;
     const auto id = repx_popup_slot_.value_or(active_slot().id());
@@ -2393,7 +2490,89 @@ private:
     }
     quit_ = true;
   }
+  void dpi_smoke_step() {
+    if (host_frames_ != 4 + dpi_smoke_phase_*2) return;
+    constexpr float scales[]={1.f,1.5f,2.f,1.f};
+    const auto &actual=ui_scale_->current();
+    const auto expected=scales[dpi_smoke_phase_];
+    if (dpi_smoke_phase_==0) {
+      auto expected_camera=camera();
+      if (!fitted() || !document().fit_scene(expected_camera,
+              viewport_size_.x/std::max(1.f,viewport_size_.y)) ||
+          std::abs(camera().distance-expected_camera.distance)>1e-4)
+        throw std::runtime_error("Initial auto-fit used a transient ImGui viewport size");
+    }
+    RECT client{};GetClientRect(window_,&client);
+    // Windows may cap large suggested rectangles at its native maximum track
+    // size. Validate actual growth and exact return, not an invented unclamped
+    // 2x desktop; all reported dimensions come from the actual client rect.
+    const bool base_size=dpi_smoke_phase_==0||dpi_smoke_phase_==3;
+    const bool client_size=base_size?
+        client.right==options_.window_width&&client.bottom==options_.window_height:
+        client.right>options_.window_width&&client.bottom>options_.window_height;
+    if (!document().loaded() || !document().frame() || !renderer_->stats().triangles ||
+        actual.screen_scale!=expected || actual.generation!=dpi_smoke_phase_+1 ||
+        actual.font_pixels!=std::floor(17*expected+.5f) ||
+        ImGui::GetIO().Fonts->TexID==0 || ImGui::GetIO().FontGlobalScale!=1 ||
+        ImGui::GetDrawData()->TotalVtxCount<100 || !client_size) {
+      std::ostringstream reason;
+      reason << "DPI transition phase " << dpi_smoke_phase_ << ": scale=" << actual.screen_scale
+             << " generation=" << actual.generation << " font=" << actual.font_pixels
+             << " texture=" << (ImGui::GetIO().Fonts->TexID!=0)
+             << " glyph_vertices=" << ImGui::GetDrawData()->TotalVtxCount
+             << " triangles=" << renderer_->stats().triangles
+             << " client=" << client.right << 'x' << client.bottom << " expected_scale=" << expected;
+      throw std::runtime_error(reason.str());
+    }
+    dpi_smoke_samples_.push_back({static_cast<unsigned>(std::lround(expected*96)),
+        static_cast<unsigned>(actual.generation),static_cast<unsigned>(actual.atlas_width),
+        static_cast<unsigned>(actual.atlas_height),static_cast<unsigned>(client.right),
+        static_cast<unsigned>(client.bottom)});
+    if (!options_.screenshot.empty()) {
+      const auto original=options_.screenshot;
+      if (dpi_smoke_phase_<3)
+        options_.screenshot=original.parent_path()/
+            (original.stem().wstring()+L"-"+std::to_wstring(std::lround(expected*100))+original.extension().wstring());
+      screenshot();options_.screenshot=original;
+    }
+    if (++dpi_smoke_phase_==4) {
+      if (ImGui::GetStyle().WindowPadding.x!=16 || ImGui::GetStyle().FramePadding.x!=9)
+        throw std::runtime_error("DPI roundtrip accumulated style rounding");
+      if (!options_.report.empty()) {
+        if (!options_.report.parent_path().empty())
+          std::filesystem::create_directories(options_.report.parent_path());
+        std::ofstream report(options_.report,std::ios::binary);
+        auto fit_camera=camera();
+        document().fit_scene(fit_camera,viewport_size_.x/std::max(1.f,viewport_size_.y));
+        report << "{\"passed\":true,\"font_generations\":4,\"auto_settings_io\":"
+               << (automatic_settings_?"true":"false")
+               << ",\"camera_distance\":" << camera().distance
+               << ",\"fit_scene_distance\":" << fit_camera.distance << ",\"samples\":[";
+        for (std::size_t i=0;i<dpi_smoke_samples_.size();++i) {
+          const auto &s=dpi_smoke_samples_[i];if(i)report<<',';
+          report << "{\"dpi\":"<<s[0]<<",\"generation\":"<<s[1]
+                 <<",\"atlas_width\":"<<s[2]<<",\"atlas_height\":"<<s[3]
+                 <<",\"client_width\":"<<s[4]<<",\"client_height\":"<<s[5]<<'}';
+        }
+        report<<"]}\n";
+        if(!report)throw std::runtime_error("Cannot write DPI smoke report");
+      }
+      quit_=true;return;
+    }
+    const auto next=scales[dpi_smoke_phase_];
+    RECT outer{};GetWindowRect(window_,&outer);
+    const auto chrome=native_chrome(ImGui_ImplWin32_GetDpiScaleForHwnd(window_));
+    RECT suggested{outer.left,outer.top,
+        outer.left+static_cast<LONG>(std::ceil(options_.window_width*next+chrome.x)),
+        outer.top+static_cast<LONG>(std::ceil(options_.window_height*next+chrome.y))};
+    const auto dpi=static_cast<WORD>(std::lround(next*96));
+    // Exercise the same native message path as a monitor transition. This is
+    // deterministic host/GPU validation, not an assertion that physical monitors
+    // were moved or their system DPI was changed during this test.
+    SendMessageW(window_,WM_DPICHANGED,MAKEWPARAM(dpi,dpi),reinterpret_cast<LPARAM>(&suggested));
+  }
   void draw() {
+    const UiPixelScope pixel_scope(ui_scale_->current().screen_scale);
     shortcuts();
     const auto *main = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(main->Pos);
@@ -2405,7 +2584,7 @@ private:
     ImGui::TextColored({.28f, .86f, .75f, 1}, "PVD");
     ImGui::SameLine();
     ImGui::TextUnformatted("STUDIO");
-    ImGui::SameLine(150);
+    ImGui::SameLine(ui_pixels(150));
     if (ImGui::Button("Open  Ctrl+O"))
       choose_file();
 #ifdef PVD_VIEWER_HAS_TRANSPORT
@@ -2554,21 +2733,22 @@ private:
       if (clicked)
         ui().page = *clicked;
     }
-    const float timeline_height = 130, status_height = 24;
+    const float timeline_height = ui_pixels(130), status_height = ui_pixels(24);
     const float body_height =
-        std::max(100.f, ImGui::GetContentRegionAvail().y - timeline_height -
-                            status_height - 16);
+        std::max(ui_pixels(100), ImGui::GetContentRegionAvail().y - timeline_height -
+                            status_height - ui_pixels(16));
     const auto table_id =
-        "workspace-layout-" + std::to_string(layout_generation_);
+        "workspace-layout-" + std::to_string(layout_generation_) + "-" +
+        std::to_string(ui_scale_->current().screen_scale);
     if (ui().page == 0 &&
         ImGui::BeginTable(table_id.c_str(), 3,
                           ImGuiTableFlags_Resizable |
                               ImGuiTableFlags_SizingStretchProp)) {
       ImGui::TableSetupColumn("Hierarchy", ImGuiTableColumnFlags_WidthFixed,
-                              246);
+                              ui_pixels(246));
       ImGui::TableSetupColumn("Viewport", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableSetupColumn("Inspector", ImGuiTableColumnFlags_WidthFixed,
-                              310);
+                              ui_pixels(310));
       ImGui::TableNextRow();
       ImGui::TableNextColumn();
       ImGui::BeginChild("Hierarchy", {0, body_height}, ImGuiChildFlags_Borders);
@@ -2590,9 +2770,10 @@ private:
       ImGui::EndTable();
     }
     if (ui().page == 8 || ui().page == 9) {
-      if (ImGui::BeginTable(ui().page == 8 ? "Deformable layout" : "Query layout", 2,
+      const auto native_table=(ui().page==8?"Deformable layout-":"Query layout-")+table_id;
+      if (ImGui::BeginTable(native_table.c_str(), 2,
           ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("Native objects", ImGuiTableColumnFlags_WidthFixed, 390);
+        ImGui::TableSetupColumn("Native objects", ImGuiTableColumnFlags_WidthFixed, ui_pixels(390));
         ImGui::TableSetupColumn("Native viewport", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
@@ -2654,7 +2835,7 @@ private:
                             document().timeline().size());
     } else
       ImGui::TextDisabled("Ready / Open or drop a PhysX raw capture");
-    ImGui::SameLine(std::max(500.f, ImGui::GetWindowWidth() - 310));
+    ImGui::SameLine(std::max(ui_pixels(500), ImGui::GetWindowWidth() - ui_pixels(310)));
     ImGui::TextDisabled("D3D11 %s", using_warp_ ? "WARP" : "GPU");
     ImGui::SameLine();
     ImGui::Checkbox("Diagnostics", &ui().diagnostics);
@@ -2673,10 +2854,10 @@ private:
     ImGui::SameLine();
     if (ImGui::SmallButton("View..."))
       ImGui::OpenPopup("Scene view tools");
-    ImGui::SetNextWindowSize({520, 0}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({ui_pixels(520), 0}, ImGuiCond_Appearing);
     ImGui::SetNextWindowSizeConstraints(
-        {380, 180},
-        {620, std::max(250.f, ImGui::GetMainViewport()->Size.y - 80)});
+        {ui_pixels(380), ui_pixels(180)},
+        {ui_pixels(620), std::max(ui_pixels(250), ImGui::GetMainViewport()->Size.y - ui_pixels(80))});
     if (ImGui::BeginPopup("Scene view tools")) {
       ui().scene_tools.viewport_aspect =
           viewport_size_.x / std::max(1.f, viewport_size_.y);
@@ -2726,12 +2907,22 @@ private:
       return;
     }
     viewport_size_ = ImGui::GetContentRegionAvail();
-    viewport_size_.y = std::max(1.0f, viewport_size_.y - 25);
+    viewport_size_.y = std::max(1.0f, viewport_size_.y - ui_pixels(25));
     viewport_size_.x = std::max(1.0f, viewport_size_.x);
     ui().displayed_scene = document().scene_id();
-    if (!fitted())
-      set_fitted(
-          document().fit_scene(camera(), viewport_size_.x / viewport_size_.y));
+    if (!fitted()) {
+      // The first ImGui table/child layout can temporarily report a one-pixel
+      // viewport. Fitting that aspect permanently sends the initial camera far
+      // away. Wait for two useful, matching layouts before accepting auto-fit.
+      const auto previous=ui().auto_fit_size;
+      const bool useful=viewport_size_.x>=ui_pixels(64)&&viewport_size_.y>=ui_pixels(64);
+      if(useful&&std::abs(previous.x-viewport_size_.x)<1&&std::abs(previous.y-viewport_size_.y)<1)
+        ++ui().auto_fit_stable_frames;
+      else ui().auto_fit_stable_frames=0;
+      ui().auto_fit_size=viewport_size_;
+      if(ui().auto_fit_stable_frames)
+        set_fitted(document().fit_scene(camera(),viewport_size_.x/viewport_size_.y));
+    }
     ui().scene_tools.viewport_aspect = viewport_size_.x / viewport_size_.y;
     updateTrackedCamera(document(), camera(), ui().scene_tools);
     renderer_->resize(static_cast<UINT>(viewport_size_.x),
@@ -2748,12 +2939,13 @@ private:
     if (ImGui::IsItemActive()) {
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
           (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
-        camera().orbit(-io.MouseDelta.x * 0.008, -io.MouseDelta.y * 0.008);
+        camera().orbit(-io.MouseDelta.x * 0.008 / ui_scale_->current().screen_scale,
+                       -io.MouseDelta.y * 0.008 / ui_scale_->current().screen_scale);
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle))
         camera().pan(io.MouseDelta.x, io.MouseDelta.y, viewport_size_.y);
     }
     if (hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
-        !io.KeyAlt && io.MouseDragMaxDistanceSqr[0] < 16) {
+        !io.KeyAlt && io.MouseDragMaxDistanceSqr[0] < ui_pixels(4)*ui_pixels(4)) {
       const auto hit =
           (ui().render_options.show_solids ||
            ui().render_options.show_wireframe)

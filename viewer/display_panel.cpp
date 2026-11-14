@@ -1,4 +1,5 @@
 #include "display_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <stdexcept>
 
@@ -16,10 +17,10 @@ template <class F> void action(DisplayPanelState &state, F &&fn) {
 void drawDisplaySettings(Document &doc, OrbitCamera &camera,
                          RenderOptions &options, const RenderStats &stats,
                          DisplayPanelState &state) {
-  ImGui::SetNextItemWidth(180);
+  ImGui::SetNextItemWidth(ui_pixels(180));
   ImGui::ColorEdit3("Background", options.background_color.data(),
                     ImGuiColorEditFlags_NoInputs);
-  ImGui::SetNextItemWidth(180);
+  ImGui::SetNextItemWidth(ui_pixels(180));
   int aa = options.antialiasing == Antialiasing::msaa4x ? 1 : 0;
   if (ImGui::Combo("Antialiasing", &aa, "Off (1x)\0MSAA 4x\0"))
     options.antialiasing = aa ? Antialiasing::msaa4x : Antialiasing::off;
@@ -35,7 +36,7 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
   else
     ImGui::Text("Requested %ux; actual %ux", actual.requested_samples,
                 actual.actual_samples);
-  ImGui::SetNextItemWidth(180);
+  ImGui::SetNextItemWidth(ui_pixels(180));
   const auto axis = display_up(camera);
   const char *up_names[] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
   if (ImGui::BeginCombo("Up axis", axis ? up_names[static_cast<int>(*axis)]
@@ -51,7 +52,7 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
     ImGui::TextWrapped(
         "Recorded/custom up: %.4g, %.4g, %.4g", double(camera.reference_up.x),
         double(camera.reference_up.y), double(camera.reference_up.z));
-  ImGui::SetNextItemWidth(180);
+  ImGui::SetNextItemWidth(ui_pixels(180));
   int hand = camera.handedness == DisplayHandedness::left_handed ? 1 : 0;
   if (ImGui::Combo("Display handedness", &hand,
                    "Right-handed\0Left-handed (mirror)\0"))
@@ -69,7 +70,7 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
   ImGui::SameLine();
   ImGui::Checkbox("Angular velocity", &options.show_angular_velocity);
   if (options.show_linear_velocity || options.show_angular_velocity) {
-    ImGui::SetNextItemWidth(180);
+    ImGui::SetNextItemWidth(ui_pixels(180));
     ImGui::DragFloat("Rigid velocity scale", &options.rigid_velocity_scale,
                      .01f, 0.f, 1e6f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
   }

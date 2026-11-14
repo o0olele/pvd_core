@@ -1,4 +1,5 @@
 #include "workspace_panel.hpp"
+#include "ui_scale.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <cstring>
@@ -64,7 +65,7 @@ void draw_workspace_tabs(Workspace &workspace,
                              ImGuiTabBarFlags_TabListPopupButton)) {
     for (const auto *slot : workspace.slots()) {
       bool open = true;
-      const auto label = fit(slot->title(), 180) + "###workspace-slot-" +
+      const auto label = fit(slot->title(), ui_pixels(180)) + "###workspace-slot-" +
                          std::to_string(slot->id());
       const auto flags =
           request_selection && workspace.active_id() == slot->id()
@@ -113,11 +114,11 @@ void draw_workspace_panel(Workspace &workspace, WorkspacePanelState &state,
   const bool open_file = ImGui::Button("Open in new tab...");
   ImGui::EndDisabled();
   std::optional<SlotId> selected, closed, load;
-  ImGui::BeginChild("workspace-documents", {0, 160}, ImGuiChildFlags_Borders);
+  ImGui::BeginChild("workspace-documents", {0, ui_pixels(160)}, ImGuiChildFlags_Borders);
   for (const auto *slot : workspace.slots()) {
     ImGui::PushID(std::to_string(slot->id()).c_str());
     const auto label = fit(
-        slot->title(), std::max(60.f, ImGui::GetContentRegionAvail().x - 85));
+        slot->title(), std::max(ui_pixels(60.f), ImGui::GetContentRegionAvail().x - ui_pixels(85)));
     if (literal_selectable("##document", label,
                            workspace.active_id() == slot->id()))
       selected = slot->id();
@@ -167,7 +168,7 @@ void draw_workspace_panel(Workspace &workspace, WorkspacePanelState &state,
       const auto &path = paths[i];
       ImGui::PushID(static_cast<int>(i));
       if (literal_selectable("##recent",
-                             fit(path, ImGui::GetContentRegionAvail().x - 10)))
+                             fit(path, ImGui::GetContentRegionAvail().x - ui_pixels(10))))
         recent = path;
       if (ImGui::IsItemHovered())
         ImGui::SetTooltip("%s", path.c_str());
@@ -197,7 +198,7 @@ void draw_workspace_panel(Workspace &workspace, WorkspacePanelState &state,
     const bool can_bookmark =
         active->document().loaded() && !active->document().timeline().empty();
     ImGui::BeginDisabled(!can_bookmark);
-    ImGui::SetNextItemWidth(std::min(260.f, ImGui::GetContentRegionAvail().x));
+    ImGui::SetNextItemWidth(std::min(ui_pixels(260.f), ImGui::GetContentRegionAvail().x));
     ImGui::InputTextWithHint("##bookmark-name", "Bookmark name",
                              state.bookmark_name.data(),
                              state.bookmark_name.size());
@@ -221,7 +222,7 @@ void draw_workspace_panel(Workspace &workspace, WorkspacePanelState &state,
     std::optional<BookmarkId> jump, remove;
     ImGui::BeginChild(
         "workspace-bookmarks",
-        {0, std::max(120.f, ImGui::GetContentRegionAvail().y - 45)},
+        {0, std::max(ui_pixels(120.f), ImGui::GetContentRegionAvail().y - ui_pixels(45))},
         ImGuiChildFlags_Borders);
     for (const auto &book : active->bookmarks()) {
       ImGui::PushID(std::to_string(book.id).c_str());
@@ -229,7 +230,7 @@ void draw_workspace_panel(Workspace &workspace, WorkspacePanelState &state,
       ImGui::BeginDisabled(!verified);
       if (literal_selectable(
               "##bookmark",
-              fit(book.name, ImGui::GetContentRegionAvail().x - 12)))
+              fit(book.name, ImGui::GetContentRegionAvail().x - ui_pixels(12))))
         jump = book.id;
       ImGui::EndDisabled();
       if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

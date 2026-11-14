@@ -137,3 +137,45 @@ evidence for the separate RepX exporter. It does not by itself claim complete
 RepX restoration, a new in-place topology-edit API, APEX support, or compatibility
 with older SDK/container versions. See `docs/repx.md` for serializer-specific
 support and native XML limitations.
+
+## Viewer workflow validation
+
+`tests/articulation_viewer_tests.cpp` consumes the same capture and independent
+CSV through the public `Document` and panel APIs. Link it with
+`pvd_viewer_model`, `pvd_imgui`, and `viewer/panels.cpp`; it does not link PhysX:
+
+```text
+pvd_articulation_viewer_tests PREFIX_capture.pxd2 PREFIX_expected.csv
+```
+
+The test visits both scenes' native and after-fetch timelines forward and
+backward: 80 selected samples, 240 link-tree nodes and 692 reference navigations
+in the local run. It compares scene actor/shape attachments to the SDK oracle,
+checks all-object categories retain actual classes and generations, and follows
+root/child Parent, inbound-joint Link, owner Links and aggregate membership.
+At 420 and 1060 pixels it runs actual Dear ImGui panels and mouse-clicks the
+Inspector's Parent, InboundJoint and Link reference buttons. Owner, joint and
+aggregate settings remain inspectable; hierarchy search finds the recreated
+branch rather than a stale lifetime.
+
+Native attachment selection, fit against independent SDK world bounds, camera
+ray picking, hide/isolate and populated aggregate migration are exercised through
+public model commands. Release/recreation clears selection; an old generation's
+hide rule does not hide a new lifetime. Reverse seeking restores the original
+source lifetime without automatically selecting it. View commands leave the
+captured pose bytes unchanged. The scene vacated by the populated aggregate is
+empty in both tree and viewport, while its destination contains nine attachments.
+
+The existing application smoke mode also ran successfully against this native
+fixture with a real D3D11 WARP render target and PNG readback:
+
+```text
+pvd_viewer --smoke PREFIX_capture.pxd2 --warp --hidden --no-settings \
+  --report articulation-smoke.json --screenshot articulation-smoke.png
+```
+
+The local report recorded successful navigation, triangle picking and linked
+inspection, 3,731 changed pixels between frames, and 462 changed pixels for the
+selection highlight. This validates the actual GPU application path in addition
+to the CPU/ImGui test; it is not a fabricated preview or a claim of native SDK
+simulation in the viewer.
