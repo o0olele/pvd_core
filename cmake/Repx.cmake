@@ -61,5 +61,18 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/joints_export.repx ${PROJECT_BINARY_DIR}/fixtures/joints_export_expected.csv
             --oracle ${PROJECT_BINARY_DIR}/fixtures/joints_export_official.repx)
         set_tests_properties(physx34_repx_joints_official_roundtrip PROPERTIES FIXTURES_REQUIRED physx34_repx_joints TIMEOUT 30)
+        add_test(NAME physx34_repx_articulation_generate COMMAND pvd_repx_tests
+            ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2
+            ${PROJECT_BINARY_DIR}/fixtures/articulation_expected.csv
+            ${PROJECT_BINARY_DIR}/fixtures/articulation_export)
+        set_tests_properties(physx34_repx_articulation_generate PROPERTIES FIXTURES_REQUIRED physx34_articulation
+            FIXTURES_SETUP physx34_repx_articulation TIMEOUT 30)
+        foreach(suffix IN ITEMS "" _big_endian _scene _component _visible _boundary_partial)
+            add_test(NAME physx34_repx_articulation${suffix} COMMAND pvd_physx34_repx_validate
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_export${suffix}.repx
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_export${suffix}_expected.csv
+                --oracle ${PROJECT_BINARY_DIR}/fixtures/articulation_export${suffix}_official.repx)
+            set_tests_properties(physx34_repx_articulation${suffix} PROPERTIES FIXTURES_REQUIRED physx34_repx_articulation TIMEOUT 30)
+        endforeach()
     endif()
 endif()

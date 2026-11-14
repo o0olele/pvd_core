@@ -17,6 +17,8 @@ struct RepxStatus {
   std::string destination, error;
   std::size_t event_count = 0, actors = 0, shapes = 0, joints = 0, materials = 0,
               resources = 0, xml_bytes = 0;
+  std::size_t articulations = 0, articulation_links = 0,
+              articulation_joints = 0, aggregates = 0;
   std::vector<repx::Diagnostic> diagnostics;
   bool complete = false, cancel_requested = false;
   double elapsed_seconds = 0;

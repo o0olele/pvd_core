@@ -88,6 +88,10 @@ void checks(Document &doc,const std::filesystem::path &dir,bool partial) {
   auto expected=repx::export_session(*doc.session(),request.event_count,request.options);
   RepxJob job;job.start(*doc.session(),request);auto saved=finish(job);
   check(saved.stage==RepxStage::completed&&saved.actors==expected.actor_count&&saved.joints==expected.joint_count&&saved.complete==expected.complete,"background export differs");
+  check(saved.articulations==expected.articulation_count&&
+        saved.articulation_links==expected.articulation_link_count&&
+        saved.articulation_joints==expected.articulation_joint_count&&
+        saved.aggregates==expected.aggregate_count,"background native object counts differ");
   check(read(output)==expected.xml,"background file differs from snapshot");
   auto original=read(output);job.start(*doc.session(),request);
   check(finish(job).stage==RepxStage::failed&&read(output)==original,"no-overwrite damaged file");
@@ -127,6 +131,35 @@ void widgets(Document &doc,const std::filesystem::path &dir,float width) {
   check(chosen==0&&!result.started,"panel exported without input");
   ImGui::DestroyContext();
 }
+void native_checks(const char *capture,const std::filesystem::path &dir) {
+  Document doc;doc.open_file(capture);
+  check(doc.set_sample_point(SamplePoint::after_fetch)&&doc.set_frame(1),
+        "native job requires explicit post-fetch source prefix");
+  auto output=dir/"native.repx";
+  auto request=make_repx_request(doc,RepxScope::all_scenes,false,{output.u8string(),false});
+  const auto expected=repx::export_session(*doc.session(),request.event_count,request.options);
+  check(expected.articulation_count==2&&expected.articulation_link_count==6&&
+        expected.articulation_joint_count==4&&expected.aggregate_count==3,
+        "native displayed source graph differs from SDK fixture");
+  RepxJob job;job.start(*doc.session(),request);auto saved=finish(job);
+  check(saved.stage==RepxStage::completed&&saved.complete&&
+        saved.articulations==2&&saved.articulation_links==6&&
+        saved.articulation_joints==4&&saved.aggregates==3&&
+        read(output)==expected.xml,"native worker changed graph or counts");
+  widgets(doc,dir,420);widgets(doc,dir,1060);
+  auto visible=make_repx_request(doc,RepxScope::visible_shapes,false,{});
+  check(!visible.options.attachments.empty(),"native visible source missing");
+  auto whole=repx::export_session(*doc.session(),visible.event_count,visible.options);
+  check(whole.articulation_count>=1,"visible scope omitted complete native graph");
+  for(const auto &shape:doc.frame()->render.instances)
+    if(shape.actor.kind==render::ActorKind::articulation_link){doc.set_visible(shape.picking_key(),false);break;}
+  auto boundary=make_repx_request(doc,RepxScope::visible_shapes,false,{});
+  rejects([&]{repx::export_session(*doc.session(),boundary.event_count,boundary.options);});
+  boundary.options.unsupported=repx::UnsupportedPolicy::allow_partial;
+  const auto partial=repx::export_session(*doc.session(),boundary.event_count,boundary.options);
+  check(!partial.complete&&partial.articulation_count<whole.articulation_count,
+        "partial visible selection must omit its incomplete native graph");
+}
 }
 int main(int argc,char **argv) {
   try {
@@ -136,7 +169,9 @@ int main(int argc,char **argv) {
     check(doc.timeline().size()==2,"fixture frames missing");
     check(doc.session()->snapshot_at_event(doc.session()->event_count()).instances.empty(),"fixture EOF not empty");
     checks(doc,dir,false);widgets(doc,dir,420);widgets(doc,dir,1060);
-    if(argc>1){Document actual;actual.open_file(argv[1]);auto sub=dir/"sdk";std::filesystem::create_directory(sub);checks(actual,sub,true);}
+    if(argc>1){auto sub=dir/"sdk";std::filesystem::create_directory(sub);
+      if(argc==3&&std::string(argv[2])=="--native")native_checks(argv[1],sub);
+      else {Document actual;actual.open_file(argv[1]);checks(actual,sub,true);}}
     std::cout<<"RepX worker, displayed-prefix and exact-attachment tests passed\n";return 0;
   } catch(const std::exception &e){std::cerr<<e.what()<<'\n';if(ImGui::GetCurrentContext())ImGui::DestroyContext();return 1;}
 }

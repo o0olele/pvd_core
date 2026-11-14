@@ -68,6 +68,10 @@ void draw_repx_progress(RepxJob &job, bool compact) {
           status.complete ? "Complete rigid collection" : "Partial rigid collection",
           status.actors, status.shapes, status.joints, status.materials, status.resources, status.xml_bytes);
       ImGui::TextDisabled("Displayed prefix: %zu source events", status.event_count);
+      if (status.articulations || status.aggregates)
+        ImGui::TextWrapped("%zu articulations (%zu links, %zu inbound joints), %zu aggregates.",
+            status.articulations, status.articulation_links,
+            status.articulation_joints, status.aggregates);
     }
     if (status.stage == RepxStage::cancelled)
       ImGui::TextWrapped("Cancelled. No new output was published.");

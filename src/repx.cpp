@@ -1,5 +1,6 @@
 #include "pvd/repx.hpp"
 #include "pvd/render.hpp"
+#include "repx_articulation_fields.hpp"
 #include "repx_joint_fields.hpp"
 #include <algorithm>
 #include <atomic>
@@ -266,7 +267,7 @@ struct Shape {
 struct Actor {
   const InstanceState *object;
   std::vector<std::uint64_t> shapes;
-  bool dynamic = false;
+  bool dynamic = false, articulation_link = false;
 };
 struct Resource {
   const InstanceState *object;
@@ -281,6 +282,13 @@ struct Build {
   std::map<std::uint64_t, Actor> actors;
   std::map<std::uint64_t, joint_detail::Joint> joints;
   std::set<std::uint64_t> joint_candidates;
+  std::map<std::uint64_t, articulation_detail::Articulation> articulations;
+  std::map<std::uint64_t, articulation_detail::Aggregate> aggregates;
+  std::map<std::uint64_t, std::uint64_t> link_owners;
+  std::map<std::uint64_t, std::set<std::uint64_t>> owner_links;
+  std::map<std::uint64_t, std::string> invalid_links;
+  std::set<std::uint64_t> aggregate_candidates;
+  bool omitted_articulation = false;
   std::map<std::uint64_t, Shape> shapes;
   std::map<std::uint64_t, const InstanceState *> materials;
   std::map<std::uint64_t, Resource> resources;
@@ -291,6 +299,13 @@ struct Build {
       : metadata(m), snapshot(s), options(o) {}
   std::vector<std::uint64_t> actor_shapes(const InstanceState &actor) const {
     auto shape_refs = references(actor, "Shapes");
+    if (is(actor, "PxArticulationLink")) {
+      std::set<std::uint64_t> seen;
+      shape_refs.erase(
+          std::remove_if(shape_refs.begin(), shape_refs.end(),
+                         [&](auto id) { return !seen.insert(id).second; }),
+          shape_refs.end());
+    }
     if (options.selection == Selection::attachments) {
       const auto found = selected_attachments.find(actor.id);
       shape_refs.erase(std::remove_if(shape_refs.begin(), shape_refs.end(),
@@ -310,14 +325,107 @@ struct Build {
     if (options.cancelled && options.cancelled())
       throw ExportCancelled{};
   }
+  bool supported_actor(const InstanceState &o) const {
+    return is(o, "PxRigidStatic") || is(o, "PxRigidDynamic") ||
+           is(o, "PxArticulationLink");
+  }
+  std::uint64_t scene_ref(const InstanceState &actor) const {
+    const InstanceState *owner = &actor;
+    if (is(actor, "PxArticulationLink")) {
+      const auto found = link_owners.find(actor.id);
+      if (found == link_owners.end())
+        return 0;
+      owner = snapshot.instance(found->second);
+    }
+    const auto *p = owner ? owner->property("Scene") : nullptr;
+    return p ? p->as_object_ref().value_or(0) : 0;
+  }
   bool in_scene(const InstanceState &actor) const {
     if (!options.scene)
       return true;
-    const auto *p = actor.property("Scene");
-    auto id = p ? p->as_object_ref() : std::nullopt;
-    const auto *scene = id ? snapshot.instance(*id) : nullptr;
+    const auto *scene = snapshot.instance(scene_ref(actor));
     return scene && scene->id == options.scene->id &&
            scene->generation == options.scene->generation;
+  }
+  void index_articulation_links() {
+    for (const auto &entry : snapshot.instances)
+      if (is(entry.second, "PxArticulationLink")) {
+        check();
+        try {
+          const auto owner =
+              articulation_detail::owner_of(metadata, snapshot, entry.second);
+          link_owners.emplace(entry.first, owner);
+          owner_links[owner].insert(entry.first);
+        } catch (const ExportError &e) {
+          invalid_links.emplace(entry.first, e.what());
+        }
+      }
+  }
+  void select_articulations() {
+    std::set<std::uint64_t> candidates;
+    for (auto id : selected)
+      if (link_owners.count(id))
+        candidates.insert(link_owners.at(id));
+    if (options.selection == Selection::all_actors)
+      for (const auto &entry : snapshot.instances)
+        if (is(entry.second, "PxArticulation") && in_scene(entry.second))
+          candidates.insert(entry.first);
+    for (auto id : candidates) {
+      check();
+      const auto &owner = resolve(id);
+      try {
+        auto artifact = articulation_detail::read(metadata, snapshot, owner,
+                                                  owner_links[id]);
+        for (const auto &link : artifact.links) {
+          if (!selected.count(link.object->id))
+            throw ExportError("articulation crosses selected link boundary; no "
+                              "unselected link was added");
+          const auto raw_shapes = references(*link.object, "Shapes");
+          const auto all_shapes =
+              std::set<std::uint64_t>(raw_shapes.begin(), raw_shapes.end());
+          const auto kept = actor_shapes(*link.object);
+          if (options.selection == Selection::attachments &&
+              std::set<std::uint64_t>(kept.begin(), kept.end()) != all_shapes)
+            throw ExportError("articulation attachment selection omits link "
+                              "shapes; entire graph is required");
+          if (raw_shapes.size() != all_shapes.size())
+            result.diagnostics.push_back(
+                {Severity::warning, key(*link.object), "Shapes",
+                 "SDK PVD repeats this link/shape relationship; identical IDs "
+                 "canonicalized to one attachment"});
+        }
+        for (const auto &field : artifact.fields)
+          if (const auto *value = std::get_if<std::string>(&field.value))
+            (void)escape(*value);
+        articulations.emplace(id, std::move(artifact));
+      } catch (const ExportError &e) {
+        issue(owner, "articulation", e.what());
+        omitted_articulation = true;
+        for (auto link : owner_links[id])
+          selected.erase(link);
+      }
+    }
+    for (const auto &entry : snapshot.instances)
+      if (is(entry.second, "PxAggregate")) {
+        const auto &o = entry.second;
+        bool relevant =
+            options.selection == Selection::all_actors && in_scene(o);
+        for (const auto *p : {"Actors", "Articulations"})
+          if (o.property(p))
+            for (auto member : references(o, p))
+              relevant |= selected.count(member) != 0 ||
+                          articulations.count(member) != 0;
+        if (relevant)
+          aggregate_candidates.insert(o.id);
+      }
+    for (auto id : selected)
+      if (const auto *p = resolve(id).property("Aggregate"))
+        if (auto aggregate = p->as_object_ref(); aggregate && *aggregate)
+          aggregate_candidates.insert(*aggregate);
+    for (const auto &entry : articulations)
+      if (const auto *p = entry.second.object->property("Aggregate"))
+        if (auto aggregate = p->as_object_ref(); aggregate && *aggregate)
+          aggregate_candidates.insert(*aggregate);
   }
   void issue(const InstanceState &o, const std::string &property,
              const std::string &message) {
@@ -333,6 +441,7 @@ struct Build {
     return *o;
   }
   void select() {
+    index_articulation_links();
     if (options.scene) {
       const auto *scene = snapshot.instance(options.scene->id);
       if (!scene || scene->generation != options.scene->generation ||
@@ -349,7 +458,8 @@ struct Build {
               is(o, "PxMaterial") || is(o, "PxGeometry") ||
               is(o, "PxTriangleMesh") || is(o, "PxConvexMesh") ||
               is(o, "PxHeightField") || is(o, "PxJoint") ||
-              is(o, "PxConstraint") ||
+              is(o, "PxConstraint") || is(o, "PxArticulation") ||
+              is(o, "PxArticulationJoint") || is(o, "PxAggregate") ||
               o.class_name.namespace_name == "_debugger_");
         if (unknown_top) {
           if (!options.scene || !o.property("Scene") || in_scene(o))
@@ -358,7 +468,12 @@ struct Build {
                   "actor export");
           continue;
         }
-        if (options.scene && is(o, "PxActor") && !o.property("Scene")) {
+        if (invalid_links.count(o.id)) {
+          issue(o, "Parent", invalid_links.at(o.id));
+          continue;
+        }
+        if (options.scene && is(o, "PxActor") && !is(o, "PxArticulationLink") &&
+            !o.property("Scene")) {
           issue(o, "Scene",
                 "cannot determine scene membership for this "
                 "unsupported/detached actor");
@@ -366,11 +481,11 @@ struct Build {
         }
         if (!in_scene(o))
           continue;
-        if (is(o, "PxRigidStatic") || is(o, "PxRigidDynamic"))
+        if (supported_actor(o))
           selected.insert(o.id);
         else if (is(o, "PxActor"))
           issue(o, "class",
-                "unsupported actor: articulation/cloth/particles/APEX require "
+                "unsupported actor: cloth/particles/APEX require "
                 "dedicated serialization");
       }
     } else if (options.selection == Selection::attachments) {
@@ -388,12 +503,12 @@ struct Build {
         if (!is(scene, "PxScene") || !is(shape, "PxShape"))
           throw ExportError(
               "requested RepX attachment has invalid scene/shape type");
-        if (!(is(actor, "PxRigidStatic") || is(actor, "PxRigidDynamic"))) {
+        if (!supported_actor(actor)) {
           issue(actor, "class", "unsupported actor in requested attachment");
           continue;
         }
-        const auto source_scene = need(actor, "Scene").as_object_ref();
-        if (!source_scene || *source_scene != scene.id || !in_scene(actor))
+        const auto source_scene = scene_ref(actor);
+        if (!source_scene || source_scene != scene.id || !in_scene(actor))
           throw ExportError(
               "requested RepX attachment scene does not own this actor");
         const auto source_shapes = references(actor, "Shapes");
@@ -411,7 +526,7 @@ struct Build {
         if (!o || o->generation != requested.generation)
           throw ExportError("requested RepX object is absent/stale: " +
                             std::to_string(requested.id));
-        if (is(*o, "PxRigidStatic") || is(*o, "PxRigidDynamic")) {
+        if (supported_actor(*o)) {
           if (!in_scene(*o))
             throw ExportError("requested actor is outside selected scene");
           selected.insert(o->id);
@@ -419,8 +534,7 @@ struct Build {
           bool owner = false;
           for (const auto &entry : snapshot.instances) {
             const auto &actor = entry.second;
-            if (!(is(actor, "PxRigidStatic") || is(actor, "PxRigidDynamic")) ||
-                !in_scene(actor))
+            if (!supported_actor(actor) || !in_scene(actor))
               continue;
             auto refs = references(actor, "Shapes");
             if (std::find(refs.begin(), refs.end(), o->id) != refs.end()) {
@@ -435,6 +549,7 @@ struct Build {
                 "selection roots must be supported rigid actors or attached "
                 "shapes");
       }
+    select_articulations();
     // A view selection is never expanded across a joint endpoint.
     std::set<std::uint64_t> linked, backing;
     for (auto id : selected) {
@@ -478,9 +593,7 @@ struct Build {
     }
     for (const auto &entry : snapshot.instances) {
       const auto &o = entry.second;
-      if (!(is(o, "PxConstraint") || is(o, "PxArticulation") ||
-            is(o, "PxAggregate")) ||
-          backing.count(o.id))
+      if (!is(o, "PxConstraint") || backing.count(o.id))
         continue;
       bool relevant =
           options.selection == Selection::all_actors && !options.scene;
@@ -490,10 +603,10 @@ struct Build {
             relevant |= selected.count(id) != 0;
       if (relevant)
         issue(o, "class",
-              "custom constraint/articulation/aggregate serialization is not "
-              "implemented");
+              "custom PxConstraint serialization is not implemented");
     }
-    if (selected.empty())
+    if (selected.empty() && aggregate_candidates.empty() &&
+        !omitted_articulation)
       throw ExportError("no supported actors in requested RepX selection");
   }
   void validate_material(const InstanceState &m) {
@@ -593,7 +706,7 @@ struct Build {
       }
     return filtered;
   }
-  void validate_actor(const InstanceState &o, bool dynamic) {
+  void validate_actor(const InstanceState &o, bool dynamic, bool link = false) {
     pose(o, "GlobalPose");
     text(o, "Name");
     actor_flags(integer(o, "ActorFlags"));
@@ -614,6 +727,20 @@ struct Build {
                angular = vector(o, "AngularVelocity");
     const auto body = integer(o, "RigidBodyFlags");
     body_flags(body);
+    if (link) {
+      if (body & 1)
+        throw ExportError(
+            "kinematic articulation links are unsupported by SDK");
+      const auto mass = scalar(o, "Mass"),
+                 ccd = scalar(o, "MinCCDAdvanceCoefficient");
+      const auto inertia = vector(o, "MassSpaceInertiaTensor");
+      if (mass <= 0 || inertia.x <= 0 || inertia.y <= 0 || inertia.z <= 0 ||
+          ccd < 0 || ccd > 1 || scalar(o, "MaxDepenetrationVelocity") < 0 ||
+          scalar(o, "MaxContactImpulse") < 0)
+        throw ExportError(
+            "invalid articulation rigid-body mass/inertia/limits");
+      return;
+    }
     if ((body & 1) &&
         (linear.x || linear.y || linear.z || angular.x || angular.y ||
          angular.z || scalar(o, "WakeCounter") != 0 ||
@@ -645,8 +772,9 @@ struct Build {
       check();
       const auto &o = resolve(id);
       try {
-        const bool dynamic = is(o, "PxRigidDynamic");
-        validate_actor(o, dynamic);
+        const bool link = is(o, "PxArticulationLink");
+        const bool dynamic = is(o, "PxRigidDynamic") || link;
+        validate_actor(o, dynamic, link);
         auto refs = actor_shapes(o);
         if (std::set<std::uint64_t>(refs.begin(), refs.end()).size() !=
             refs.size())
@@ -684,13 +812,41 @@ struct Build {
           pending.emplace(shape_id, Shape{&s, found->second, std::move(mats),
                                           integer(s, "IsExclusive") != 0});
         }
-        actors.emplace(id, Actor{&o, std::move(refs), dynamic});
+        actors.emplace(id, Actor{&o, std::move(refs), dynamic, link});
         shapes.insert(pending.begin(), pending.end());
       } catch (const ExportError &e) {
         issue(o, "export", e.what());
       }
     }
-    if (actors.empty())
+    // A link is never emitted outside its complete, valid owning graph.
+    for (auto it = articulations.begin(); it != articulations.end();) {
+      const bool complete = std::all_of(
+          it->second.links.begin(), it->second.links.end(),
+          [&](const auto &link) { return actors.count(link.object->id) != 0; });
+      if (complete) {
+        ++it;
+        continue;
+      }
+      issue(*it->second.object, "articulation",
+            "one or more link bodies/shapes are invalid; entire articulation "
+            "omitted");
+      omitted_articulation = true;
+      for (const auto &link : it->second.links) {
+        actors.erase(link.object->id);
+        selected.erase(link.object->id);
+      }
+      it = articulations.erase(it);
+    }
+    std::set<std::uint64_t> used_shapes;
+    for (const auto &actor : actors)
+      used_shapes.insert(actor.second.shapes.begin(),
+                         actor.second.shapes.end());
+    for (auto it = shapes.begin(); it != shapes.end();)
+      if (!used_shapes.count(it->first))
+        it = shapes.erase(it);
+      else
+        ++it;
+    if (actors.empty() && aggregate_candidates.empty() && !omitted_articulation)
       throw ExportError("no actors remain after RepX validation");
     std::map<std::uint64_t, std::size_t> owners;
     for (const auto &actor : actors)
@@ -743,9 +899,70 @@ struct Build {
         options.max_objects)
       throw ExportError("RepX dependency object budget exceeded");
   }
+  std::size_t articulation_joints() const {
+    std::size_t count = 0;
+    for (const auto &entry : articulations)
+      for (const auto &link : entry.second.links)
+        count += link.joint != nullptr;
+    return count;
+  }
+  void prepare_aggregates() {
+    std::map<std::uint64_t, std::uint64_t> membership;
+    for (auto id : aggregate_candidates) {
+      check();
+      const auto &o = resolve(id);
+      try {
+        auto value = articulation_detail::read_aggregate(metadata, snapshot, o,
+                                                         articulations);
+        for (auto actor : value.actors)
+          if (!selected.count(actor) || !actors.count(actor))
+            throw ExportError("aggregate crosses selected actor boundary; no "
+                              "unselected actor was added");
+        for (const auto &actor : actors)
+          if (!actor.second.articulation_link)
+            if (const auto *p = actor.second.object->property("Aggregate");
+                p && p->as_object_ref() == id)
+              if (std::find(value.actors.begin(), value.actors.end(),
+                            actor.first) == value.actors.end())
+                throw ExportError("aggregate Actors omits a recorded member");
+        for (const auto &art : articulations)
+          if (const auto *p = art.second.object->property("Aggregate");
+              p && p->as_object_ref() == id)
+            if (std::find(value.articulations.begin(),
+                          value.articulations.end(),
+                          art.first) == value.articulations.end())
+              throw ExportError(
+                  "aggregate Articulations omits a recorded member");
+        std::vector<std::uint64_t> members = value.actors;
+        for (auto owner : value.articulations)
+          for (const auto &link : articulations.at(owner).links)
+            members.push_back(link.object->id);
+        const auto aggregate_scene = scene_ref(o);
+        for (auto member : members) {
+          if (membership.count(member))
+            throw ExportError(
+                "actor/link belongs to multiple recorded aggregates");
+          if (aggregate_scene && scene_ref(resolve(member)) != aggregate_scene)
+            throw ExportError(
+                "aggregate members disagree with its recorded scene");
+        }
+        for (auto member : members)
+          membership.emplace(member, id);
+        aggregates.emplace(id, std::move(value));
+      } catch (const ExportError &e) {
+        issue(o, "aggregate", e.what());
+      }
+    }
+    const auto count = actors.size() + shapes.size() + materials.size() +
+                       resources.size() + articulations.size() +
+                       articulation_joints() + aggregates.size();
+    if (count > options.max_objects)
+      throw ExportError("RepX articulation/aggregate object budget exceeded");
+  }
   void prepare_joints() {
-    const auto base_count =
-        actors.size() + shapes.size() + materials.size() + resources.size();
+    const auto base_count = actors.size() + shapes.size() + materials.size() +
+                            resources.size() + articulations.size() +
+                            articulation_joints() + aggregates.size();
     std::size_t field_bytes = 0;
     for (auto id : joint_candidates) {
       check();
@@ -841,10 +1058,21 @@ struct Build {
       if (!shape.second.exclusive)
         add(*shape.second.object, "PxShape");
     for (const auto &actor : actors)
-      add(*actor.second.object,
-          actor.second.dynamic ? "PxRigidDynamic" : "PxRigidStatic");
+      add(*actor.second.object, actor.second.articulation_link
+                                    ? "PxArticulationLink"
+                                : actor.second.dynamic ? "PxRigidDynamic"
+                                                       : "PxRigidStatic");
     for (const auto &joint : joints)
       add(*joint.second.object, joint.second.type.c_str());
+    for (const auto &art : articulations) {
+      add(*art.second.object, "PxArticulation");
+      for (const auto &link : art.second.links)
+        if (link.joint)
+          result.objects.push_back({key(*link.joint), 0, "PxArticulationJoint",
+                                    serial(link.object->id), UINT32_MAX});
+    }
+    for (const auto &aggregate : aggregates)
+      add(*aggregate.second.object, "PxAggregate");
     for (const auto &actor : actors)
       for (std::size_t i = 0; i < actor.second.shapes.size(); ++i) {
         const auto &shape = shapes.at(actor.second.shapes[i]);
@@ -934,6 +1162,62 @@ struct Build {
     xml.element("Name", text(o, "Name"));
     xml.close("PxShape");
   }
+  void actor_fields(Xml &xml, const Actor &a) {
+    const auto &o = *a.object;
+    xml.element("Name", text(o, "Name"));
+    xml.element("ActorFlags", actor_flags(integer(o, "ActorFlags")));
+    xml.element("DominanceGroup", std::to_string(integer(o, "DominanceGroup")));
+    xml.element("OwnerClient", std::to_string(integer(o, "OwnerClient")));
+    if (o.property("ClientBehaviorFlags"))
+      xml.element("ClientBehaviorFlags",
+                  flags(integer(o, "ClientBehaviorFlags"),
+                        {"eREPORT_TO_FOREIGN_CLIENTS_TRIGGER_NOTIFY",
+                         "eREPORT_TO_FOREIGN_CLIENTS_CONTACT_NOTIFY",
+                         "eREPORT_TO_FOREIGN_CLIENTS_CONSTRAINT_BREAK_NOTIFY",
+                         "eREPORT_TO_FOREIGN_CLIENTS_SCENE_QUERY"}));
+    xml.element("GlobalPose", transform(pose(o, "GlobalPose")));
+    xml.open("Shapes");
+    for (auto id : a.shapes) {
+      const auto &s = shapes.at(id);
+      if (s.exclusive)
+        shape(xml, s, true);
+      else
+        xml.element("PxShapeRef", std::to_string(serial(id)));
+    }
+    xml.close("Shapes");
+    if (a.dynamic) {
+      xml.element("CMassLocalPose", transform(pose(o, "CMassLocalPose")));
+      xml.element("Mass", number(scalar(o, "Mass")));
+      xml.element("MassSpaceInertiaTensor",
+                  vec(vector(o, "MassSpaceInertiaTensor")));
+      xml.element("LinearVelocity", vec(vector(o, "LinearVelocity")));
+      xml.element("AngularVelocity", vec(vector(o, "AngularVelocity")));
+      xml.element("RigidBodyFlags", body_flags(integer(o, "RigidBodyFlags")));
+      for (const auto *p : {"MinCCDAdvanceCoefficient",
+                            "MaxDepenetrationVelocity", "MaxContactImpulse"})
+        xml.element(p, number(scalar(o, p)));
+      if (!a.articulation_link) {
+        if (o.property("KinematicTarget"))
+          xml.element("KinematicTarget", transform(pose(o, "KinematicTarget")));
+        if (o.property("RigidDynamicLockFlags"))
+          xml.element("RigidDynamicLockFlags",
+                      lock_flags(integer(o, "RigidDynamicLockFlags")));
+        for (const auto *p :
+             {"LinearDamping", "AngularDamping", "MaxAngularVelocity",
+              "SleepThreshold", "StabilizationThreshold", "WakeCounter",
+              "ContactReportThreshold"})
+          xml.element(p, number(scalar(o, p)));
+        xml.open("SolverIterationCounts");
+        xml.element("minPositionIters",
+                    std::to_string(
+                        integer(o, "SolverIterationCounts.minPositionIters")));
+        xml.element("minVelocityIters",
+                    std::to_string(
+                        integer(o, "SolverIterationCounts.minVelocityIters")));
+        xml.close("SolverIterationCounts");
+      }
+    }
+  }
   struct JointNode {
     std::optional<std::string> value;
     std::map<std::string, JointNode> children;
@@ -977,6 +1261,80 @@ struct Build {
     xml.element("Id", std::to_string(serial(joint.object->id)));
     emit(emit, root);
     xml.close(joint.type);
+  }
+  void artifact_fields(Xml &xml,
+                       const std::vector<articulation_detail::Field> &fields) {
+    JointNode root;
+    for (const auto &field : fields) {
+      auto *node = &root;
+      for (const auto &component : field.path)
+        node = &node->children[component];
+      std::visit(
+          [&](const auto &value) {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, std::uint64_t>)
+              node->value = std::to_string(value);
+            else if constexpr (std::is_same_v<T, float>)
+              node->value = number(value);
+            else if constexpr (std::is_same_v<T, Vec3>)
+              node->value = vec(value);
+            else if constexpr (std::is_same_v<T, Quat>)
+              node->value = quat(value);
+            else if constexpr (std::is_same_v<T, Transform>)
+              node->value = transform(value);
+            else
+              node->value = value;
+          },
+          field.value);
+    }
+    const auto emit = [&](const auto &self, const JointNode &node) -> void {
+      for (const auto &child : node.children)
+        if (child.second.value)
+          xml.element(child.first, *child.second.value);
+        else {
+          xml.open(child.first);
+          self(self, child.second);
+          xml.close(child.first);
+        }
+    };
+    emit(emit, root);
+  }
+  void articulation_xml(Xml &xml,
+                        const articulation_detail::Articulation &art) {
+    xml.open("PxArticulation");
+    xml.element("Id", std::to_string(serial(art.object->id)));
+    artifact_fields(xml, art.fields);
+    xml.open("Links");
+    for (const auto &link : art.links) {
+      xml.open("PxArticulationLink");
+      xml.element("Id", std::to_string(serial(link.object->id)));
+      if (link.parent)
+        xml.element("Parent", std::to_string(serial(link.parent)));
+      actor_fields(xml, actors.at(link.object->id));
+      if (link.joint) {
+        xml.open("Joint");
+        artifact_fields(xml, link.joint_fields);
+        xml.close("Joint");
+      }
+      xml.close("PxArticulationLink");
+    }
+    xml.close("Links");
+    xml.close("PxArticulation");
+  }
+  void aggregate_xml(Xml &xml,
+                     const articulation_detail::Aggregate &aggregate) {
+    xml.open("PxAggregate");
+    xml.element("Id", std::to_string(serial(aggregate.object->id)));
+    xml.open("Actors");
+    for (auto id : aggregate.actors)
+      xml.element("PxActorRef", std::to_string(serial(id)));
+    for (auto id : aggregate.articulations)
+      xml.element("PxArticulationRef", std::to_string(serial(id)));
+    xml.close("Actors");
+    xml.element("NumActors", std::to_string(aggregate.actor_count));
+    xml.element("MaxNbActors", std::to_string(aggregate.max_actors));
+    xml.element("SelfCollision", aggregate.self_collision ? "true" : "false");
+    xml.close("PxAggregate");
   }
   Result output() {
     allocate_ids();
@@ -1083,67 +1441,27 @@ struct Build {
     for (const auto &entry : shapes)
       if (!entry.second.exclusive)
         shape(xml, entry.second, false);
-    for (const auto &entry : actors) {
-      const auto &a = entry.second;
-      const auto &o = *a.object;
-      const char *type = a.dynamic ? "PxRigidDynamic" : "PxRigidStatic";
-      xml.open(type);
-      xml.element("Id", std::to_string(serial(o.id)));
-      xml.element("Name", text(o, "Name"));
-      xml.element("ActorFlags", actor_flags(integer(o, "ActorFlags")));
-      xml.element("DominanceGroup",
-                  std::to_string(integer(o, "DominanceGroup")));
-      xml.element("OwnerClient", std::to_string(integer(o, "OwnerClient")));
-      if (o.property("ClientBehaviorFlags"))
-        xml.element("ClientBehaviorFlags",
-                    flags(integer(o, "ClientBehaviorFlags"),
-                          {"eREPORT_TO_FOREIGN_CLIENTS_TRIGGER_NOTIFY",
-                           "eREPORT_TO_FOREIGN_CLIENTS_CONTACT_NOTIFY",
-                           "eREPORT_TO_FOREIGN_CLIENTS_CONSTRAINT_BREAK_NOTIFY",
-                           "eREPORT_TO_FOREIGN_CLIENTS_SCENE_QUERY"}));
-      xml.element("GlobalPose", transform(pose(o, "GlobalPose")));
-      xml.open("Shapes");
-      for (auto id : a.shapes) {
-        const auto &s = shapes.at(id);
-        if (s.exclusive)
-          shape(xml, s, true);
-        else
-          xml.element("PxShapeRef", std::to_string(serial(id)));
+    for (const auto &entry : actors)
+      if (!entry.second.articulation_link) {
+        const auto &a = entry.second;
+        const char *type = a.dynamic ? "PxRigidDynamic" : "PxRigidStatic";
+        xml.open(type);
+        xml.element("Id", std::to_string(serial(entry.first)));
+        actor_fields(xml, a);
+        xml.close(type);
       }
-      xml.close("Shapes");
-      if (a.dynamic) {
-        xml.element("CMassLocalPose", transform(pose(o, "CMassLocalPose")));
-        xml.element("Mass", number(scalar(o, "Mass")));
-        xml.element("MassSpaceInertiaTensor",
-                    vec(vector(o, "MassSpaceInertiaTensor")));
-        xml.element("LinearVelocity", vec(vector(o, "LinearVelocity")));
-        xml.element("AngularVelocity", vec(vector(o, "AngularVelocity")));
-        xml.element("RigidBodyFlags", body_flags(integer(o, "RigidBodyFlags")));
-        if (o.property("KinematicTarget"))
-          xml.element("KinematicTarget", transform(pose(o, "KinematicTarget")));
-        if (o.property("RigidDynamicLockFlags"))
-          xml.element("RigidDynamicLockFlags",
-                      lock_flags(integer(o, "RigidDynamicLockFlags")));
-        for (const auto *p :
-             {"MinCCDAdvanceCoefficient", "MaxDepenetrationVelocity",
-              "MaxContactImpulse", "LinearDamping", "AngularDamping",
-              "MaxAngularVelocity", "SleepThreshold", "StabilizationThreshold",
-              "WakeCounter", "ContactReportThreshold"})
-          xml.element(p, number(scalar(o, p)));
-        xml.open("SolverIterationCounts");
-        xml.element("minPositionIters",
-                    std::to_string(
-                        integer(o, "SolverIterationCounts.minPositionIters")));
-        xml.element("minVelocityIters",
-                    std::to_string(
-                        integer(o, "SolverIterationCounts.minVelocityIters")));
-        xml.close("SolverIterationCounts");
-      }
-      xml.close(type);
-    }
+    for (const auto &entry : articulations)
+      articulation_xml(xml, entry.second);
     for (const auto &joint : joints)
       joint_xml(xml, joint.second);
+    for (const auto &entry : aggregates)
+      aggregate_xml(xml, entry.second);
     xml.close("PhysX30Collection");
+    result.articulation_count = articulations.size();
+    result.articulation_joint_count = articulation_joints();
+    for (const auto &entry : articulations)
+      result.articulation_link_count += entry.second.links.size();
+    result.aggregate_count = aggregates.size();
     result.joint_count = joints.size();
     result.xml = std::move(xml.data);
     result.actor_count = actors.size();
@@ -1176,6 +1494,7 @@ Result export_snapshot(const Metadata &metadata, const Snapshot &snapshot,
         build.issue(*actor, diagnostic.property, diagnostic.message);
     }
   build.prepare(frame);
+  build.prepare_aggregates();
   build.prepare_joints();
   return build.output();
 }

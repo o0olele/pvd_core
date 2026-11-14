@@ -1,6 +1,6 @@
 # PhysX 3.4 RepX export
 
-`pvd::repx` exports a recorded rigid actor/joint snapshot as PhysX RepX XML. Its
+`pvd::repx` exports a recorded rigid actor, articulation, aggregate and joint snapshot as PhysX RepX XML. Its
 public header is `pvd/repx.hpp`; it links `pvd::core` and privately uses the
 SDK-independent render extractor. It has no PhysX, ImGui, GPU, or simulation
 runtime dependency. The optional validation executable is a separate process
@@ -20,8 +20,10 @@ Selected or visible export uses explicit immutable object keys supplied by the
 caller. Keys include generation and stale keys are rejected. Selecting a shape
 includes all its supported owning actors; this preserves shared-shape identity.
 Their transitive shape, material, mesh/heightfield dependencies and eligible
-extension joints are included. Joint endpoints never expand this actor selection. Actor/shape selection roots are supported; arbitrary unknown objects
-are not quietly converted to rigid bodies.
+extension joints are included. Joint endpoints never expand this actor selection.
+Rigid actor, articulation-link and shape selection roots are supported; arbitrary
+owner/unknown objects are not quietly converted to rigid bodies. Articulation
+and aggregate containers are retained only for complete selected member graphs.
 
 For viewport selection or visibility, use `Selection::attachments` and
 `Options.attachments`, whose `AttachmentKey` contains scene, actor and shape
@@ -170,10 +172,84 @@ zero; actual SDK loading verifies all-zero actor/shape/material/joint flag
 variants. Nonzero flags always use validated SDK names. This also fixes the
 rigid-object zero-flags case rather than only the new joint fields.
 
+## Native articulations and aggregates
+
+PhysX 3.4 `PxArticulation` is supported as a complete graph, with its
+`PxArticulationLink` rigid bodies, inline inbound `PxArticulationJoint` objects,
+shapes, materials and geometry dependencies. This is the native 3.4 articulation
+API; no reduced-coordinate or later SDK fields are invented. The exact XML comes
+from `SnRepXCoreSerializer.cpp` and the articulation specializations in
+`SnXmlVisitorReader.h` / `SnXmlVisitorWriter.h`.
+
+The PVD binding publishes only the root in `Articulation.Links`. Each link has a
+`Parent` reference and its own `Links` children. The exporter verifies both
+directions, detects cycles, duplicate/orphan links and wrong joint ownership,
+and emits one root with all parents before their children. The native SDK limit
+is 64 links. A root's absent `InboundJoint` means null; a nonroot must publish a
+valid inbound joint and matching `Joint.Link`. A link's unpopulated `Scene` value
+is resolved through the parent chain to its owning articulation. No Scene or
+Aggregate pointer is guessed from a neighboring actor.
+
+The articulation preserves its name, projection/separation settings, internal
+and external drive iterations, both solver iteration counts, sleep/stabilization
+thresholds and recorded wake counter. Each link preserves Actor/RigidActor and
+RigidBody fields: global/center-of-mass poses, mass and inertia, both velocities,
+body flags, CCD advance coefficient, depenetration/contact impulse bounds and
+shape bindings. Links do not inherit `PxRigidDynamic` damping, locks or its other
+extra fields. Link mass/inertia must be positive and kinematic links are refused,
+as required by the SDK.
+
+Inbound joints preserve both anchor poses, target orientation/velocity, drive
+type, spring/damping/compliance, swing/twist limits, tangential coefficients,
+contact distances and limit-enable booleans. Generated metadata names the first
+`getSwingLimit` result `SwingLimit.zLimit` and the second `SwingLimit.yLimit`,
+although the API describes the values as Y then Z. The PVD and XML labels are
+preserved without swapping values. A genuine native RepX limitation is explicit:
+the reader visits `TargetOrientation` before `DriveType`, initially using
+`eTARGET`. Consequently a nonunit `eERROR` rotation-vector target cannot be
+restored. Strict mode rejects it; partial mode omits the whole articulation.
+A unit vector with `w=0` is representable and tested through the actual reader.
+
+The actual SDK PVD stream repeats identical Shape references on some nonroot
+links, even though `getNbShapes()` is one and the shape was attached once. Those
+known link/shape relationship duplicates are canonicalized to one attachment,
+with a source warning and XML provenance. This does not merge different shapes,
+change their ordering or weaken ordinary rigid-actor duplicate checks.
+
+`PxAggregate` preserves capacity, self-collision and complete membership. PVD
+publishes separate `Actors` (ordinary rigid actors) and `Articulations` lists;
+per-member Aggregate pointers are not populated in the real stream. XML contains
+one `PxActorRef` per rigid member and one `PxArticulationRef` per articulation.
+`NumActors` counts every link, not merely the number of owner references.
+Capacity is bounded by the SDK's 128 actors. Multiple-aggregate membership,
+wrong types, mismatched scenes, incomplete references and capacity overflows
+are refused. A positive-capacity aggregate whose membership has never been
+published is unverified, rather than silently declared empty; queued initial
+PVD commands can cause this transient state.
+
+All-actor and scene-scoped exports include their complete eligible graphs.
+Selected/visible exports never fill in missing links, omitted link shapes or
+unselected aggregate actors. An incomplete articulation is rejected, or its
+entire graph and link dependencies are omitted with explicit partial diagnostics.
+An aggregate crossing the selected boundary is rejected, or its container is
+omitted; the explicitly selected valid members may remain standalone in a
+partial export. All links and shapes of an articulation must remain selected
+even if only one link is visually interesting. Actor/link and shape keys still
+include generation; pointer reuse cannot retarget a selection.
+
+`Result.actor_count` includes links; `articulation_link_count` is that subset.
+`articulation_count`, `articulation_joint_count` and `aggregate_count` expose the
+other native objects, while `joint_count` continues to mean extension joints.
+Every native owner, link, inbound joint and aggregate counts against the object
+budget. The native reader registers inline links with collection IDs but creates
+inbound joints without their own IDs. Such a source joint has `serial_id=0`,
+`owner_serial_id=link ID`, `shape_index=UINT32_MAX`; this does not collide with
+that link's first inline shape at index zero. No source generation is fabricated.
+
 ## Strict and partial exports
 
 `UnsupportedPolicy::reject` is the default. Unsupported actor classes,
-articulations, custom joints/constraints, aggregates, cloth, particles/APEX actors,
+custom articulation/joint/constraint types, cloth, particles/APEX actors,
 unknown requested roots, stale references, invalid geometry/types/flags and
 unavailable required properties are reported. Unknown top-level classes are
 not declared a complete rigid export. Scene-scoped relationship checks consider
@@ -184,7 +260,9 @@ even under partial mode; this mode is not permission to guess corrupt geometry.
 known native serialization losses. `Result.complete` becomes false, diagnostics
 identify source objects/properties, and warning provenance is persisted as XML
 comments. Consumers must show these warnings before presenting the artifact as
-a successful partial export. Empty or wholly unsupported selections fail.
+a successful partial export. An empty selection fails. A requested malformed or
+incomplete graph can yield a wholly omitted, explicitly partial collection with
+its diagnostics, rather than an invalid collection of standalone links.
 
 Actual SDK validation exposed a native format limitation: the RepX reader skips
 kinematic linear/angular velocity, its specialized wake-counter setter skips
@@ -293,3 +371,43 @@ validate only the selected actor's three dependencies with no widened anchor.
 Tests also cover read-only broken/internal flags, missing drive data, invalid
 motion/cone/pose values, stale actor generations, source immutability and exact
 object budgets including auxiliary constraints.
+
+### Native articulation SDK oracle
+
+`examples/physx34_articulation_capture.cpp` independently creates two native
+articulations (six links, four inbound joints), three rigid actors and three
+aggregates in two scenes. Nondefault anchors, masses/inertia, velocities,
+iterations, compliance, limits and an `eERROR` unit-vector drive are recorded.
+The fixture exercises removals/rejoins, aggregate moves and pointer reuse in its
+later lifecycle. Its dedicated `articulation_oracle` marker follows both scenes'
+first fetch/flush; initial queued membership is not mistaken for a completed
+aggregate publication. Native Frame end and post-fetch dynamic update timing
+remain the Session's explicit sampling conventions.
+
+```text
+pvd_repx_tests real_capture.pxd2 real_expected.csv exported_articulations
+physx34_repx_validate exported_articulations.repx exported_articulations_expected.csv --oracle official_cycle.repx
+```
+
+The exporter test directly matches 162 recorded owner/joint scalar components
+against that independent SDK getter CSV and emits six collections: all, big
+endian, one scene, a complete selected component, equivalent exact visible
+attachments, and explicit aggregate-boundary partial output. Full loading checks
+28 independently mapped SDK objects and 831 fields; scene scope checks 19/554,
+the selected/visible component 16/503, and the boundary-partial graph 13/416.
+Every variant passes actual SDK loading, official XML writing and loading again.
+
+The official SDK articulation writer rewrites nested link IDs to current
+process pointers even if their collection IDs were stable. The independent
+validator therefore retains each link's articulation/child path from the first
+load and normalizes those volatile IDs in the second load, while comparing all
+parent/child/member references and physical properties. It does not edit the
+SDK-authored XML. Ordinary top-level IDs retain their exact mapping. Existing
+seven-geometry and six-extension-joint SDK tests remain in the same suite.
+
+SDK-free unit cases also cover whole-graph partial omission, a bad link body,
+cycle/orphan rejection, nonrestorable error drives, duplicate aggregate
+membership, explicit zero flags, source endian preservation and budgets including
+inline native joints. Neither saved XML nor a successful native reload represents
+solver caches, forces, drive caches, sleep history or a complete simulation
+continuation; only recorded serializable properties are exported.

@@ -54,7 +54,10 @@ struct Options {
 };
 struct ObjectMapping {
   ObjectKey source;
-  // Inline exclusive shapes have no collection-level serial ID in SDK RepX.
+  // Inline exclusive shapes and articulation inbound joints have no collection
+  // serial ID. For an inbound joint, owner_serial_id locates its link;
+  // shape_index is UINT32_MAX for that joint. Other inline locators identify
+  // an actor shape, including shape index zero on the same link.
   std::uint64_t serial_id = 0;
   std::string type;
   std::uint64_t owner_serial_id = 0;
@@ -65,6 +68,10 @@ struct Result {
   std::string version = "3.4.2";
   std::size_t actor_count = 0, shape_count = 0, material_count = 0,
               resource_count = 0, joint_count = 0;
+  // actor_count includes articulation links; joint_count counts extension
+  // joints.
+  std::size_t articulation_count = 0, articulation_link_count = 0,
+              articulation_joint_count = 0, aggregate_count = 0;
   std::vector<ObjectMapping> objects;
   std::vector<Diagnostic> diagnostics;
   bool complete = true;
@@ -78,7 +85,8 @@ public:
   using std::runtime_error::runtime_error;
 };
 // PhysX 3.4 RepX XML containing selected rigid actors and their material/shape/
-// mesh dependencies and eligible six-type extension joints. No SDK, ImGui,
+// mesh dependencies, complete native articulations/aggregates, and eligible
+// six-type extension joints. No SDK, ImGui,
 // device, or scene simulation dependency. Joint endpoints never widen actors.
 // Unknown/unsupported requested content is rejected by default. Partial output
 // requires explicit opt-in and carries diagnostics plus XML provenance.

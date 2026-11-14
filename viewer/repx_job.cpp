@@ -55,6 +55,10 @@ struct RepxJob::Impl {
         state.actors = result.actor_count;
         state.shapes = result.shape_count;
         state.joints = result.joint_count;
+        state.articulations = result.articulation_count;
+        state.articulation_links = result.articulation_link_count;
+        state.articulation_joints = result.articulation_joint_count;
+        state.aggregates = result.aggregate_count;
         state.materials = result.material_count;
         state.resources = result.resource_count;
         state.xml_bytes = result.xml.size();

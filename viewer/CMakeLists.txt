@@ -196,6 +196,9 @@ if(BUILD_TESTING)
             add_test(NAME repx_job_joints_physx34 COMMAND pvd_repx_job_tests
                 ${PROJECT_BINARY_DIR}/fixtures/joints_capture.pxd2)
             set_tests_properties(repx_job_joints_physx34 PROPERTIES FIXTURES_REQUIRED physx34_joints TIMEOUT 30)
+            add_test(NAME repx_job_articulation_physx34 COMMAND pvd_repx_job_tests
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2 --native)
+            set_tests_properties(repx_job_articulation_physx34 PROPERTIES FIXTURES_REQUIRED physx34_articulation TIMEOUT 30)
         endif()
     endif()
     add_executable(pvd_scene_tools_tests ${PROJECT_SOURCE_DIR}/tests/scene_tools_tests.cpp panels.cpp)

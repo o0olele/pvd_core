@@ -274,6 +274,12 @@ float joint_float(const InstanceState &object, const JointOracleRow &row) {
     const float parts[] = {v->x, v->y, v->z};
     return parts[row.index];
   }
+  if (value.incoming_type.name == "PxQuat") {
+    const auto v = value.as_quat();
+    check(bool(v) && row.index < 4, "joint quaternion component");
+    const float parts[] = {v->x, v->y, v->z, v->w};
+    return parts[row.index];
+  }
   check(row.index == 0, "joint scalar oracle index");
   return scalar(object, row.property.c_str());
 }
@@ -285,6 +291,32 @@ std::uint64_t joint_uint(const InstanceState &object,
     return *v;
   }
   return uint(object, row.property.c_str());
+}
+std::uint64_t articulation_owner(const Snapshot &s, const InstanceState &link) {
+  const auto *current = &link;
+  std::set<std::uint64_t> seen;
+  while (current->class_name.name == "PxArticulationLink") {
+    check(seen.insert(current->id).second && seen.size() <= 64,
+          "oracle parent cycle/limit");
+    const auto id = need(*current, "Parent").as_object_ref();
+    check(bool(id), "oracle parent encoding");
+    current = s.instance(*id);
+    check(current, "oracle parent exists");
+  }
+  check(current->class_name.name == "PxArticulation",
+        "oracle parent terminates at articulation");
+  return current->id;
+}
+std::vector<std::uint64_t> unique_refs(const InstanceState &o, const char *p) {
+  std::vector<std::uint64_t> refs;
+  if (const auto *v = o.property(p))
+    for (std::size_t i = 0; i < v->item_count; ++i) {
+      const auto id = v->as_object_ref(i);
+      check(bool(id), "oracle reference value");
+      if (std::find(refs.begin(), refs.end(), *id) == refs.end())
+        refs.push_back(*id);
+    }
+  return refs;
 }
 void expected(std::ostream &out, const Metadata &metadata,
               const Snapshot &state, const xml::Result &result,
@@ -318,14 +350,17 @@ void expected(std::ostream &out, const Metadata &metadata,
     out << "object," << mapping.serial_id << ',' << mapping.owner_serial_id
         << ',' << mapping.shape_index << ',' << mapping.type << '\n';
     Csv c{out, mapping};
-    if (mapping.type == "PxRigidStatic" || mapping.type == "PxRigidDynamic") {
+    if (mapping.type == "PxRigidStatic" || mapping.type == "PxRigidDynamic" ||
+        mapping.type == "PxArticulationLink") {
       c.s("Name", o.property("Name") ? need(o, "Name").text.value_or("") : "");
       c.pose("GlobalPose", pose(o, "GlobalPose"));
       for (const auto *p : {"ActorFlags", "DominanceGroup", "OwnerClient"})
         c.u(p, uint(o, p));
       if (o.property("ClientBehaviorFlags"))
         c.u("ClientBehaviorFlags", uint(o, "ClientBehaviorFlags"));
-      auto refs = *need(o, "Shapes").reference_ids;
+      auto refs = mapping.type == "PxArticulationLink"
+                      ? unique_refs(o, "Shapes")
+                      : *need(o, "Shapes").reference_ids;
       if (options.selection == xml::Selection::attachments)
         refs.erase(
             std::remove_if(refs.begin(), refs.end(),
@@ -347,7 +382,8 @@ void expected(std::ostream &out, const Metadata &metadata,
                                pose(*state.instance(refs[i]), "LocalPose")),
                i * 7);
       }
-      if (mapping.type == "PxRigidDynamic") {
+      if (mapping.type == "PxRigidDynamic" ||
+          mapping.type == "PxArticulationLink") {
         c.pose("CMassLocalPose", pose(o, "CMassLocalPose"));
         c.f("Mass", scalar(o, "Mass"));
         c.vec("MassSpaceInertiaTensor", vec(o, "MassSpaceInertiaTensor"));
@@ -356,6 +392,24 @@ void expected(std::ostream &out, const Metadata &metadata,
         c.vec("AngularVelocity",
               kinematic ? Vec3{} : vec(o, "AngularVelocity"));
         c.u("RigidBodyFlags", uint(o, "RigidBodyFlags"));
+        if (mapping.type == "PxArticulationLink") {
+          for (const auto *p :
+               {"MinCCDAdvanceCoefficient", "MaxDepenetrationVelocity",
+                "MaxContactImpulse"})
+            c.f(p, scalar(o, p));
+          const auto owner = articulation_owner(state, o);
+          c.u("ArticulationRef", ids.at(owner));
+          const auto parent = need(o, "Parent").as_object_ref().value();
+          c.u("ParentRef", parent == owner ? 0 : ids.at(parent));
+          auto children = unique_refs(o, "Links");
+          for (auto &id : children)
+            id = ids.at(id);
+          std::sort(children.begin(), children.end());
+          c.u("ChildCount", children.size());
+          for (std::size_t i = 0; i < children.size(); ++i)
+            c.u("ChildRef", children[i], i);
+          continue;
+        }
         c.u("HasKinematicTarget", 0);
         if (o.property("RigidDynamicLockFlags"))
           c.u("RigidDynamicLockFlags", uint(o, "RigidDynamicLockFlags"));
@@ -371,6 +425,46 @@ void expected(std::ostream &out, const Metadata &metadata,
         c.u("minVelocityIters",
             uint(o, "SolverIterationCounts.minVelocityIters"));
       }
+    } else if (mapping.type == "PxArticulation" ||
+               mapping.type == "PxArticulationJoint") {
+      check(joint_oracle && joint_oracle->count(o.id),
+            "independent native-articulation property list required");
+      if (mapping.type == "PxArticulation") {
+        c.s("Name", need(o, "Name").text.value_or(""));
+        std::vector<std::uint64_t> links;
+        for (const auto &entry : result.objects)
+          if (entry.type == "PxArticulationLink" &&
+              articulation_owner(state, *state.instance(entry.source.id)) ==
+                  o.id)
+            links.push_back(entry.serial_id);
+        std::sort(links.begin(), links.end());
+        c.u("LinkCount", links.size());
+        for (std::size_t i = 0; i < links.size(); ++i)
+          c.u("LinkRef", links[i], i);
+      }
+      for (const auto &row : joint_oracle->at(o.id))
+        if (row.kind == 'f')
+          c.f(row.property, joint_float(o, row), row.index);
+        else if (row.kind == 'u')
+          c.u(row.property, uint(o, row.property.c_str()), row.index);
+    } else if (mapping.type == "PxAggregate") {
+      c.u("MaxNbActors", uint(o, "MaxNbActors"));
+      c.u("SelfCollision", uint(o, "SelfCollision"));
+      auto members = unique_refs(o, "Actors");
+      const auto arts = unique_refs(o, "Articulations");
+      for (const auto &entry : result.objects)
+        if (entry.type == "PxArticulationLink") {
+          const auto owner =
+              articulation_owner(state, *state.instance(entry.source.id));
+          if (std::find(arts.begin(), arts.end(), owner) != arts.end())
+            members.push_back(entry.source.id);
+        }
+      for (auto &id : members)
+        id = ids.at(id);
+      std::sort(members.begin(), members.end());
+      c.u("ActorCount", members.size());
+      for (std::size_t i = 0; i < members.size(); ++i)
+        c.u("ActorRef", members[i], i);
     } else if (mapping.type.find("Joint") != std::string::npos) {
       check(joint_oracle && joint_oracle->count(o.id),
             "independent joint getter oracle required");
@@ -767,6 +861,294 @@ std::vector<std::string> joint_csv_split(std::string line) {
   }
   return result;
 }
+void native_articulation_unit() {
+  Fixture f;
+  for (const auto *name :
+       {"PxRigidBody", "PxArticulationLink", "PxArticulation",
+        "PxArticulationJoint", "PxAggregate"}) {
+    QualifiedName q{"physx3", name};
+    f.metadata.classes.emplace(q, ClassDefinition{q, {}, {}});
+  }
+  f.metadata.classes.at({"physx3", "PxRigidBody"}).parent =
+      QualifiedName{"physx3", "PxRigidActor"};
+  f.metadata.classes.at({"physx3", "PxArticulationLink"}).parent =
+      QualifiedName{"physx3", "PxRigidBody"};
+  auto &root = f.state.instances.at(100);
+  root.class_name = {"physx3", "PxArticulationLink"};
+  root.properties["Scene"] = refs({0});
+  root.properties["Parent"] = refs({500});
+  root.properties["Links"] = refs({101});
+  root.properties["CMassLocalPose"] =
+      floats("PxTransform", {0, 0, 0, 1, .1f, 0, 0});
+  root.properties["Mass"] = floats("PvdF32", {1.25f});
+  root.properties["MassSpaceInertiaTensor"] = floats("PxVec3", {1, 2, 3});
+  root.properties["LinearVelocity"] = floats("PxVec3", {.1f, .2f, .3f});
+  root.properties["AngularVelocity"] = floats("PxVec3", {.4f, .5f, .6f});
+  root.properties["RigidBodyFlags"] = ui(0);
+  root.properties["MinCCDAdvanceCoefficient"] = floats("PvdF32", {.2f});
+  root.properties["MaxDepenetrationVelocity"] = floats("PvdF32", {100});
+  root.properties["MaxContactImpulse"] = floats("PvdF32", {1000});
+  auto child = root;
+  child.id = 101;
+  child.properties.erase("Links");
+  child.properties["Shapes"] = refs({11, 11});
+  child.properties["Parent"] = refs({100});
+  child.properties["InboundJoint"] = refs({700});
+  f.state.instances.emplace(101, std::move(child));
+  auto shape = f.state.instances.at(10);
+  shape.id = 11;
+  shape.properties["Actor"] = refs({101});
+  f.state.instances.emplace(11, std::move(shape));
+  InstanceState art;
+  art.id = 500;
+  art.class_name = {"physx3", "PxArticulation"};
+  art.properties["Scene"] = refs({1});
+  art.properties["Links"] = refs({100});
+  art.properties["IsSleeping"] = ui(0);
+  art.properties["Name"] = string("native articulation");
+  for (const auto *name : {"MaxProjectionIterations", "InternalDriveIterations",
+                           "ExternalDriveIterations"})
+    art.properties[name] = ui(3);
+  art.properties["SolverIterationCounts.minPositionIters"] = ui(8);
+  art.properties["SolverIterationCounts.minVelocityIters"] = ui(2);
+  for (const auto *name : {"SeparationTolerance", "SleepThreshold",
+                           "StabilizationThreshold", "WakeCounter"})
+    art.properties[name] = floats("PvdF32", {.01f});
+  f.state.instances.emplace(500, std::move(art));
+  InstanceState joint;
+  joint.id = 700;
+  joint.class_name = {"physx3", "PxArticulationJoint"};
+  joint.properties["Link"] = refs({101});
+  joint.properties["ParentPose"] = joint.properties["ChildPose"] =
+      floats("PxTransform", {0, 0, 0, 1, 0, 0, 0});
+  joint.properties["TargetOrientation"] = floats("PxQuat", {0, 0, 0, 1});
+  joint.properties["TargetVelocity"] = floats("PxVec3", {.2f, .3f, .4f});
+  joint.properties["DriveType"] = ui(0);
+  joint.properties["SwingLimitEnabled"] = ui(1);
+  joint.properties["TwistLimitEnabled"] = ui(0);
+  for (const auto *name :
+       {"Stiffness", "Damping", "TangentialStiffness", "TangentialDamping",
+        "InternalCompliance", "ExternalCompliance", "SwingLimitContactDistance",
+        "TwistLimitContactDistance"})
+    joint.properties[name] = floats("PvdF32", {.1f});
+  joint.properties["SwingLimit.zLimit"] = floats("PvdF32", {.5f});
+  joint.properties["SwingLimit.yLimit"] = floats("PvdF32", {.7f});
+  joint.properties["TwistLimit.lower"] = floats("PvdF32", {-.4f});
+  joint.properties["TwistLimit.upper"] = floats("PvdF32", {.6f});
+  f.state.instances.emplace(700, std::move(joint));
+  InstanceState aggregate;
+  aggregate.id = 600;
+  aggregate.class_name = {"physx3", "PxAggregate"};
+  aggregate.properties["Scene"] = refs({1});
+  aggregate.properties["Actors"] = refs({});
+  aggregate.properties["Articulations"] = refs({500});
+  aggregate.properties["MaxNbActors"] = ui(16);
+  aggregate.properties["SelfCollision"] = ui(0);
+  f.state.instances.emplace(600, std::move(aggregate));
+  const auto result = xml::export_snapshot(f.metadata, f.state);
+  check(result.complete && result.actor_count == 2 && result.shape_count == 2 &&
+            result.articulation_count == 1 &&
+            result.articulation_link_count == 2 &&
+            result.articulation_joint_count == 1 && result.aggregate_count == 1,
+        "native articulation unit graph/counters");
+  check(result.objects.size() == 8 &&
+            result.xml.find("<NumActors>2</NumActors>") != std::string::npos,
+        "native object budget/membership");
+  for (const auto &mapping : result.objects)
+    if (mapping.type == "PxArticulationJoint")
+      check(mapping.serial_id == 0 && mapping.owner_serial_id &&
+                mapping.shape_index == UINT32_MAX,
+            "native joint inline locator collides with first shape");
+  check(xml::export_snapshot(f.metadata, big_endian(f.state)).xml == result.xml,
+        "native unit BE values");
+  xml::Options selected;
+  selected.selection = xml::Selection::objects;
+  selected.objects = {{101, 0}};
+  rejects([&] { xml::export_snapshot(f.metadata, f.state, selected); });
+  selected.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto omitted = xml::export_snapshot(f.metadata, f.state, selected);
+  check(!omitted.complete && omitted.actor_count == 0 &&
+            omitted.articulation_count == 0 &&
+            omitted.xml.find("<PxArticulationLink>") == std::string::npos,
+        "partial selection emitted orphan links");
+  auto broken = f.state;
+  broken.instances.at(101).properties["Links"] = refs({100});
+  rejects([&] { xml::export_snapshot(f.metadata, broken); });
+  broken = f.state;
+  broken.instances.at(700).properties["DriveType"] = ui(1);
+  broken.instances.at(700).properties["TargetOrientation"] =
+      floats("PxQuat", {0, .2f, 0, 0});
+  rejects([&] { xml::export_snapshot(f.metadata, broken); });
+  broken.instances.at(700).properties["TargetOrientation"] =
+      floats("PxQuat", {0, 1, 0, 0});
+  check(xml::export_snapshot(f.metadata, broken).complete,
+        "restorable eERROR unit target rejected");
+  broken = f.state;
+  broken.instances.at(101).properties["Mass"] = floats("PvdF32", {0});
+  xml::Options partial;
+  partial.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto bad_body = xml::export_snapshot(f.metadata, broken, partial);
+  check(bad_body.articulation_count == 0 && bad_body.actor_count == 0,
+        "bad link body left a partial articulation");
+  broken = f.state;
+  auto duplicate = broken.instances.at(600);
+  duplicate.id = 601;
+  broken.instances.emplace(601, std::move(duplicate));
+  rejects([&] { xml::export_snapshot(f.metadata, broken); });
+  const auto duplicate_aggregate =
+      xml::export_snapshot(f.metadata, broken, partial);
+  check(!duplicate_aggregate.complete &&
+            duplicate_aggregate.aggregate_count == 1,
+        "duplicate aggregate membership was silently serialized");
+  xml::Options budget;
+  budget.max_objects = 7;
+  rejects([&] { xml::export_snapshot(f.metadata, f.state, budget); });
+  budget.max_objects = 8;
+  check(xml::export_snapshot(f.metadata, f.state, budget).objects.size() == 8,
+        "native budget counts inline joint");
+}
+void real_articulations(const char *capture, const char *oracle_file,
+                        const char *output) {
+  auto session = Session::load_file(capture);
+  std::size_t prefix = 0;
+  for (const auto &section : session.sections())
+    if (section.name == "articulation_oracle")
+      prefix = section.event_count;
+  check(prefix, "real native-articulation marker missing");
+  const auto snapshot = session.snapshot_at_event(prefix);
+  const auto &metadata = session.metadata();
+  JointOracle oracle;
+  std::ifstream file(std::filesystem::u8path(oracle_file));
+  check(bool(file), "native SDK oracle CSV open");
+  std::string line;
+  std::size_t checked = 0;
+  while (std::getline(file, line)) {
+    auto fields = joint_csv_split(line);
+    if (fields[0] == "step")
+      continue;
+    check(fields.size() == 8, "native oracle CSV schema");
+    if (fields[0] != "1" || fields[1] != "post1" || fields[4][0] == '@')
+      continue;
+    if (fields[3] != "PxArticulation" && fields[3] != "PxArticulationJoint")
+      continue;
+    if (fields[6] != "f" && fields[6] != "u")
+      continue;
+    if (fields[4] == "IsSleeping")
+      continue;
+    const auto id = std::stoull(fields[2]);
+    const auto *object = snapshot.instance(id);
+    check(object, "native oracle object missing");
+    JointOracleRow row{{},
+                       fields[3],
+                       fields[4],
+                       fields[7],
+                       static_cast<std::size_t>(std::stoull(fields[5])),
+                       fields[6][0]};
+    // This exact post-fetch oracle also covers the owner's synchronized
+    // counter.
+    {
+      if (row.kind == 'f')
+        check(std::abs(joint_float(*object, row) - std::stof(row.value)) <=
+                  1e-6f,
+              "native recorded joint/config field differs from SDK getter");
+      else
+        check(uint(*object, row.property.c_str()) == std::stoull(row.value),
+              "native recorded integer differs from SDK getter");
+      ++checked;
+    }
+    oracle[id].push_back(std::move(row));
+  }
+  check(oracle.size() == 6 && checked > 150,
+        "native SDK property oracle coverage");
+  const auto base = xml::export_snapshot(metadata, snapshot);
+  check(base.complete && base.actor_count == 9 &&
+            base.articulation_count == 2 && base.articulation_link_count == 6 &&
+            base.articulation_joint_count == 4 && base.aggregate_count == 3 &&
+            base.objects.size() == 28,
+        "real native artifact/dependency coverage");
+  emit_fixture(output, metadata, snapshot, {}, &oracle);
+  const auto be = big_endian(snapshot);
+  check(xml::export_snapshot(metadata, be).xml == base.xml,
+        "native BE XML differs");
+  emit_fixture(std::string(output) + "_big_endian", metadata, be, {}, &oracle);
+  std::uint64_t main = 0;
+  for (const auto &entry : snapshot.instances)
+    if (entry.second.class_name.name == "PxArticulation" &&
+        need(entry.second, "Name").text->find("Branched") != std::string::npos)
+      main = entry.first;
+  check(main, "branched native owner missing");
+  const auto scene =
+      need(*snapshot.instance(main), "Scene").as_object_ref().value();
+  xml::Options scoped;
+  scoped.scene = xml::ObjectKey{scene, snapshot.instance(scene)->generation};
+  const auto scene_result = xml::export_snapshot(metadata, snapshot, scoped);
+  check(scene_result.articulation_count == 1 &&
+            scene_result.articulation_link_count == 4 &&
+            scene_result.actor_count == 6 && scene_result.aggregate_count == 2,
+        "native scene scope expanded across scenes");
+  emit_fixture(std::string(output) + "_scene", metadata, snapshot, scoped,
+               &oracle);
+  xml::Options component;
+  component.selection = xml::Selection::objects;
+  component.scene = scoped.scene;
+  for (const auto &entry : snapshot.instances)
+    if (entry.second.class_name.name == "PxArticulationLink" &&
+        articulation_owner(snapshot, entry.second) == main)
+      component.objects.push_back({entry.first, entry.second.generation});
+  const auto link_only = component;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, component); });
+  for (const auto &entry : snapshot.instances)
+    if (entry.second.class_name.name == "PxRigidDynamic" &&
+        need(entry.second, "Name").text == "Moving aggregate member")
+      component.objects.push_back({entry.first, entry.second.generation});
+  const auto selected = xml::export_snapshot(metadata, snapshot, component);
+  check(selected.actor_count == 5 && selected.aggregate_count == 1 &&
+            selected.articulation_count == 1,
+        "complete native component was not preserved");
+  emit_fixture(std::string(output) + "_component", metadata, snapshot,
+               component, &oracle);
+  xml::Options attachments = component;
+  attachments.selection = xml::Selection::attachments;
+  attachments.objects.clear();
+  for (const auto &actor : component.objects)
+    for (auto id : unique_refs(*snapshot.instance(actor.id), "Shapes"))
+      attachments.attachments.push_back(
+          {*scoped.scene, actor, {id, snapshot.instance(id)->generation}});
+  check(xml::export_snapshot(metadata, snapshot, attachments).xml ==
+            selected.xml,
+        "complete visible native attachments differ from selected component");
+  emit_fixture(std::string(output) + "_visible", metadata, snapshot,
+               attachments, &oracle);
+  auto partial = link_only;
+  partial.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto omitted_aggregate =
+      xml::export_snapshot(metadata, snapshot, partial);
+  check(!omitted_aggregate.complete &&
+            omitted_aggregate.articulation_count == 1 &&
+            omitted_aggregate.aggregate_count == 0 &&
+            omitted_aggregate.actor_count == 4,
+        "boundary partial included unselected aggregate actors");
+  emit_fixture(std::string(output) + "_boundary_partial", metadata, snapshot,
+               partial, &oracle);
+  auto one = partial;
+  one.objects.resize(1);
+  const auto omitted_graph = xml::export_snapshot(metadata, snapshot, one);
+  check(!omitted_graph.complete && omitted_graph.articulation_count == 0 &&
+            omitted_graph.actor_count == 0,
+        "partial link selection emitted orphan graph");
+  xml::Options budget;
+  budget.max_objects = 27;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, budget); });
+  budget.max_objects = 28;
+  check(xml::export_snapshot(metadata, snapshot, budget).objects.size() == 28,
+        "native SDK object budget inconsistent");
+  auto stale = component;
+  ++stale.objects.front().generation;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, stale); });
+  std::cout
+      << "Native articulation SDK oracle: " << checked
+      << " recorded fields, 2 graphs/6 links/4 joints/3 aggregates passed\n";
+}
 void real_joints(const char *capture, const char *oracle_file,
                  const char *output) {
   auto session = Session::load_file(capture);
@@ -988,13 +1370,20 @@ void real_joints(const char *capture, const char *oracle_file,
 } // namespace
 int main(int argc, char **argv) {
   try {
-    if (argc == 1)
+    if (argc == 1) {
       unit();
-    else if (argc == 3)
+      native_articulation_unit();
+    } else if (argc == 3)
       real(argv[1], argv[2]);
-    else if (argc == 4)
-      real_joints(argv[1], argv[2], argv[3]);
-    else
+    else if (argc == 4) {
+      std::ifstream oracle(std::filesystem::u8path(argv[2]));
+      std::string header;
+      std::getline(oracle, header);
+      if (header.rfind("step,phase,object,class", 0) == 0)
+        real_articulations(argv[1], argv[2], argv[3]);
+      else
+        real_joints(argv[1], argv[2], argv[3]);
+    } else
       throw std::runtime_error("usage: repx_tests [capture.pxd2 output_prefix] "
                                "or [joints.pxd2 joints.csv output_prefix]");
     std::cout << "RepX tests passed\n";

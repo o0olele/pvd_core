@@ -211,7 +211,13 @@ void triangles(Fields &fields, const PxTriangleMesh &mesh) {
     vec(fields, "TriangleNormal", normal, i * 3);
   }
 }
-Fields inspect(PxBase &object, PxCollection &collection) {
+Fields inspect(PxBase &object, PxCollection &collection,
+               const std::map<PxSerialObjectId, PxSerialObjectId> &aliases) {
+  const auto serial = [&](const PxBase &value) {
+    const auto raw = collection.getId(value);
+    const auto found = aliases.find(raw);
+    return found == aliases.end() ? raw : found->second;
+  };
   Fields f;
   if (auto *actor = object.is<PxRigidActor>()) {
     f[{"Name", 0}] = {'s', hex(actor->getName())};
@@ -224,9 +230,22 @@ Fields inspect(PxBase &object, PxCollection &collection) {
     actor->getShapes(shapes.data(), static_cast<PxU32>(shapes.size()));
     u(f, "ShapeCount", shapes.size());
     for (std::size_t i = 0; i < shapes.size(); ++i) {
-      u(f, "ShapeRef", collection.getId(*shapes[i]), i);
+      u(f, "ShapeRef", serial(*shapes[i]), i);
       pose(f, "ShapeWorldPose",
            actor->getGlobalPose() * shapes[i]->getLocalPose(), i * 7);
+    }
+    if (auto *body = actor->is<PxRigidBody>()) {
+      pose(f, "CMassLocalPose", body->getCMassLocalPose());
+      scalar(f, "Mass", body->getMass());
+      vec(f, "MassSpaceInertiaTensor", body->getMassSpaceInertiaTensor());
+      vec(f, "LinearVelocity", body->getLinearVelocity());
+      vec(f, "AngularVelocity", body->getAngularVelocity());
+      u(f, "RigidBodyFlags", body->getRigidBodyFlags());
+      scalar(f, "MinCCDAdvanceCoefficient",
+             body->getMinCCDAdvanceCoefficient());
+      scalar(f, "MaxDepenetrationVelocity",
+             body->getMaxDepenetrationVelocity());
+      scalar(f, "MaxContactImpulse", body->getMaxContactImpulse());
     }
     if (auto *dynamic = actor->is<PxRigidDynamic>()) {
       pose(f, "CMassLocalPose", dynamic->getCMassLocalPose());
@@ -261,8 +280,8 @@ Fields inspect(PxBase &object, PxCollection &collection) {
     PxRigidActor *a0 = nullptr;
     PxRigidActor *a1 = nullptr;
     joint->getActors(a0, a1);
-    u(f, "Actors.actor0", a0 ? collection.getId(*a0) : 0);
-    u(f, "Actors.actor1", a1 ? collection.getId(*a1) : 0);
+    u(f, "Actors.actor0", a0 ? serial(*a0) : 0);
+    u(f, "Actors.actor1", a1 ? serial(*a1) : 0);
     pose(f, "LocalPose[eACTOR0]",
          joint->getLocalPose(PxJointActorIndex::eACTOR0));
     pose(f, "LocalPose[eACTOR1]",
@@ -362,6 +381,92 @@ Fields inspect(PxBase &object, PxCollection &collection) {
              typed->getProjectionAngularTolerance());
     }
   }
+  if (auto *art = object.is<PxArticulation>()) {
+    f[{"Name", 0}] = {'s', hex(art->getName())};
+    u(f, "MaxProjectionIterations", art->getMaxProjectionIterations());
+    u(f, "InternalDriveIterations", art->getInternalDriveIterations());
+    u(f, "ExternalDriveIterations", art->getExternalDriveIterations());
+    PxU32 position = 0, velocity = 0;
+    art->getSolverIterationCounts(position, velocity);
+    u(f, "SolverIterationCounts.minPositionIters", position);
+    u(f, "SolverIterationCounts.minVelocityIters", velocity);
+    scalar(f, "SeparationTolerance", art->getSeparationTolerance());
+    scalar(f, "SleepThreshold", art->getSleepThreshold());
+    scalar(f, "StabilizationThreshold", art->getStabilizationThreshold());
+    scalar(f, "WakeCounter", art->getWakeCounter());
+    std::vector<PxArticulationLink *> links(art->getNbLinks());
+    art->getLinks(links.data(), static_cast<PxU32>(links.size()));
+    std::vector<PxSerialObjectId> ids;
+    for (auto *link : links)
+      ids.push_back(serial(*link));
+    std::sort(ids.begin(), ids.end());
+    u(f, "LinkCount", ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i)
+      u(f, "LinkRef", ids[i], i);
+  }
+  if (auto *link = object.is<PxArticulationLink>()) {
+    auto &art = link->getArticulation();
+    u(f, "ArticulationRef", serial(art));
+    std::vector<PxArticulationLink *> links(art.getNbLinks());
+    art.getLinks(links.data(), static_cast<PxU32>(links.size()));
+    PxSerialObjectId parent = 0;
+    for (auto *candidate : links) {
+      std::vector<PxArticulationLink *> children(candidate->getNbChildren());
+      candidate->getChildren(children.data(),
+                             static_cast<PxU32>(children.size()));
+      if (std::find(children.begin(), children.end(), link) != children.end())
+        parent = serial(*candidate);
+    }
+    u(f, "ParentRef", parent);
+    std::vector<PxArticulationLink *> children(link->getNbChildren());
+    link->getChildren(children.data(), static_cast<PxU32>(children.size()));
+    std::vector<PxSerialObjectId> ids;
+    for (auto *child : children)
+      ids.push_back(serial(*child));
+    std::sort(ids.begin(), ids.end());
+    u(f, "ChildCount", ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i)
+      u(f, "ChildRef", ids[i], i);
+  }
+  if (auto *joint = object.is<PxArticulationJoint>()) {
+    pose(f, "ParentPose", joint->getParentPose());
+    pose(f, "ChildPose", joint->getChildPose());
+    quat(f, "TargetOrientation", joint->getTargetOrientation());
+    vec(f, "TargetVelocity", joint->getTargetVelocity());
+    u(f, "DriveType", static_cast<PxU32>(joint->getDriveType()));
+    scalar(f, "Stiffness", joint->getStiffness());
+    scalar(f, "Damping", joint->getDamping());
+    scalar(f, "InternalCompliance", joint->getInternalCompliance());
+    scalar(f, "ExternalCompliance", joint->getExternalCompliance());
+    PxReal first = 0, second = 0;
+    joint->getSwingLimit(first, second);
+    scalar(f, "SwingLimit.zLimit", first);
+    scalar(f, "SwingLimit.yLimit", second);
+    joint->getTwistLimit(first, second);
+    scalar(f, "TwistLimit.lower", first);
+    scalar(f, "TwistLimit.upper", second);
+    scalar(f, "TangentialStiffness", joint->getTangentialStiffness());
+    scalar(f, "TangentialDamping", joint->getTangentialDamping());
+    scalar(f, "SwingLimitContactDistance",
+           joint->getSwingLimitContactDistance());
+    scalar(f, "TwistLimitContactDistance",
+           joint->getTwistLimitContactDistance());
+    u(f, "SwingLimitEnabled", joint->getSwingLimitEnabled());
+    u(f, "TwistLimitEnabled", joint->getTwistLimitEnabled());
+  }
+  if (auto *aggregate = object.is<PxAggregate>()) {
+    u(f, "MaxNbActors", aggregate->getMaxNbActors());
+    u(f, "SelfCollision", aggregate->getSelfCollision());
+    std::vector<PxActor *> actors(aggregate->getNbActors());
+    aggregate->getActors(actors.data(), static_cast<PxU32>(actors.size()));
+    std::vector<PxSerialObjectId> ids;
+    for (auto *actor : actors)
+      ids.push_back(serial(*actor));
+    std::sort(ids.begin(), ids.end());
+    u(f, "ActorCount", ids.size());
+    for (std::size_t i = 0; i < ids.size(); ++i)
+      u(f, "ActorRef", ids[i], i);
+  }
   if (auto *shape = object.is<PxShape>()) {
     f[{"Name", 0}] = {'s', hex(shape->getName())};
     pose(f, "LocalPose", shape->getLocalPose());
@@ -382,7 +487,7 @@ Fields inspect(PxBase &object, PxCollection &collection) {
     shape->getMaterials(mats.data(), static_cast<PxU32>(mats.size()));
     u(f, "MaterialCount", mats.size());
     for (std::size_t i = 0; i < mats.size(); ++i)
-      u(f, "MaterialRef", collection.getId(*mats[i]), i);
+      u(f, "MaterialRef", serial(*mats[i]), i);
     const auto g = shape->getGeometry();
     u(f, "GeometryType", g.getType());
     switch (g.getType()) {
@@ -400,20 +505,20 @@ Fields inspect(PxBase &object, PxCollection &collection) {
       vec(f, "MeshScale", g.convexMesh().scale.scale);
       quat(f, "MeshRotation", g.convexMesh().scale.rotation);
       u(f, "MeshFlags", g.convexMesh().meshFlags);
-      u(f, "ResourceRef", collection.getId(*g.convexMesh().convexMesh));
+      u(f, "ResourceRef", serial(*g.convexMesh().convexMesh));
       break;
     case PxGeometryType::eTRIANGLEMESH:
       vec(f, "MeshScale", g.triangleMesh().scale.scale);
       quat(f, "MeshRotation", g.triangleMesh().scale.rotation);
       u(f, "MeshFlags", g.triangleMesh().meshFlags);
-      u(f, "ResourceRef", collection.getId(*g.triangleMesh().triangleMesh));
+      u(f, "ResourceRef", serial(*g.triangleMesh().triangleMesh));
       break;
     case PxGeometryType::eHEIGHTFIELD:
       scalar(f, "HeightScale", g.heightField().heightScale);
       scalar(f, "RowScale", g.heightField().rowScale);
       scalar(f, "ColumnScale", g.heightField().columnScale);
       u(f, "MeshFlags", g.heightField().heightFieldFlags);
-      u(f, "ResourceRef", collection.getId(*g.heightField().heightField));
+      u(f, "ResourceRef", serial(*g.heightField().heightField));
       break;
     case PxGeometryType::ePLANE:
       break;
@@ -475,8 +580,63 @@ std::vector<std::string> split(const std::string &s) {
   }
   return row;
 }
+struct LinkPath {
+  PxSerialObjectId articulation = 0;
+  std::vector<PxU32> children;
+};
+using LinkPaths = std::map<PxSerialObjectId, LinkPath>;
+LinkPaths link_paths(PxCollection &collection) {
+  LinkPaths result;
+  for (PxU32 i = 0; i < collection.getNbObjects(); ++i)
+    if (auto *art = collection.getObject(i).is<PxArticulation>()) {
+      std::vector<PxArticulationLink *> all(art->getNbLinks());
+      art->getLinks(all.data(), static_cast<PxU32>(all.size()));
+      std::vector<std::pair<PxArticulationLink *, LinkPath>> queue;
+      for (auto *link : all)
+        if (!link->getInboundJoint())
+          queue.push_back({link, {collection.getId(*art), {}}});
+      need(queue.size() == 1, "SDK articulation root topology");
+      for (std::size_t at = 0; at < queue.size(); ++at) {
+        auto *link = queue[at].first;
+        const auto path = queue[at].second;
+        result.emplace(collection.getId(*link), path);
+        std::vector<PxArticulationLink *> children(link->getNbChildren());
+        link->getChildren(children.data(), static_cast<PxU32>(children.size()));
+        for (PxU32 child = 0; child < children.size(); ++child) {
+          auto next = path;
+          next.children.push_back(child);
+          queue.push_back({children[child], std::move(next)});
+        }
+      }
+      need(queue.size() == all.size(), "SDK articulation covers all links");
+    }
+  return result;
+}
+PxArticulationLink *resolve_link(PxCollection &collection,
+                                 const LinkPath &path) {
+  auto *base = collection.find(path.articulation);
+  need(base && base->is<PxArticulation>(),
+       "official-cycle articulation stable ID");
+  auto *art = base->is<PxArticulation>();
+  std::vector<PxArticulationLink *> all(art->getNbLinks());
+  art->getLinks(all.data(), static_cast<PxU32>(all.size()));
+  PxArticulationLink *current = nullptr;
+  for (auto *link : all)
+    if (!link->getInboundJoint())
+      current = link;
+  need(current, "official-cycle root link");
+  for (auto index : path.children) {
+    std::vector<PxArticulationLink *> children(current->getNbChildren());
+    current->getChildren(children.data(), static_cast<PxU32>(children.size()));
+    need(index < children.size(), "official-cycle child path");
+    current = children[index];
+  }
+  return current;
+}
 void validate(const std::string &xml, const std::string &expected,
-              const std::string &oracle = {}) {
+              const std::string &oracle = {},
+              const LinkPaths *prior_links = nullptr,
+              LinkPaths *retained_links = nullptr) {
   Context context;
   Input input(xml);
   auto *collection = PxSerialization::createCollectionFromXml(
@@ -488,6 +648,19 @@ void validate(const std::string &xml, const std::string &expected,
   } guard{collection};
   std::ifstream csv(std::filesystem::u8path(expected));
   need(bool(csv), "open expected CSV");
+  std::map<PxSerialObjectId, PxBase *> remapped_objects;
+  std::map<PxSerialObjectId, PxSerialObjectId> aliases;
+  if (prior_links)
+    for (const auto &entry : *prior_links) {
+      auto *link = resolve_link(*collection, entry.second);
+      remapped_objects.emplace(entry.first, link);
+      aliases.emplace(collection->getId(*link), entry.first);
+    }
+  const auto locate = [&](PxSerialObjectId id) -> PxBase * {
+    const auto found = remapped_objects.find(id);
+    return found == remapped_objects.end() ? collection->find(id)
+                                           : found->second;
+  };
   std::map<Locator, Fields> actual;
   std::set<PxBase *> covered;
   std::size_t fields = 0, objects = 0;
@@ -504,20 +677,32 @@ void validate(const std::string &xml, const std::string &expected,
     if (row[0] == "object") {
       PxBase *object = nullptr;
       if (key.serial)
-        object = collection->find(key.serial);
+        object = locate(key.serial);
       else {
-        auto *owner = collection->find(key.owner);
-        need(owner && owner->is<PxRigidActor>(), "inline shape owner");
-        PxShape *shape = nullptr;
-        need(owner->is<PxRigidActor>()->getShapes(
-                 &shape, 1, static_cast<PxU32>(key.shape)) == 1,
-             "inline shape index");
-        object = shape;
+        auto *owner = locate(key.owner);
+        if (key.shape == UINT32_MAX) {
+          need(owner && owner->is<PxArticulationLink>(),
+               "inline articulation joint owner");
+          object = owner->is<PxArticulationLink>()->getInboundJoint();
+        } else {
+          need(owner && owner->is<PxRigidActor>(), "inline shape owner");
+          PxShape *shape = nullptr;
+          need(owner->is<PxRigidActor>()->getShapes(
+                   &shape, 1, static_cast<PxU32>(key.shape)) == 1,
+               "inline shape index");
+          object = shape;
+        }
       }
       need(object, "mapped SDK object exists");
       const auto &type = row[4];
       need(
           (type == "PxShape" && object->is<PxShape>()) ||
+              (type == "PxArticulation" && object->is<PxArticulation>()) ||
+              (type == "PxArticulationLink" &&
+               object->is<PxArticulationLink>()) ||
+              (type == "PxArticulationJoint" &&
+               object->is<PxArticulationJoint>()) ||
+              (type == "PxAggregate" && object->is<PxAggregate>()) ||
               (type == object->getConcreteTypeName() &&
                object->is<PxJoint>()) ||
               (type == "PxRigidStatic" && object->is<PxRigidStatic>()) ||
@@ -527,7 +712,7 @@ void validate(const std::string &xml, const std::string &expected,
               (type == "PxConvexMesh" && object->is<PxConvexMesh>()) ||
               (type == "PxHeightField" && object->is<PxHeightField>()),
           "SDK concrete type matches mapping");
-      actual.emplace(key, inspect(*object, *collection));
+      actual.emplace(key, inspect(*object, *collection, aliases));
       covered.insert(object);
       if (auto *joint = object->is<PxJoint>()) {
         need(joint->getConstraint() != nullptr,
@@ -561,6 +746,8 @@ void validate(const std::string &xml, const std::string &expected,
   need(!context.errors.failures, "SDK reported load errors");
   std::cout << "RepX SDK validation passed: " << covered.size() << " objects ("
             << objects << " mapped), " << fields << " fields\n";
+  if (retained_links)
+    *retained_links = link_paths(*collection);
   if (!oracle.empty()) {
     struct Output : PxOutputStream {
       std::ofstream stream;
@@ -590,9 +777,10 @@ int main(int argc, char **argv) {
     need(argc == 3 || (argc == 5 && std::string(argv[3]) == "--oracle"),
          "usage: physx34_repx_validate file.repx expected.csv [--oracle "
          "output.repx]");
-    validate(argv[1], argv[2], argc == 5 ? argv[4] : "");
+    LinkPaths links;
+    validate(argv[1], argv[2], argc == 5 ? argv[4] : "", nullptr, &links);
     if (argc == 5)
-      validate(argv[4], argv[2]);
+      validate(argv[4], argv[2], {}, &links);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << "RepX SDK validation failed: " << e.what() << '\n';

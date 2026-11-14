@@ -168,6 +168,12 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         target_compile_options(pvd_physx34_joints_capture PRIVATE /W4 /utf-8)
         target_link_libraries(pvd_physx34_joints_capture PRIVATE
             ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
+        pvd_add_physx34_capture(pvd_physx34_articulation_capture
+            ${PROJECT_SOURCE_DIR}/examples/physx34_articulation_capture.cpp)
+        set_property(TARGET pvd_physx34_articulation_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
+        target_compile_options(pvd_physx34_articulation_capture PRIVATE /utf-8)
+        target_link_libraries(pvd_physx34_articulation_capture PRIVATE
+            ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
         pvd_add_physx34_capture(pvd_physx34_constraints
             ${PROJECT_SOURCE_DIR}/tests/physx34_constraints.cpp)
         target_link_libraries(pvd_physx34_constraints PRIVATE pvd::render)
@@ -218,6 +224,17 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             add_test(NAME body_overlays_physx34 COMMAND pvd_body_overlays_tests
                 ${PROJECT_BINARY_DIR}/fixtures/physical_capture.pxd2)
             set_tests_properties(body_overlays_physx34 PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
+            add_executable(pvd_physx34_articulation tests/physx34_articulation.cpp)
+            target_link_libraries(pvd_physx34_articulation PRIVATE pvd::core pvd::render)
+            if(MSVC)
+                target_compile_options(pvd_physx34_articulation PRIVATE /W4 /utf-8)
+            endif()
+            add_test(NAME physx34_articulation_generate COMMAND pvd_physx34_articulation_capture
+                ${PROJECT_BINARY_DIR}/fixtures/articulation)
+            set_tests_properties(physx34_articulation_generate PROPERTIES FIXTURES_SETUP physx34_articulation TIMEOUT 30)
+            add_test(NAME physx34_articulation COMMAND pvd_physx34_articulation
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2 ${PROJECT_BINARY_DIR}/fixtures/articulation_expected.csv)
+            set_tests_properties(physx34_articulation PROPERTIES FIXTURES_REQUIRED physx34_articulation TIMEOUT 30)
             add_test(NAME physx34_joints_generate COMMAND pvd_physx34_joints_capture
                 ${PROJECT_BINARY_DIR}/fixtures/joints)
             set_tests_properties(physx34_joints_generate PROPERTIES FIXTURES_SETUP physx34_joints TIMEOUT 30)

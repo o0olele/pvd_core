@@ -26,6 +26,8 @@
 
 独立 [RepX 导出库](docs/repx.md) 可导出当前状态的刚体、七类几何、共享 shape 和材质，并用真实 SDK 重开对照。原生[布料和粒子](docs/deformables.md)提供单独的渲染数据、选择和属性视图。它们均不引入 ImGui 或 SDK 运行依赖。长录制回放的测量方法与优化记录见[性能基线](docs/performance.md)。
 
+0.7 版补齐六类扩展关节与原生 [Articulation/Aggregate](docs/articulations.md) 的回放及 RepX 回载验证。新增[场景查询索引](docs/scene-queries.md)和[查询视图](docs/scene-query-viewer.md)、[刚体包围盒及速度图层](docs/body-overlays.md)、[显示设置](docs/display-settings.md)和[属性检查偏好](docs/inspection-preferences.md)。这些数据接口仍可通过[已安装的独立 CMake 包](docs/library-consumption.md)使用。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
