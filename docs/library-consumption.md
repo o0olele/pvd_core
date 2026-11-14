@@ -25,7 +25,9 @@ must match libraries enabled in the installed package; RepX requires render.
 
 The example verifies core streaming input and an in-memory raw save/replay,
 optional TCP cancellation, geometry tessellation, native-object extraction,
-profile/memory/error index construction, native-frame event curves and RepX
+publication-based scene queries, standalone geometry extraction, captured rigid
+velocity overlays, SDK-exact joint line generation, profile/memory/error index
+construction, native-frame event curves and RepX
 generation. It deliberately exports the first completed frame rather than the
 file's cleanup tail. Captures with no supported rigid actor require disabling
 the example's RepX option. Its explicit partial policy demonstrates diagnostic

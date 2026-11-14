@@ -6,6 +6,9 @@
 #ifdef PVD_CONSUMER_RENDER
 #include <pvd/mesh_builder.hpp>
 #include <pvd/deformables.hpp>
+#include <pvd/scene_queries.hpp>
+#include <pvd/body_overlays.hpp>
+#include <pvd/constraint_builder.hpp>
 #endif
 #ifdef PVD_CONSUMER_ANALYSIS
 #include <pvd/profile_curves.hpp>
@@ -65,6 +68,29 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("installed render module generated an empty shape");
         }
         std::cout << "render_instances=" << frame.instances.size() << '\n';
+        pvd::render::BodyOverlayOptions overlay_options;
+        overlay_options.show_linear_velocity = true;
+        const auto overlays = pvd::render::build_body_overlays(frame, state, overlay_options);
+        std::cout << "linear_velocity_vectors=" << overlays.linear_vectors
+                  << " overlay_diagnostics=" << overlays.diagnostics.size() << '\n';
+        if (!frame.instances.empty()) {
+            const auto &shape = frame.instances.front();
+            const auto geometry = extractor.extract_geometry(session.metadata(), state,
+                {shape.geometry_id, shape.geometry_generation});
+            if (!geometry.geometry) throw std::runtime_error("installed standalone geometry extraction failed");
+        }
+        if (!session.frames().empty()) {
+            const auto &marker = session.frames().front();
+            pvd::render::SceneQueryIndex query_index;
+            const auto queries = query_index.extract(session, marker);
+            auto debug_options = pvd::render::DebugOptions{};
+            debug_options.joint_axis_length = 0;
+            const auto debug = pvd::render::extract_debug(session, marker, debug_options);
+            const auto constraints = pvd::render::build_constraint_lines(debug.constraints);
+            std::cout << "scene_queries=" << queries.queries.size()
+                      << " query_collections=" << queries.collections.size()
+                      << " constraint_lines=" << constraints.lines.size() << '\n';
+        }
         auto deformable = pvd::deformables::extract(session.metadata(), state);
         std::cout << "cloths=" << deformable.cloths.size()
                   << " particle_clouds=" << deformable.particle_clouds.size() << '\n';
