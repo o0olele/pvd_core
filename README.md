@@ -12,6 +12,8 @@
 
 0.5 版接通 ImGui 实时监听、可选录制、最新帧跟随和历史帧检查。事件按安全前缀增量导入；停止与断连后可重新打开录制。完整应用的后续功能及逐章验收见 [实施清单](docs/application-roadmap.md)。
 
+可选 `pvd::analysis` 提供与 UI、GPU、PhysX SDK 无关的 CPU profile 索引、时间/线程/名称查询、聚合和 CSV 导出。支持跨包配对、LE/BE 和增量 Session，详见 [性能分析](docs/profile.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
