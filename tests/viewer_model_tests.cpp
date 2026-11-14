@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "scene_query_fixture.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -431,6 +432,41 @@ void document_navigation() {
   check(failed && doc.frame() == old && doc.scene_id() == 2,
         "failed open preserves current document");
 }
+void query_geometry_publication_lifetime() {
+  for (const auto order : {ByteOrder::little, ByteOrder::big}) {
+    scene_query_test::Fixture f(order);
+    const auto marker = f.str("frame");
+    f.emit(BeginSection{f.scene, marker});
+    f.publish();
+    const auto publication_end = f.events.size();
+    // PVD query geometry is transient. Reuse its address before EndFrame to
+    // ensure the preview uses the publication's generation and dimensions.
+    f.emit(DestroyInstance{f.box});
+    f.emit(CreateInstance{f.type("PxBoxGeometry"), f.box});
+    scene_query_test::BytesWriter huge(order);
+    huge.v({100, 200, 300});
+    f.set(f.box, "HalfExtents", "PxVec3", huge.bytes, 1);
+    f.emit(EndSection{f.scene, marker});
+    Document doc;
+    doc.adopt(std::make_unique<Session>(f.header, f.events));
+    check(doc.set_scene(f.scene), "query lifetime scene");
+    const auto frame = doc.frame();
+    check(frame && frame->snapshot.instance(f.box)->generation == 1 &&
+              frame->query_volumes.size() == 2,
+          "transient query geometry survives native frame-end reuse");
+    for (const auto &volume : frame->query_volumes) {
+      check(volume.source.snapshot_event_count <= publication_end && volume.mesh,
+            "query preview uses its exact publication prefix");
+      Vec3 extents{};
+      for (const auto p : volume.mesh->positions) {
+        extents.x = std::max(extents.x, std::abs(p.x));
+        extents.y = std::max(extents.y, std::abs(p.y));
+        extents.z = std::max(extents.z, std::abs(p.z));
+      }
+      near(extents, {1, 2, 3}, "query preview retains old geometry dimensions");
+    }
+  }
+}
 void real_capture(const char *path) {
   Document doc;
   doc.open_file(path);
@@ -492,6 +528,7 @@ int main(int argc, char **argv) {
     camera_and_picking();
     tight_fit_and_zoom_clipping();
     document_navigation();
+    query_geometry_publication_lifetime();
     if (argc > 1)
       real_capture(argv[1]);
     std::cout << "viewer model tests passed\n";
