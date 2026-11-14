@@ -200,6 +200,28 @@ and writer/crop/reload continuation. Four real SDK packet-boundary cuts include
 the open start on one side of a flush and its stop on the other; their resulting
 intervals match the original ticks, calibrated duration and source identity.
 
+## Arbitrary timeline measurement
+
+The ImGui thread timeline supports Shift+left drag across events, threads and
+empty graph space. It retains the two native counter endpoints and their exact
+unsigned difference; reversing the drag normalizes their order. Nanoseconds
+use the capture's clock ratio, with unavailable calibration shown explicitly.
+The highlighted range remains when the viewport zooms or pans. Clear it with
+the range button; replacing the source clears it automatically.
+
+The measured-interval CSV action applies the existing counter overlap filter
+`[begin_ticks,end_ticks)` in addition to the current name/thread/zone/prefix
+filters. It exports original intervals and does not trim event duration values
+to the highlighted region. Selecting a range never changes the capture's
+playhead or raw events. Wheel zoom and middle-button panning remain available;
+native timestamps and small deltas are kept as integers even beyond `2^53`.
+
+`profile_time_selection` drives real ImGui Shift/mouse events over two lanes
+and blank space at 420/1060 logical pixels, 1x/1.5x/2x, with LE/BE data, high
+64-bit timestamps, backwards drags, unavailable clocks and source replacement.
+Physical mouse coordinates select the native tick represented by that pixel;
+the display does not claim subpixel input resolution.
+
 ## PhysX 3.4 versus obsolete CUDA payloads
 
 The supplied SDK's `PxShared/src/pvd/src/PxProfileEvents.h`, `EventTypes`, marks

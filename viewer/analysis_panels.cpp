@@ -69,6 +69,9 @@ struct AnalysisPanels::Impl {
   std::vector<pvd::profile::Aggregate> aggregates;
   std::size_t p_begin=0,p_end=0;
   std::uint64_t view_begin=0,view_end=1;
+  std::optional<ProfileTimeSelection> time_selection;
+  ProfileTimelineView timeline_view;
+  std::optional<std::uint64_t> range_anchor;
   std::array<char,128> profile_search{},memory_search{},error_search{};
   pvd::memory::Filter memory_filter;
   pvd::errors::Filter error_filter;
@@ -85,6 +88,7 @@ struct AnalysisPanels::Impl {
     if(source==session)return;
     source=session;profile.reset();memory.reset();errors.reset();
     memory_window.reset();
+    time_selection.reset();range_anchor.reset();timeline_view={};
     profile_count=memory_count=error_count=0;profile_dirty=memory_dirty=error_dirty=true;
     selected_interval.reset();view_manual=false;memory_page=error_page=0;m_prefix=e_prefix=std::numeric_limits<std::size_t>::max();
     thread.reset();zone.reset();error.clear();
@@ -170,6 +174,19 @@ struct AnalysisPanels::Impl {
       const auto& e=profile->intervals()[*selected_interval];text(profile->event_name(e.start_source.zone,e.event_id)+"  /  "+duration(e.duration_nanoseconds));
       ImGui::SameLine();ImGui::BeginDisabled(doc.session()->frames().empty());if(ImGui::SmallButton("Jump to received frame"))jump(doc,e.stop_source.event_index);ImGui::EndDisabled();
     }
+    if(time_selection) {
+      const auto range=*time_selection;
+      ImGui::TextWrapped("Measured range: %llu .. %llu native ticks | %llu ticks | %s",
+          static_cast<unsigned long long>(range.begin_ticks),
+          static_cast<unsigned long long>(range.end_ticks),
+          static_cast<unsigned long long>(range.duration_ticks),duration(range.duration_nanoseconds).c_str());
+      if(ImGui::SmallButton("Clear measured range")){time_selection.reset();range_anchor.reset();}
+      ImGui::SameLine();
+      if(ImGui::SmallButton("Export measured intervals CSV...")) {
+        q.begin_ticks=range.begin_ticks;q.end_ticks=range.end_ticks;
+        save("profile-range.csv",[&](std::ostream &out){profile->write_csv(out,q);});
+      }
+    }
     if(ImGui::CollapsingHeader("Profile diagnostics"))for(const auto& d:profile->diagnostics())ImGui::TextWrapped("Event %zu: %s",d.source.event_index,d.message.c_str());
   }
   void timeline(Document& doc) {
@@ -177,14 +194,30 @@ struct AnalysisPanels::Impl {
     for(auto i:intervals){const auto& e=profile->intervals()[i];depths[lane(e)]=std::max(depths[lane(e)],std::min<std::size_t>(e.depth,15)+1);}
     std::map<Lane,float> lanes;float height=ui_pixels(30);
     for(const auto& lane:depths){lanes[lane.first]=height;height+=ui_pixels(25)+float(lane.second)*ui_pixels(19);}
-    ImGui::TextDisabled("Wheel to zoom  |  Middle drag to pan  |  Double-click an interval to locate its received frame");
+    ImGui::TextWrapped("Wheel to zoom | Middle drag to pan | Shift+left drag to measure time across lanes | Double-click an interval to locate its received frame");
     ImGui::TextDisabled("Visible origin: %llu native ticks; axis is elapsed time from this origin",static_cast<unsigned long long>(view_begin));
     ImGui::BeginChild("thread-timeline",{0,std::max(ui_pixels(140),ImGui::GetContentRegionAvail().y-ui_pixels(90))},ImGuiChildFlags_Borders);
     const auto origin=ImGui::GetCursorScreenPos();const float width=std::max(ui_pixels(300),ImGui::GetContentRegionAvail().x),gutter=ui_pixels(240),graph=width-gutter;
     ImGui::InvisibleButton("timeline-canvas",{width,std::max(height,ImGui::GetContentRegionAvail().y)},ImGuiButtonFlags_MouseButtonLeft|ImGuiButtonFlags_MouseButtonMiddle);
+    const auto hovered=ImGui::IsItemHovered(),active=ImGui::IsItemActive();
+    const auto &io=ImGui::GetIO();
     auto* draw=ImGui::GetWindowDrawList();
-    const long double span=std::max(1.0L,static_cast<long double>(view_end)-view_begin);
-    auto x=[&](std::uint64_t t){return origin.x+gutter+float((static_cast<long double>(t)-view_begin)/span)*graph;};
+    const long double span=std::max(1.0L,static_cast<long double>(view_end-view_begin));
+    timeline_view={origin.x+gutter,origin.y,graph,ImGui::GetItemRectSize().y,view_begin,view_end};
+    auto x=[&](std::uint64_t t){const auto delta=t>=view_begin?static_cast<long double>(t-view_begin):-static_cast<long double>(view_begin-t);return origin.x+gutter+float(delta/span)*graph;};
+    const auto mouse_tick=[&] {
+      const auto fraction=std::clamp((io.MousePos.x-origin.x-gutter)/graph,0.f,1.f);
+      const auto offset=std::min(view_end-view_begin,tick(span*fraction));
+      return view_begin+offset;
+    };
+    if(hovered&&io.KeyShift&&ImGui::IsMouseClicked(0)&&io.MousePos.x>=origin.x+gutter)
+      range_anchor=mouse_tick();
+    const bool measuring=range_anchor.has_value();
+    if(range_anchor) {
+      const auto at=mouse_tick(),begin=std::min(*range_anchor,at),end=std::max(*range_anchor,at);
+      time_selection=ProfileTimeSelection{begin,end,end-begin,profile->nanoseconds(end-begin)};
+      if(!ImGui::IsMouseDown(0))range_anchor.reset();
+    }
     for(int i=0;i<=5;++i){const float at=origin.x+gutter+graph*float(i)/5;draw->AddLine({at,origin.y},{at,origin.y+height},IM_COL32(42,55,70,255));auto label=duration(profile->nanoseconds(tick(span*i/5)));draw->AddText({at+ui_pixels(3),origin.y},IM_COL32(115,139,160,255),label.c_str());}
     for(const auto& entry:lanes){const auto label="T"+std::to_string(std::get<0>(entry.first))+"  "+profile->zone_name({std::get<1>(entry.first),std::get<2>(entry.first)})+" / "+hex(std::get<3>(entry.first));draw->PushClipRect(origin,{origin.x+gutter-ui_pixels(5),origin.y+height},true);draw->AddText({origin.x,origin.y+entry.second},IM_COL32(195,213,225,255),label.c_str());draw->PopClipRect();}
     std::size_t painted=0;
@@ -196,15 +229,38 @@ struct AnalysisPanels::Impl {
       draw->AddRectFilled(a,b,color,ui_pixels(2));
       if(selected_interval&&*selected_interval==i)draw->AddRect(a,b,IM_COL32(255,218,90,255),ui_pixels(2),0,ui_pixels(2));
       if(b.x-a.x>ui_pixels(45)){const auto label=profile->event_name(e.start_source.zone,e.event_id);draw->PushClipRect(a,b,true);draw->AddText({a.x+ui_pixels(3),a.y},IM_COL32(245,248,250,255),label.c_str());draw->PopClipRect();}
-      if(ImGui::IsItemHovered()&&ImGui::IsMouseHoveringRect(a,b)){
+      if(hovered&&!measuring&&!io.KeyShift&&ImGui::IsMouseHoveringRect(a,b)){
         ImGui::SetTooltip("%s\n%s\nThread %u / context %s\n%llu native ticks",profile->event_name(e.start_source.zone,e.event_id).c_str(),duration(e.duration_nanoseconds).c_str(),e.thread_id,hex(e.context_id).c_str(),static_cast<unsigned long long>(e.duration_ticks));
         if(ImGui::IsMouseClicked(0))selected_interval=i;
         if(ImGui::IsMouseDoubleClicked(0))jump(doc,e.stop_source.event_index);
       }
     }
-    const auto& io=ImGui::GetIO();
-    if(ImGui::IsItemHovered()&&io.MouseWheel!=0){const auto anchor=std::clamp((io.MousePos.x-origin.x-gutter)/graph,0.0f,1.0f);const long double next=std::max(1.0L,span*std::exp(-io.MouseWheel*.20));const long double begin=std::max(0.0L,static_cast<long double>(view_begin)+anchor*(span-next));view_begin=tick(begin);view_end=tick(begin+next);view_manual=true;}
-    if(ImGui::IsItemActive()&&ImGui::IsMouseDragging(ImGuiMouseButton_Middle)){const long double begin=std::max(0.0L,static_cast<long double>(view_begin)-io.MouseDelta.x/graph*span);view_begin=tick(begin);view_end=tick(begin+span);view_manual=true;}
+    if(time_selection) {
+      const auto left=std::clamp(x(time_selection->begin_ticks),origin.x+gutter,origin.x+width);
+      const auto right=std::clamp(x(time_selection->end_ticks),origin.x+gutter,origin.x+width);
+      draw->AddRectFilled({left,origin.y},{right,origin.y+timeline_view.height},IM_COL32(255,213,85,38));
+      draw->AddLine({left,origin.y},{left,origin.y+timeline_view.height},IM_COL32(255,213,85,220));
+      draw->AddLine({right,origin.y},{right,origin.y+timeline_view.height},IM_COL32(255,213,85,220));
+    }
+    if(hovered&&!measuring&&io.MouseWheel!=0) {
+      const auto anchor=std::clamp((io.MousePos.x-origin.x-gutter)/graph,0.f,1.f);
+      const auto next=std::max<std::uint64_t>(1,tick(span*std::exp(-io.MouseWheel*.20)));
+      const auto pivot=view_begin+std::min(view_end-view_begin,tick(span*anchor));
+      const auto left=tick(static_cast<long double>(next)*anchor);
+      const auto maximum=std::numeric_limits<std::uint64_t>::max();
+      view_begin=std::min(pivot>=left?pivot-left:0,maximum-next);
+      view_end=view_begin+next;view_manual=true;
+    }
+    if(active&&!measuring&&ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+      const auto delta=-io.MouseDelta.x/graph*span;
+      if(delta>=0) {
+        const auto shift=std::min(std::numeric_limits<std::uint64_t>::max()-view_end,tick(delta));
+        view_begin+=shift;view_end+=shift;
+      }else {
+        const auto shift=std::min(view_begin,tick(-delta));view_begin-=shift;view_end-=shift;
+      }
+      view_manual=true;
+    }
     ImGui::EndChild();
     if(painted>100000)ImGui::TextDisabled("More than 100,000 visible intervals; zoom or filter by thread/zone.");
   }
@@ -314,4 +370,6 @@ std::size_t AnalysisPanels::visible_row_count(AnalysisPage page)const noexcept{
 std::optional<memory::WindowStats> AnalysisPanels::memory_window_statistics()const {
   return impl_->memory_window;
 }
+std::optional<ProfileTimeSelection> AnalysisPanels::profile_time_selection()const {return impl_->time_selection;}
+ProfileTimelineView AnalysisPanels::profile_timeline_view()const noexcept {return impl_->timeline_view;}
 } // namespace pvd::viewer

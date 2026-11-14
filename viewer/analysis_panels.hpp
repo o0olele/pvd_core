@@ -8,6 +8,14 @@ namespace pvd::viewer {
 enum class AnalysisPage { profile, memory, errors };
 // The host invokes the writer synchronously after choosing a destination.
 using CsvExport = std::function<void(const char*,const std::function<void(std::ostream&)>&)>;
+struct ProfileTimeSelection {
+  std::uint64_t begin_ticks = 0, end_ticks = 0, duration_ticks = 0;
+  std::optional<double> duration_nanoseconds;
+};
+struct ProfileTimelineView {
+  float left = 0, top = 0, width = 0, height = 0;
+  std::uint64_t begin_ticks = 0, end_ticks = 0;
+};
 class AnalysisPanels {
 public:
   AnalysisPanels();
@@ -19,6 +27,8 @@ public:
   // Last displayed native receipt interval. Copied value, not a Session/UI
   // reference; unavailable until the Memory page has a preceding native frame.
   std::optional<memory::WindowStats> memory_window_statistics() const;
+  std::optional<ProfileTimeSelection> profile_time_selection() const;
+  ProfileTimelineView profile_timeline_view() const noexcept;
 private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
