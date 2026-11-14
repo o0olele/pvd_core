@@ -55,6 +55,10 @@ cmake --build build-physx34 --config Debug --parallel 4
 
 Profile / memory 流未采集时会说明应启用的 SDK instrumentation 标志，不会显示伪造的零耗时或零内存。实时分析只解析新 Session 前缀；历史查询和过滤不重置解析器的跨包状态。若录制仅含分析通道而没有场景帧，可直接分析全部捕获数据。
 
+**Curves** 可从已检查对象添加数值属性，也可输入对象 ID、generation、属性名、component 及数组 item。支持最多 16 条曲线、各自显隐/颜色/删除，滚轮缩放、拖动平移、点选定位原始帧，以及选中曲线的精确 CSV。默认每条最多 2000 个原始采样点；缺失值、不同 generation、未采样区间均断线。实时自动刷新最多每秒一次，普通绘制帧不重做采样。帧横轴与界面编号从 1 开始；CSV 保留原始 0-based 源索引与事件/tick。
+
+**Frame diff** 选择当前 scene/sample mode 下的 A/B 帧，比较创建、销毁、属性、引用、flags、颜色、相机及原点偏移。对象 ID 复用按旧 generation 销毁、新 generation 创建分别显示；可查看 before/after 或跳转检查对应对象。界面帧号同样从 1 开始。
+
 ```powershell
 & .\build-physx34\viewer\Debug\pvd_viewer.exe .\build-physx34\fixtures\profile_capture.pxd2 --page profile
 & .\build-physx34\viewer\Debug\pvd_viewer.exe .\build-physx34\fixtures\allocations_memory.pxd2 --page memory
@@ -75,6 +79,8 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 `viewer_live` 验证安全增量、暂停和跟随、事务中间状态及取消；`viewer_live_physx34` 用真实 SDK 验证双场景、中文录制路径、载荷预算和重开后的状态一致；`viewer_live_gpu` 启动真实 SDK 客户端连接运行中的查看器，验证接收期间的 D3D11 画面更新、完整录制和离线重开。
 
 `analysis_panels` 通过真实 ImGui widget 验证历史前缀切换、分页、错误过滤及 1440/1060 宽度布局。`analysis_panels_physx34` 读取真实 memory/error 捕获。`viewer_profile_gpu`、`viewer_memory_gpu`、`viewer_errors_gpu` 渲染实际分析工作区并保存 GPU backbuffer 截图，路径为 `build-physx34/fixtures/viewer-{profile,memory,errors}.png`；JSON 同名。
+
+`curve_panels` / `curve_panels_physx34` 使用真实 ImGui 鼠标输入验证点选定位、缩放、scene/sample mode、生命周期、CSV 按钮及窄布局。`viewer_curves_gpu` / `viewer_diff_gpu` 渲染真实物理捕获的曲线和状态差异，输出 `viewer-curves.png` / `viewer-diff.png`。
 
 这些是程序内模型及渲染验证，未替代系统鼠标、文件对话框及高 DPI 多显示器的人工交互验收。性能、内存、曲线、工程剪辑和旧版容器等完整应用功能按 [实施清单](application-roadmap.md) 继续建设。
 

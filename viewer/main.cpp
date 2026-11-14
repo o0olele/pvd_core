@@ -3,6 +3,7 @@
 #include "renderer.hpp"
 #ifdef PVD_VIEWER_HAS_ANALYSIS
 #include "analysis_panels.hpp"
+#include "curve_panels.hpp"
 #endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
 #include "live_session.hpp"
@@ -81,7 +82,9 @@ Options arguments() {
                 if(page==L"profile")result.analysis_page=1;
                 else if(page==L"memory")result.analysis_page=2;
                 else if(page==L"errors")result.analysis_page=3;
-                else throw std::runtime_error("Analysis page must be profile, memory or errors");
+                else if(page==L"curves")result.analysis_page=4;
+                else if(page==L"diff")result.analysis_page=5;
+                else throw std::runtime_error("Unknown workspace page");
             }
             else if (a == L"--screenshot") result.screenshot = value();
             else if (a == L"--report") result.report = value();
@@ -227,6 +230,7 @@ private:
     int workspace_page_=0;
 #ifdef PVD_VIEWER_HAS_ANALYSIS
     AnalysisPanels analysis_;
+    CurvePanels curves_;
 #endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
     LiveSession live_;
@@ -381,6 +385,20 @@ private:
         fitted_ = false; panels_ = {}; renderer_->clear_mesh_cache();
 #ifdef PVD_VIEWER_HAS_ANALYSIS
         analysis_.reset();
+        curves_.reset();
+        if(options_.analysis_smoke && options_.analysis_page>=4) {
+            bool found=false;
+            for(const auto& actor:document_.actor_tree()) {
+                const auto* object=document_.frame()->snapshot.instance(actor.key.id);
+                if(!object||object->class_name.name!="PxRigidDynamic"||!object->property("GlobalPose"))continue;
+                document_.inspect(actor.key.id);found=true;
+                if(actor.name=="falling_box")break;
+            }
+            if(!found)throw std::runtime_error("Curve smoke capture has no dynamic actor");
+            curves_.add_inspected(document_,"GlobalPose","position.y");
+            if(document_.timeline().size()<2)throw std::runtime_error("Curve smoke needs at least two frames");
+            curves_.set_diff_frames(0,document_.timeline().size()-1);curves_.refresh_diff(document_);
+        }
 #endif
         std::wstring title = L"PVD Studio  |  " + std::filesystem::u8path(document_.source_label()).filename().wstring();
         SetWindowTextW(window_, title.c_str());
@@ -545,8 +563,11 @@ private:
     void analysis_smoke_step() {
         if(host_frames_<6)return;
         const auto page=static_cast<AnalysisPage>(workspace_page_-1);
-        const auto rows=analysis_.row_count(page),visible=analysis_.visible_row_count(page);
+        const auto curve_page=workspace_page_==5?CurvePage::diff:CurvePage::curves;
+        const auto rows=workspace_page_>=4?curves_.row_count(curve_page):analysis_.row_count(page);
+        const auto visible=workspace_page_>=4?curves_.visible_row_count(curve_page):analysis_.visible_row_count(page);
         if(workspace_page_!=options_.analysis_page||!rows||!visible)throw std::runtime_error("Analysis workspace did not show actual capture data");
+        if(workspace_page_>=4&&!curves_.error().empty())throw std::runtime_error(curves_.error());
         if(!options_.screenshot.empty())screenshot();
         if(!options_.report.empty()){
             std::ofstream report(options_.report);report<<"{\"passed\":true,\"page\":"<<workspace_page_<<",\"rows\":"<<rows<<",\"visible_rows\":"<<visible<<"}\n";
@@ -586,8 +607,8 @@ private:
         }
 #ifdef PVD_VIEWER_HAS_ANALYSIS
         if(ImGui::BeginTabBar("Workspace views")){
-            const char* names[]={"Scene","Profiler","Memory","Errors"};
-            for(int page=0;page<4;++page){
+            const char* names[]={"Scene","Profiler","Memory","Errors","Curves","Frame diff"};
+            for(int page=0;page<6;++page){
                 const auto flags=(host_frames_==0&&options_.analysis_page==page)?ImGuiTabItemFlags_SetSelected:ImGuiTabItemFlags_None;
                 if(ImGui::BeginTabItem(names[page],nullptr,flags)){workspace_page_=page;ImGui::EndTabItem();}
             }ImGui::EndTabBar();
@@ -613,7 +634,9 @@ private:
 #ifdef PVD_VIEWER_HAS_ANALYSIS
         if(workspace_page_>0){
             ImGui::BeginChild("Analysis workspace",{0,body_height},ImGuiChildFlags_Borders);
-            analysis_.draw(document_,static_cast<AnalysisPage>(workspace_page_-1),[&](const char* name,const auto& writer){export_csv(name,writer);});
+            const CsvExport save=[&](const char* name,const auto& writer){export_csv(name,writer);};
+            if(workspace_page_>=4)curves_.draw(document_,workspace_page_==5?CurvePage::diff:CurvePage::curves,save);
+            else analysis_.draw(document_,static_cast<AnalysisPage>(workspace_page_-1),save);
             ImGui::EndChild();
         }
 #endif
