@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <limits>
 #include <type_traits>
 
@@ -800,7 +801,7 @@ Session Session::parse(const Bytes &b, SessionOptions o) {
   return Session(*d.header(), d.events(), o);
 }
 Session Session::load_file(const std::string &path, SessionOptions o) {
-  std::ifstream f(path, std::ios::binary);
+  std::ifstream f(std::filesystem::u8path(path), std::ios::binary);
   if (!f)
     throw std::runtime_error("cannot open capture: " + path);
   StreamDecoder d(o.decode_limits);

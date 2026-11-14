@@ -18,6 +18,8 @@
 
 分析库还提供带生命周期/gap 语义的数值属性曲线、精确 CSV 与对象/属性/相机/原点偏移的帧差异查询。见 [曲线与状态差异 API](docs/curves.md)。
 
+`pvd::core` 的 [raw 保存与裁剪 API](docs/saving.md) 支持 28 类事件重编码、可恢复前缀、UTF-8 路径和原子发布；裁剪保留起点元数据/对象状态，分析通道通过独立 provider 重建跨包状态。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

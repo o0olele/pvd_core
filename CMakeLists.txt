@@ -17,7 +17,7 @@ include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-add_library(pvd_core src/protocol.cpp src/session.cpp)
+add_library(pvd_core src/protocol.cpp src/session.cpp src/writer.cpp)
 add_library(pvd::core ALIAS pvd_core)
 set_target_properties(pvd_core PROPERTIES EXPORT_NAME core VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -94,6 +94,10 @@ if(PVD_BUILD_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(pvd_writer_tests tests/writer_tests.cpp)
+    target_link_libraries(pvd_writer_tests PRIVATE pvd::core)
+    add_test(NAME writer COMMAND pvd_writer_tests)
+    set_tests_properties(writer PROPERTIES TIMEOUT 30)
     add_executable(pvd_protocol_tests tests/protocol_tests.cpp)
     target_link_libraries(pvd_protocol_tests PRIVATE pvd::core)
     add_test(NAME protocol COMMAND pvd_protocol_tests)
@@ -144,6 +148,10 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_custom.pxd2"
             "${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_custom_expected.csv")
         set_tests_properties(physx34_custom PROPERTIES FIXTURES_REQUIRED physx34_capture)
+        add_test(NAME physx34_writer COMMAND pvd_writer_tests
+            ${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_capture.pxd2
+            ${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_custom.pxd2)
+        set_tests_properties(physx34_writer PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
         if(PVD_BUILD_RENDER)
             add_executable(pvd_physx34_render tests/physx34_render.cpp)
             target_link_libraries(pvd_physx34_render PRIVATE pvd::render)
@@ -154,6 +162,9 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
                 "${CMAKE_CURRENT_BINARY_DIR}/fixtures/render_capture.pxd2"
                 "${CMAKE_CURRENT_BINARY_DIR}/fixtures/render_expected.csv")
             set_tests_properties(physx34_render PROPERTIES FIXTURES_REQUIRED physx34_render TIMEOUT 30)
+            add_test(NAME physx34_writer_render COMMAND pvd_writer_tests
+                ${CMAKE_CURRENT_BINARY_DIR}/fixtures/render_capture.pxd2)
+            set_tests_properties(physx34_writer_render PROPERTIES FIXTURES_REQUIRED physx34_render TIMEOUT 30)
         endif()
         if(PVD_BUILD_TRANSPORT)
             add_executable(pvd_physx34_live tests/physx34_live.cpp)

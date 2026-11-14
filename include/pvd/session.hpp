@@ -189,6 +189,7 @@ public:
   Session(const Session &) = delete;
   Session &operator=(const Session &) = delete;
   static PVD_CORE_API Session parse(const Bytes &, SessionOptions options = {});
+  // File paths are UTF-8, including on Windows.
   static PVD_CORE_API Session load_file(const std::string &path,
                                         SessionOptions options = {});
   // A rejected event is excluded from events()/event_count(). Earlier events in
