@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "model.hpp"
 #include <array>
+#include <limits>
 #include <map>
 
 namespace pvd::viewer {
@@ -13,6 +14,16 @@ struct PanelState {
   std::optional<PickingKey> last_selection;
   std::string error;
   std::size_t array_page_size = 32;
+  // Value-only cache: safe across immutable FrameState replacement/selection.
+  const Session *category_source = nullptr;
+  std::size_t category_prefix = std::numeric_limits<std::size_t>::max(),
+              category_page = 0;
+  std::vector<ObjectGroup> categories;
+  std::string category_query;
+  std::vector<std::vector<std::size_t>> category_matches;
+  std::vector<std::size_t> matching_categories;
+  std::map<std::string, std::size_t> category_object_pages;
+  std::size_t object_count = 0, object_visible_rows = 0;
 };
 
 // Content-only panels: the host owns Begin/End and its layout. The host calls

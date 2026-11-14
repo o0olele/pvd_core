@@ -19,6 +19,10 @@ struct RenderOptions {
     bool show_solids = true, show_wireframe = false;
     bool show_debug_points = true, show_debug_lines = true, show_debug_triangles = true;
     bool show_contacts = true;
+    bool show_cloth = true, show_particles = true;
+    bool show_cloth_constraints = true, show_cloth_pins = true;
+    bool show_particle_velocity = false;
+    float particle_velocity_scale = 0.2f;
     float contact_normal_length = 0.6f;
     float point_size = 5.0f;
 };
@@ -26,6 +30,8 @@ struct RenderStats {
     std::uint64_t draw_calls = 0, triangles = 0, line_segments = 0, points = 0;
     std::size_t cached_meshes = 0;
     std::uint64_t cache_hits = 0, cache_misses = 0;
+    std::uint64_t cloth_points = 0, particle_points = 0,
+                  cloth_constraints = 0, particle_velocity_vectors = 0;
 };
 struct RgbaImage {
     std::uint32_t width = 0, height = 0;

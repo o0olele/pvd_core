@@ -1,5 +1,6 @@
 #pragma once
 #include "pvd/debug_render.hpp"
+#include "pvd/deformables.hpp"
 #include "pvd/mesh_builder.hpp"
 #include <array>
 #include <memory>
@@ -23,6 +24,8 @@ struct DrawItem {
   PickingKey key;
   Color color;
   bool pickable = true, selected = false;
+  bool visible =
+      true; // Viewer state only; hidden draws are never CPU-pickable.
 };
 struct PickHit {
   PickingKey key;
@@ -34,6 +37,7 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &, const Ray &);
 class OrbitCamera {
 public:
   Vec3 target{0, 0, 0};
+  Vec3 reference_up{0, 1, 0}; // Recorded arbitrary up; default SDK Y-up.
   double yaw = 0.75, pitch = 0.45, distance = 10;
   double vertical_fov = 0.7853981633974483, near_plane = 0.01,
          far_plane = 1000000;
@@ -47,6 +51,36 @@ public:
            double viewport_height);
   void zoom(double wheel_steps);
   void fit(const render::Bounds &, double aspect = 1.0);
+  // Exact look-at basis. Rejects non-finite/coincident/collinear input.
+  void set_look_at(const CameraState &);
+};
+enum class ColorMode {
+  recorded_status,
+  actor_kind,
+  geometry,
+  actor_identity,
+  uniform
+};
+struct ViewOptions {
+  // Static / non-kinematic Dynamic / Kinematic are independent categories.
+  // Sleeping and Trigger are additional filters. Unknown sleep state is shown.
+  bool show_static = true, show_dynamic = true, show_kinematic = true,
+       show_sleeping = true, show_trigger = true;
+  ColorMode color_mode = ColorMode::recorded_status;
+  Color uniform_color{160, 180, 205, 255};
+};
+struct ColorLegendEntry {
+  std::string label;
+  Color color;
+};
+std::vector<ColorLegendEntry> view_legend(const ViewOptions &);
+struct ObjectNode {
+  ObjectKey key;
+  std::string name, class_name;
+};
+struct ObjectGroup {
+  QualifiedName class_name;
+  std::vector<ObjectNode> objects;
 };
 enum class SamplePoint { native_frame, after_fetch };
 struct SceneInfo {
@@ -75,6 +109,13 @@ struct FrameState {
   Snapshot snapshot;
   render::Frame render;
   render::DebugResult debug;
+  deformables::Frame deformables;
+  struct DeformableDraw {
+    deformables::OwnerKey key;
+    bool visible = true, selected = false;
+  };
+  std::vector<DeformableDraw> deformable_draws;
+  std::optional<deformables::SelectionKey> deformable_selection;
   std::vector<DrawItem> draws;
   std::optional<render::Bounds> bounds;
   std::optional<TimelineEntry> marker;
@@ -86,6 +127,7 @@ struct ModelOptions {
   render::ExtractorOptions extractor;
   render::MeshBuildOptions mesh;
   render::DebugOptions debug;
+  deformables::Options deformables;
   std::size_t max_tessellation_cache_entries = 128;
 };
 struct Playback {
@@ -137,6 +179,16 @@ public:
   bool advance(double elapsed_seconds);
   std::shared_ptr<const FrameState> frame() const noexcept;
   std::optional<PickingKey> selected_key() const noexcept;
+  std::optional<deformables::SelectionKey> selected_deformable() const noexcept;
+  // Owner selection survives matching live generations. Element selection is
+  // scoped to the exact current sample, so slot reuse/seeking cannot retarget
+  // it.
+  bool select_deformable(const deformables::SelectionKey &);
+  bool deformable_visible(const deformables::OwnerKey &) const noexcept;
+  void set_deformable_visible(const deformables::OwnerKey &, bool);
+  void isolate_deformable(const deformables::OwnerKey &);
+  bool fit_deformable(const deformables::OwnerKey &, OrbitCamera &,
+                      double aspect = 1.0) const;
   std::optional<ObjectKey> inspected_object() const noexcept;
   const InstanceState *inspected_instance() const noexcept;
   bool select(
@@ -145,6 +197,20 @@ public:
   inspect(std::uint64_t object_id); // Arbitrary object/reference navigation.
   void clear_selection();
   std::vector<ActorNode> actor_tree() const;
+  // All captured live objects at this snapshot, including shared/global
+  // resources and objects belonging to other scenes. Grouping is
+  // metadata-based.
+  std::vector<ObjectGroup> object_groups() const;
+  const ViewOptions &view_options() const noexcept;
+  void set_view_options(ViewOptions);
+  bool visible(const PickingKey &) const noexcept;
+  void set_visible(const PickingKey &, bool);
+  void set_actor_visible(ObjectKey scene, ObjectKey actor, bool);
+  void isolate(const PickingKey &);
+  void isolate_actor(ObjectKey scene, ObjectKey actor);
+  bool isolated() const noexcept;
+  // Clears hide/isolate rules and enables every category. Keeps color mode.
+  void show_all();
   bool fit_scene(OrbitCamera &, double aspect = 1.0) const;
   bool fit_selected(OrbitCamera &, double aspect = 1.0) const;
   std::size_t tessellation_cache_entries() const noexcept;
@@ -153,4 +219,18 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
+struct DeformablePickOptions {
+  bool cloth = true, particles = true;
+  // A world-space floor plus a perspective screen-size tolerance. For N
+  // pixels, use angular_radius=N*2*tan(fov/2)/viewport_height.
+  double world_radius = 0.025, angular_radius = 0;
+};
+struct DeformablePickHit {
+  deformables::SelectionKey key;
+  double distance = 0;
+  Vec3 position;
+};
+std::optional<DeformablePickHit>
+pick_deformable(const FrameState &, const Ray &,
+                const DeformablePickOptions & = {});
 } // namespace pvd::viewer

@@ -22,6 +22,10 @@
 
 `pvd::analysis` 的 [裁剪分析状态重建](docs/crop-analysis.md) 只携带起点所需的内存字典/活动分配及 CPU 未闭合区间/最新计数器。未知或不完整源默认拒绝；显式允许 partial 时把原始警告写入导出文件。
 
+查看器现在支持[多会话工作区](docs/workspace.md)、可取消加载、书签和最近文件；实时接收与保存始终绑定原会话。事件耗时曲线按[原始 CPU scope 结束时间](docs/profile-curves.md)归入帧，保留延迟 flush 和缺失值语义。
+
+独立 [RepX 导出库](docs/repx.md) 可导出当前状态的刚体、七类几何、共享 shape 和材质，并用真实 SDK 重开对照。原生[布料和粒子](docs/deformables.md)提供单独的渲染数据、选择和属性视图。它们均不引入 ImGui 或 SDK 运行依赖。长录制回放的测量方法与优化记录见[性能基线](docs/performance.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

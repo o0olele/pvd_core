@@ -161,3 +161,25 @@ the real SDK comparison. The tests cover availability, sparse expansion,
 world transforms, fixed points, exact constraints/phases, zero/stale arrays,
 lifetimes/generations, invalid types/counts/references/indices, nonfinite and
 negative data, malformed payloads, selection filtering, and resource limits.
+
+## Viewer integration
+
+`FrameState` carries the independent extracted data and view-only owner masks;
+it never converts a cloth or particle to a rigid `PxShape`. Element picking uses
+an owner/scene generation plus the exact displayed event prefix. Owner selection
+can follow the same live generation; element selections clear when seeking to
+another sample, including reuse of an individual sparse particle index.
+
+The **Deformables** workspace shows native owners and the 3D viewport together.
+Its controls expose exact particles, fixed-point emphasis, fabric constraint
+edges, available particle velocities, owner filtering/hiding/isolation and Fit.
+Cloth edges include solver bending/shearing constraints, so they are explicitly
+described separately from unrecorded surface topology. Read-off, disabled,
+unrecorded and malformed attributes remain distinguishable in the property view.
+
+`deformable_viewer` and its SDK variant verify independent selection, sparse
+indices, lifecycle/scene isolation, reverse seeking, masks, bounds and real
+ImGui wide/narrow widgets. `viewer_deformables_gpu` exercises the actual host
+with D3D11 WARP, displays 16 cloth points, 58 exact constraint edges and 12
+particles, then verifies a selected vertex changes the rendered image. The
+local Debug run changed 81 pixels; Release shared at 1060 by 700 also passed.

@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include "scene_tools.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -40,7 +41,8 @@ Vec3 f(D3 v) {
   return out;
 }
 void camera_valid(const OrbitCamera &c) {
-  if (!finite(d(c.target)) || !std::isfinite(c.yaw) ||
+  if (!finite(d(c.target)) || !finite(d(c.reference_up)) ||
+      dot(d(c.reference_up), d(c.reference_up)) <= 0 || !std::isfinite(c.yaw) ||
       !std::isfinite(c.pitch) || !std::isfinite(c.distance) ||
       c.distance <= 0 || !std::isfinite(c.vertical_fov) ||
       c.vertical_fov <= 0 || c.vertical_fov >= pi)
@@ -49,13 +51,26 @@ void camera_valid(const OrbitCamera &c) {
 struct Basis {
   D3 eye, forward, right, up;
 };
+struct CameraAxes {
+  D3 up, x, z;
+};
+CameraAxes camera_axes(const OrbitCamera &c) {
+  const auto up = normal(d(c.reference_up));
+  const D3 candidate = std::abs(up.z) < .99 ? D3{0, 0, 1} : D3{1, 0, 0};
+  const auto z = normal(candidate - up * dot(candidate, up));
+  return {up, normal(cross(up, z)), z};
+}
+D3 camera_offset(const OrbitCamera &c) {
+  const auto axes = camera_axes(c);
+  const auto cp = std::cos(c.pitch);
+  return axes.x * (cp * std::sin(c.yaw)) + axes.up * std::sin(c.pitch) +
+         axes.z * (cp * std::cos(c.yaw));
+}
 Basis basis(const OrbitCamera &c) {
   camera_valid(c);
-  auto cp = std::cos(c.pitch);
-  D3 offset{cp * std::sin(c.yaw), std::sin(c.pitch), cp * std::cos(c.yaw)};
-  auto eye = d(c.target) + offset * c.distance;
+  auto eye = d(c.target) + camera_offset(c) * c.distance;
   auto forward = normal(d(c.target) - eye);
-  auto right = normal(cross(forward, {0, 1, 0}));
+  auto right = normal(cross(forward, camera_axes(c).up));
   return {eye, forward, right, cross(right, forward)};
 }
 void include(std::optional<render::Bounds> &b, Vec3 p) {
@@ -107,6 +122,120 @@ Color color(const render::ShapeInstance &s) {
     return {230, 170, 70, 255};
   return {95, 205, 125, 255};
 }
+constexpr Color geometry_colors[] = {{225, 135, 75, 255},  {100, 195, 235, 255},
+                                     {185, 120, 230, 255}, {150, 155, 165, 255},
+                                     {100, 210, 140, 255}, {225, 185, 85, 255},
+                                     {120, 175, 95, 255}};
+Color display_color(const render::ShapeInstance &shape,
+                    const ViewOptions &view) {
+  switch (view.color_mode) {
+  case ColorMode::recorded_status:
+    return color(shape);
+  case ColorMode::uniform:
+    return view.uniform_color;
+  case ColorMode::geometry:
+    return geometry_colors[static_cast<std::size_t>(
+        render::geometry_kind(shape.geometry))];
+  case ColorMode::actor_kind:
+    if (shape.actor.kinematic)
+      return {70, 135, 245, 255};
+    if (shape.actor.kind == render::ActorKind::rigid_static)
+      return {220, 100, 100, 255};
+    if (shape.actor.kind == render::ActorKind::articulation_link)
+      return {65, 195, 200, 255};
+    return {95, 205, 125, 255};
+  case ColorMode::actor_identity: {
+    std::uint64_t h = shape.scene_id;
+    for (const auto v :
+         {shape.scene_generation, shape.actor_id, shape.actor_generation})
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    h ^= h >> 30;
+    h *= 0xbf58476d1ce4e5b9ull;
+    h ^= h >> 27;
+    h *= 0x94d049bb133111ebull;
+    h ^= h >> 31;
+    return {static_cast<std::uint8_t>(64 + (h & 159)),
+            static_cast<std::uint8_t>(64 + ((h >> 8) & 159)),
+            static_cast<std::uint8_t>(64 + ((h >> 16) & 159)), 255};
+  }
+  }
+  throw std::invalid_argument("unknown viewer color mode");
+}
+void enable_categories(ViewOptions &v) {
+  v.show_static = v.show_dynamic = v.show_kinematic = v.show_sleeping =
+      v.show_trigger = true;
+}
+
+const deformables::ClothSurface *cloth_owner(const FrameState &frame,
+                                             deformables::OwnerKey key) {
+  const auto it = std::find_if(frame.deformables.cloths.begin(),
+                               frame.deformables.cloths.end(),
+                               [&](const auto &v) { return v.key == key; });
+  return it == frame.deformables.cloths.end() ? nullptr : &*it;
+}
+const deformables::ParticleCloud *particle_owner(const FrameState &frame,
+                                                 deformables::OwnerKey key) {
+  const auto it = std::find_if(frame.deformables.particle_clouds.begin(),
+                               frame.deformables.particle_clouds.end(),
+                               [&](const auto &v) { return v.key == key; });
+  return it == frame.deformables.particle_clouds.end() ? nullptr : &*it;
+}
+bool deformable_key_valid(const FrameState &frame,
+                          const deformables::SelectionKey &key) {
+  using Kind = deformables::ElementKind;
+  const auto *cloth = cloth_owner(frame, key.object);
+  const auto *cloud = particle_owner(frame, key.object);
+  if (!cloth && !cloud)
+    return false;
+  if (key.kind == Kind::owner)
+    return true;
+  if (key.sample_event_count != frame.snapshot.event_count)
+    return false;
+  if (cloth && key.kind == Kind::cloth_vertex)
+    return key.index < cloth->local_positions.size();
+  if (cloth && key.kind == Kind::cloth_constraint)
+    return std::any_of(
+        cloth->constraints.begin(), cloth->constraints.end(),
+        [&](const auto &edge) { return edge.index == key.index; });
+  return cloud && key.kind == Kind::particle &&
+         std::any_of(cloud->particles.begin(), cloud->particles.end(),
+                     [&](const auto &p) { return p.index == key.index; });
+}
+std::optional<render::Bounds>
+deformable_bounds(const FrameState &frame,
+                  const deformables::SelectionKey &key) {
+  using Kind = deformables::ElementKind;
+  std::optional<render::Bounds> result;
+  if (const auto *cloth = cloth_owner(frame, key.object)) {
+    if (key.kind == Kind::owner && cloth->world_bounds)
+      return render::Bounds{cloth->world_bounds->minimum,
+                            cloth->world_bounds->maximum};
+    if (key.kind == Kind::cloth_vertex &&
+        key.index < cloth->world_positions.size())
+      include(result, cloth->world_positions[key.index]);
+    if (key.kind == Kind::cloth_constraint)
+      for (const auto &edge : cloth->constraints)
+        if (edge.index == key.index &&
+            edge.particle0 < cloth->world_positions.size() &&
+            edge.particle1 < cloth->world_positions.size()) {
+          include(result, cloth->world_positions[edge.particle0]);
+          include(result, cloth->world_positions[edge.particle1]);
+          break;
+        }
+  } else if (const auto *cloud = particle_owner(frame, key.object)) {
+    if (key.kind == Kind::owner && cloud->world_bounds)
+      return render::Bounds{cloud->world_bounds->minimum,
+                            cloud->world_bounds->maximum};
+    if (key.kind == Kind::particle)
+      for (const auto &particle : cloud->particles)
+        if (particle.index == key.index && particle.position) {
+          include(result, *particle.position);
+          break;
+        }
+  }
+  return result;
+}
+
 } // namespace
 Mat4 multiply(const Mat4 &a, const Mat4 &b) {
   Mat4 o;
@@ -218,9 +347,8 @@ void OrbitCamera::fit(const render::Bounds &b, double aspect) {
   const double epsilon = std::max(1e-4, radius * 1e-6);
   const double tan_v = std::tan(vertical_fov / 2), tan_h = tan_v * aspect;
   // Compute the orientation directly, independently of the old target/distance.
-  const D3 forward{-std::cos(pitch) * std::sin(yaw), -std::sin(pitch),
-                   -std::cos(pitch) * std::cos(yaw)};
-  const auto right = normal(cross(forward, {0, 1, 0}));
+  const auto forward = camera_offset(*this) * -1;
+  const auto right = normal(cross(forward, camera_axes(*this).up));
   const auto up = cross(right, forward);
   double required_distance = epsilon * 2, minimum_z = 0;
   for (float x : {b.minimum.x, b.maximum.x})
@@ -251,6 +379,28 @@ void OrbitCamera::fit(const render::Bounds &b, double aspect) {
   far_plane = distance + std::max({radius * 1.5, epsilon * 10, distance * .01});
 }
 
+void OrbitCamera::set_look_at(const CameraState &source) {
+  if (!finite(d(source.position)) || !finite(d(source.target)) ||
+      !finite(d(source.up)))
+    throw std::invalid_argument("recorded camera has non-finite coordinates");
+  const auto offset = d(source.position) - d(source.target);
+  const auto dist = std::sqrt(dot(offset, offset));
+  const auto unit = normal(offset), up = normal(d(source.up));
+  // Validate a meaningful roll before deriving spherical angles.
+  (void)normal(cross(unit, up));
+  OrbitCamera next = *this;
+  next.target = source.target;
+  next.reference_up = f(up);
+  next.distance = dist;
+  const auto axes = camera_axes(next);
+  next.pitch = std::asin(std::clamp(dot(unit, up), -1.0, 1.0));
+  next.yaw = std::atan2(dot(unit, axes.x), dot(unit, axes.z));
+  next.near_plane = std::max(1e-8, dist * .001);
+  next.far_plane = std::max(dist * 1000, dist + 1);
+  (void)next.view_matrix();
+  *this = next;
+}
+
 std::optional<PickHit> pick(const std::vector<DrawItem> &items,
                             const Ray &input) {
   if (!finite(d(input.origin)) || !finite(d(input.direction)) ||
@@ -259,7 +409,7 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &items,
   auto direction = normal(d(input.direction));
   std::optional<PickHit> best;
   for (const auto &item : items) {
-    if (!item.pickable || !item.mesh)
+    if (!item.visible || !item.pickable || !item.mesh)
       continue;
     auto q = item.world_pose.rotation;
     Quat inverse{-q.x, -q.y, -q.z, q.w};
@@ -304,6 +454,55 @@ std::optional<PickHit> pick(const std::vector<DrawItem> &items,
   return best;
 }
 
+std::optional<DeformablePickHit>
+pick_deformable(const FrameState &frame, const Ray &input,
+                const DeformablePickOptions &options) {
+  if (!std::isfinite(options.world_radius) || options.world_radius < 0 ||
+      !std::isfinite(options.angular_radius) || options.angular_radius < 0)
+    throw std::invalid_argument(
+        "deformable pick radii must be finite and nonnegative");
+  if (!finite(d(input.origin)) || !finite(d(input.direction)) ||
+      dot(d(input.direction), d(input.direction)) <= 0)
+    return {};
+  const auto direction = normal(d(input.direction));
+  std::optional<DeformablePickHit> best;
+  const auto visible = [&](deformables::OwnerKey key) {
+    return std::any_of(
+        frame.deformable_draws.begin(), frame.deformable_draws.end(),
+        [&](const auto &v) { return v.key == key && v.visible; });
+  };
+  const auto candidate = [&](deformables::OwnerKey owner,
+                             deformables::ElementKind kind, std::uint32_t index,
+                             Vec3 position) {
+    const auto delta = d(position) - d(input.origin);
+    const auto along = dot(delta, direction);
+    if (!finite(delta) || !std::isfinite(along) || along < 0 ||
+        (best && along >= best->distance))
+      return;
+    const auto radius =
+        std::max(options.world_radius, along * options.angular_radius);
+    const auto perpendicular = delta - direction * along;
+    if (dot(perpendicular, perpendicular) > radius * radius)
+      return;
+    best = DeformablePickHit{
+        {owner, kind, index, frame.snapshot.event_count}, along, position};
+  };
+  if (options.cloth)
+    for (const auto &owner : frame.deformables.cloths)
+      if (owner.pickable && visible(owner.key))
+        for (std::size_t i = 0; i < owner.world_positions.size(); ++i)
+          candidate(owner.key, deformables::ElementKind::cloth_vertex,
+                    static_cast<std::uint32_t>(i), owner.world_positions[i]);
+  if (options.particles)
+    for (const auto &owner : frame.deformables.particle_clouds)
+      if (owner.pickable && visible(owner.key))
+        for (const auto &particle : owner.particles)
+          if (particle.position)
+            candidate(owner.key, deformables::ElementKind::particle,
+                      particle.index, *particle.position);
+  return best;
+}
+
 struct Document::Impl {
   struct CacheEntry {
     render::Geometry source;
@@ -311,6 +510,13 @@ struct Document::Impl {
     std::uint64_t used = 0;
   };
   ModelOptions options;
+  ViewOptions view;
+  std::set<PickingKey> hidden_shapes;
+  std::set<std::pair<ObjectKey, ObjectKey>> hidden_actors;
+  std::optional<PickingKey> isolated_shape;
+  std::optional<std::pair<ObjectKey, ObjectKey>> isolated_actor;
+  std::set<deformables::OwnerKey> hidden_deformables;
+  std::optional<deformables::OwnerKey> isolated_deformable;
   std::unique_ptr<Session> session;
   render::Extractor extractor;
   std::string source;
@@ -329,6 +535,7 @@ struct Document::Impl {
   double remainder = 0;
   std::shared_ptr<FrameState> frame = std::make_shared<FrameState>();
   std::optional<PickingKey> selected;
+  std::optional<deformables::SelectionKey> selected_deformable;
   std::optional<ObjectKey> inspected;
   std::map<std::vector<std::uint64_t>, CacheEntry> cache;
   std::uint64_t clock = 0;
@@ -435,7 +642,7 @@ struct Document::Impl {
                           f.begin_event_count,
                           f.event_count,
                           SamplePoint::native_frame,
-                          "Native frame " + std::to_string(f.index) +
+                          "Native frame " + std::to_string(entries.size() + 1) +
                               " (EndSection)"};
       entries.push_back(entry);
       if (scene == f.scene_id && sample == SamplePoint::native_frame)
@@ -460,7 +667,7 @@ struct Document::Impl {
                           s.begin_event_count,
                           s.event_count,
                           SamplePoint::after_fetch,
-                          "After fetch " + std::to_string(entries.size()) +
+                          "After fetch " + std::to_string(entries.size() + 1) +
                               " (explicit validation marker)"};
       entries.push_back(entry);
       if (scene == s.section_id && sample == SamplePoint::after_fetch)
@@ -483,7 +690,87 @@ struct Document::Impl {
       index = timeline.size() - 1;
   }
 
+  bool shape_visible(const render::ShapeInstance &s) const {
+    if (isolated_deformable)
+      return false;
+    const auto key = s.picking_key();
+    if (isolated_shape && !(key == *isolated_shape))
+      return false;
+    const auto actor = std::make_pair(key.scene, key.actor);
+    if (isolated_actor && !(actor == *isolated_actor))
+      return false;
+    if (hidden_shapes.count(key) || hidden_actors.count(actor))
+      return false;
+    if (s.actor.kind == render::ActorKind::rigid_static) {
+      if (!view.show_static)
+        return false;
+    } else if (s.actor.kinematic) {
+      if (!view.show_kinematic)
+        return false;
+    } else if (!view.show_dynamic)
+      return false;
+    if (!view.show_sleeping && s.actor.sleeping == true)
+      return false;
+    return view.show_trigger || !s.flags.trigger;
+  }
+  void apply_view(FrameState &next) const {
+    next.bounds.reset();
+    for (const auto &p : next.debug.points)
+      include(next.bounds, p.position);
+    for (const auto &l : next.debug.lines) {
+      include(next.bounds, l.position0);
+      include(next.bounds, l.position1);
+    }
+    for (const auto &t : next.debug.triangles) {
+      include(next.bounds, t.position0);
+      include(next.bounds, t.position1);
+      include(next.bounds, t.position2);
+    }
+    for (const auto &t : next.debug.texts)
+      include(next.bounds, t.position);
+    for (const auto &c : next.debug.contacts)
+      include(next.bounds, c.position);
+    std::map<PickingKey, const render::ShapeInstance *> shapes;
+    for (const auto &shape : next.render.instances)
+      shapes.emplace(shape.picking_key(), &shape);
+    for (auto &draw : next.draws) {
+      const auto found = shapes.find(draw.key);
+      draw.visible = found != shapes.end() && shape_visible(*found->second);
+      if (found != shapes.end())
+        draw.color = display_color(*found->second, view);
+      if (draw.visible) {
+        if (found->second->world_bounds)
+          include(next.bounds, *found->second->world_bounds);
+        else if (auto bounds = draw_bounds(draw))
+          include(next.bounds, *bounds);
+      }
+    }
+    next.deformable_draws.clear();
+    const auto add_deformable = [&](const auto &owner) {
+      const bool visible =
+          !hidden_deformables.count(owner.key) &&
+          (!isolated_deformable || owner.key == *isolated_deformable) &&
+          !isolated_shape && !isolated_actor;
+      next.deformable_draws.push_back({owner.key, visible, false});
+      if (visible && owner.world_bounds)
+        include(next.bounds, render::Bounds{owner.world_bounds->minimum,
+                                            owner.world_bounds->maximum});
+    };
+    for (const auto &owner : next.deformables.cloths)
+      add_deformable(owner);
+    for (const auto &owner : next.deformables.particle_clouds)
+      add_deformable(owner);
+  }
+  void refresh_view() {
+    auto next = std::make_shared<FrameState>(*frame);
+    apply_view(*next);
+    frame = std::move(next);
+    update_selection();
+  }
   void update_selection() {
+    if (selected_deformable &&
+        !deformable_key_valid(*frame, *selected_deformable))
+      selected_deformable.reset();
     if (selected) {
       auto found = std::find_if(
           frame->render.instances.begin(), frame->render.instances.end(),
@@ -500,6 +787,10 @@ struct Document::Impl {
       s.selected = selected && s.picking_key() == *selected;
     for (auto &d : frame->draws)
       d.selected = selected && d.key == *selected;
+    frame->deformable_selection = selected_deformable;
+    for (auto &draw : frame->deformable_draws)
+      draw.selected =
+          selected_deformable && draw.key == selected_deformable->object;
   }
   void build_frame() {
     // A bounded import can end inside a property transaction. Never substitute
@@ -533,6 +824,21 @@ struct Document::Impl {
       selection.selected.push_back(*selected);
     next->render =
         extractor.extract(session->metadata(), next->snapshot, selection);
+    auto deformable_options = options.deformables;
+    // A scene may not yet exist at this historical sample. Match the live
+    // generation from the snapshot, never a cached later lifetime.
+    if (scene) {
+      const auto *object = next->snapshot.instance(*scene);
+      if (object) {
+        deformable_options.scene =
+            deformables::ObjectKey{object->id, object->generation};
+        next->deformables = deformables::extract(
+            session->metadata(), next->snapshot, deformable_options);
+      } else
+        next->deformables.event_count = next->snapshot.event_count;
+    } else
+      next->deformables = deformables::extract(
+          session->metadata(), next->snapshot, deformable_options);
     render::DebugRange range;
     if (next->marker) {
       range.begin_event_count = next->marker->begin_event_count;
@@ -543,24 +849,6 @@ struct Document::Impl {
     next->debug =
         render::extract_debug(next->snapshot, session->metadata(),
                               session->channels(), range, options.debug);
-    // Fit visible debug-only captures too. Text contributes its anchor; glyph
-    // dimensions and contact-normal display length are renderer preferences.
-    for (const auto &point : next->debug.points)
-      include(next->bounds, point.position);
-    for (const auto &line : next->debug.lines) {
-      include(next->bounds, line.position0);
-      include(next->bounds, line.position1);
-    }
-    for (const auto &triangle : next->debug.triangles) {
-      include(next->bounds, triangle.position0);
-      include(next->bounds, triangle.position1);
-      include(next->bounds, triangle.position2);
-    }
-    for (const auto &text : next->debug.texts)
-      include(next->bounds, text.position);
-    for (const auto &contact : next->debug.contacts)
-      include(next->bounds, contact.position);
-
     for (const auto &s : next->render.instances) {
       try {
         DrawItem item{triangles(s.geometry),
@@ -569,16 +857,13 @@ struct Document::Impl {
                       color(s),
                       s.pickable,
                       s.selected};
-        if (s.world_bounds)
-          include(next->bounds, *s.world_bounds);
-        else if (auto b = draw_bounds(item))
-          include(next->bounds, *b);
         next->draws.push_back(std::move(item));
       } catch (const std::exception &e) {
         next->errors.push_back("Shape " + std::to_string(s.shape_id) + ": " +
                                e.what());
       }
     }
+    apply_view(*next);
     frame = std::move(next);
     update_selection();
   }
@@ -711,6 +996,7 @@ bool Document::set_scene(std::uint64_t id) {
       impl_->after_timelines[id].empty())
     impl_->sample = SamplePoint::native_frame;
   impl_->selected.reset();
+  impl_->selected_deformable.reset();
   impl_->inspected.reset();
   impl_->make_timeline();
   impl_->build_frame();
@@ -818,6 +1104,26 @@ std::shared_ptr<const FrameState> Document::frame() const noexcept {
 std::optional<PickingKey> Document::selected_key() const noexcept {
   return impl_->selected;
 }
+std::optional<deformables::SelectionKey>
+Document::selected_deformable() const noexcept {
+  return impl_->selected_deformable;
+}
+bool Document::select_deformable(const deformables::SelectionKey &requested) {
+  auto key = requested;
+  if (!deformable_key_valid(*impl_->frame, key))
+    return false;
+  if (key.kind == deformables::ElementKind::owner) {
+    key.index = 0;
+    key.sample_event_count = 0;
+  }
+  impl_->selected.reset();
+  impl_->selected_deformable = key;
+  impl_->inspected =
+      ObjectKey{key.object.owner.id, key.object.owner.generation};
+  impl_->frame = std::make_shared<FrameState>(*impl_->frame);
+  impl_->update_selection();
+  return true;
+}
 std::optional<ObjectKey> Document::inspected_object() const noexcept {
   return impl_->inspected;
 }
@@ -834,6 +1140,7 @@ bool Document::select(const PickingKey &key) {
   if (it == impl_->frame->render.instances.end())
     return false;
   impl_->selected = key;
+  impl_->selected_deformable.reset();
   impl_->inspected = key.shape;
   impl_->frame = std::make_shared<FrameState>(*impl_->frame);
   impl_->update_selection();
@@ -844,6 +1151,18 @@ bool Document::inspect(std::uint64_t id) {
   if (!object)
     return false;
   impl_->inspected = ObjectKey{id, object->generation};
+  for (const auto &draw : impl_->frame->deformable_draws)
+    if (draw.key.owner.id == id &&
+        draw.key.owner.generation == object->generation)
+      return select_deformable(
+          {draw.key, deformables::ElementKind::owner, 0, 0});
+  if (impl_->selected_deformable) {
+    const auto key = impl_->selected_deformable->object;
+    const auto *cloth = cloth_owner(*impl_->frame, key);
+    if (id != key.scene.id &&
+        (!cloth || !cloth->fabric || cloth->fabric->id != id))
+      impl_->selected_deformable.reset();
+  }
   auto related = [&](const render::ShapeInstance &s) {
     bool value = s.actor_id == id || s.shape_id == id || s.geometry_id == id ||
                  s.scene_id == id;
@@ -883,6 +1202,7 @@ bool Document::inspect(std::uint64_t id) {
 
 void Document::clear_selection() {
   impl_->selected.reset();
+  impl_->selected_deformable.reset();
   impl_->inspected.reset();
   impl_->frame = std::make_shared<FrameState>(*impl_->frame);
   impl_->update_selection();
@@ -941,10 +1261,27 @@ bool Document::fit_scene(OrbitCamera &c, double aspect) const {
   return true;
 }
 bool Document::fit_selected(OrbitCamera &c, double aspect) const {
+  if (impl_->selected_deformable) {
+    if (!deformable_visible(impl_->selected_deformable->object))
+      return false;
+    const auto box =
+        deformable_bounds(*impl_->frame, *impl_->selected_deformable);
+    if (!box)
+      return false;
+    c.fit(*box, aspect);
+    return true;
+  }
+  if (impl_->inspected)
+    for (const auto &owner : impl_->frame->deformable_draws)
+      if (owner.visible && owner.key.owner.id == impl_->inspected->id &&
+          owner.key.owner.generation == impl_->inspected->generation)
+        return fit_deformable(owner.key, c, aspect);
   if (!impl_->selected && !impl_->inspected)
     return false;
   std::optional<render::Bounds> bound;
   for (const auto &draw : impl_->frame->draws) {
+    if (!draw.visible)
+      continue;
     bool match = impl_->selected && draw.key == *impl_->selected;
     if (impl_->inspected && draw.key.actor == *impl_->inspected)
       match = true;
@@ -959,5 +1296,289 @@ bool Document::fit_selected(OrbitCamera &c, double aspect) const {
 }
 std::size_t Document::tessellation_cache_entries() const noexcept {
   return impl_->cache.size();
+}
+
+std::vector<ColorLegendEntry> view_legend(const ViewOptions &v) {
+  switch (v.color_mode) {
+  case ColorMode::recorded_status:
+    return {{"Trigger", {190, 100, 220, 255}},
+            {"Kinematic", {70, 135, 245, 255}},
+            {"Static", {220, 100, 100, 255}},
+            {"Sleeping", {230, 170, 70, 255}},
+            {"Dynamic", {95, 205, 125, 255}}};
+  case ColorMode::actor_kind:
+    return {{"Static", {220, 100, 100, 255}},
+            {"Dynamic", {95, 205, 125, 255}},
+            {"Kinematic", {70, 135, 245, 255}},
+            {"Articulation link", {65, 195, 200, 255}}};
+  case ColorMode::geometry: {
+    const char *labels[] = {"Box",         "Sphere",      "Capsule (X axis)",
+                            "Plane (X=0)", "Convex mesh", "Triangle mesh",
+                            "Height field"};
+    std::vector<ColorLegendEntry> result;
+    for (std::size_t i = 0; i < 7; ++i)
+      result.push_back({labels[i], geometry_colors[i]});
+    return result;
+  }
+  case ColorMode::uniform:
+    return {{"Uniform", v.uniform_color}};
+  case ColorMode::actor_identity:
+    return {};
+  }
+  throw std::invalid_argument("unknown viewer color mode");
+}
+std::vector<ObjectGroup> Document::object_groups() const {
+  std::map<QualifiedName, std::vector<ObjectNode>> groups;
+  if (loaded())
+    for (const auto &entry : impl_->frame->snapshot.instances) {
+      const auto &object = entry.second;
+      groups[object.class_name].push_back({{object.id, object.generation},
+                                           name(object),
+                                           object.class_name.str()});
+    }
+  std::vector<ObjectGroup> result;
+  result.reserve(groups.size());
+  for (auto &group : groups)
+    result.push_back({group.first, std::move(group.second)});
+  return result;
+}
+const ViewOptions &Document::view_options() const noexcept {
+  return impl_->view;
+}
+void Document::set_view_options(ViewOptions options) {
+  if (static_cast<int>(options.color_mode) < 0 ||
+      static_cast<int>(options.color_mode) >
+          static_cast<int>(ColorMode::uniform))
+    throw std::invalid_argument("unknown viewer color mode");
+  impl_->view = options;
+  impl_->refresh_view();
+}
+bool Document::visible(const PickingKey &key) const noexcept {
+  for (const auto &item : impl_->frame->draws)
+    if (item.key == key)
+      return item.visible;
+  return false;
+}
+bool Document::deformable_visible(
+    const deformables::OwnerKey &key) const noexcept {
+  for (const auto &draw : impl_->frame->deformable_draws)
+    if (draw.key == key)
+      return draw.visible;
+  return false;
+}
+void Document::set_deformable_visible(const deformables::OwnerKey &key,
+                                      bool value) {
+  if (value)
+    impl_->hidden_deformables.erase(key);
+  else {
+    if (impl_->hidden_deformables.size() + impl_->hidden_shapes.size() +
+                impl_->hidden_actors.size() >=
+            100000 &&
+        !impl_->hidden_deformables.count(key))
+      throw std::length_error(
+          "Viewer hide rule budget reached; Restore all to clear rules");
+    impl_->hidden_deformables.insert(key);
+  }
+  impl_->refresh_view();
+}
+void Document::isolate_deformable(const deformables::OwnerKey &key) {
+  if (!cloth_owner(*impl_->frame, key) && !particle_owner(*impl_->frame, key))
+    return;
+  impl_->isolated_deformable = key;
+  impl_->isolated_shape.reset();
+  impl_->isolated_actor.reset();
+  impl_->hidden_deformables.erase(key);
+  impl_->refresh_view();
+}
+bool Document::fit_deformable(const deformables::OwnerKey &key,
+                              OrbitCamera &camera, double aspect) const {
+  const auto box = deformable_bounds(
+      *impl_->frame, {key, deformables::ElementKind::owner, 0, 0});
+  if (!box)
+    return false;
+  camera.fit(*box, aspect);
+  return true;
+}
+void Document::set_visible(const PickingKey &key, bool value) {
+  if (value)
+    impl_->hidden_shapes.erase(key);
+  else {
+    if (impl_->hidden_shapes.size() + impl_->hidden_actors.size() >= 100000 &&
+        !impl_->hidden_shapes.count(key))
+      throw std::length_error(
+          "Viewer hide rule budget reached; Restore all to clear rules");
+    impl_->hidden_shapes.insert(key);
+  }
+  impl_->refresh_view();
+}
+void Document::set_actor_visible(ObjectKey scene, ObjectKey actor, bool value) {
+  const auto key = std::make_pair(scene, actor);
+  if (value)
+    impl_->hidden_actors.erase(key);
+  else {
+    if (impl_->hidden_shapes.size() + impl_->hidden_actors.size() >= 100000 &&
+        !impl_->hidden_actors.count(key))
+      throw std::length_error(
+          "Viewer hide rule budget reached; Restore all to clear rules");
+    impl_->hidden_actors.insert(key);
+  }
+  impl_->refresh_view();
+}
+void Document::isolate(const PickingKey &key) {
+  impl_->isolated_deformable.reset();
+  impl_->isolated_shape = key;
+  impl_->isolated_actor.reset();
+  impl_->hidden_shapes.erase(key);
+  impl_->hidden_actors.erase({key.scene, key.actor});
+  enable_categories(impl_->view);
+  impl_->refresh_view();
+}
+void Document::isolate_actor(ObjectKey scene, ObjectKey actor) {
+  impl_->isolated_deformable.reset();
+  impl_->isolated_actor = std::make_pair(scene, actor);
+  impl_->isolated_shape.reset();
+  impl_->hidden_actors.erase({scene, actor});
+  for (auto it = impl_->hidden_shapes.begin();
+       it != impl_->hidden_shapes.end();)
+    if (it->scene == scene && it->actor == actor)
+      it = impl_->hidden_shapes.erase(it);
+    else
+      ++it;
+  enable_categories(impl_->view);
+  impl_->refresh_view();
+}
+bool Document::isolated() const noexcept {
+  return impl_->isolated_shape.has_value() ||
+         impl_->isolated_actor.has_value() ||
+         impl_->isolated_deformable.has_value();
+}
+void Document::show_all() {
+  impl_->hidden_deformables.clear();
+  impl_->isolated_deformable.reset();
+  impl_->hidden_shapes.clear();
+  impl_->hidden_actors.clear();
+  impl_->isolated_shape.reset();
+  impl_->isolated_actor.reset();
+  enable_categories(impl_->view);
+  impl_->refresh_view();
+}
+
+namespace {
+std::optional<Vec3> tracked_anchor(const Document &doc,
+                                   const SceneToolState &state) {
+  if (!doc.loaded() || !doc.frame())
+    return {};
+  if (state.tracked_shape)
+    for (const auto &shape : doc.frame()->render.instances)
+      if (shape.picking_key() == *state.tracked_shape)
+        return shape.world_pose.position;
+  if (state.tracked_object) {
+    const auto *object =
+        doc.frame()->snapshot.instance(state.tracked_object->id);
+    if (object && object->generation == state.tracked_object->generation)
+      if (auto *value = object->property("GlobalPose"))
+        try {
+          if (auto pose = value->as_transform();
+              pose && finite(d(pose->position)))
+            return pose->position;
+        } catch (const std::exception &) {
+        }
+  }
+  return {};
+}
+} // namespace
+void stopTracking(SceneToolState &state) noexcept {
+  state.tracked_source = nullptr;
+  state.tracked_shape.reset();
+  state.tracked_object.reset();
+  state.tracked_anchor.reset();
+  state.message.clear();
+}
+bool trackSelected(const Document &doc, const OrbitCamera &camera,
+                   SceneToolState &state) {
+  SceneToolState next = state;
+  stopTracking(next);
+  next.tracked_source = doc.session();
+  next.document_source = doc.session();
+  const auto inspected = doc.inspected_object();
+  const auto selected = doc.selected_key();
+  if (selected && (!inspected || !(selected->actor == *inspected)))
+    next.tracked_shape = selected;
+  else if (inspected)
+    next.tracked_object = inspected;
+  if (!next.tracking()) {
+    state.message = "Select an actor or shape with a captured world pose";
+    return false;
+  }
+  try {
+    (void)camera.position();
+    next.tracked_anchor = tracked_anchor(doc, next);
+  } catch (const std::exception &e) {
+    state.message = e.what();
+    return false;
+  }
+  if (!next.tracked_anchor) {
+    state.message = "The selected lifetime has no captured world-space pose";
+    return false;
+  }
+  next.message = "Tracking selected lifetime";
+  next.error.clear();
+  state = std::move(next);
+  return true;
+}
+bool updateTrackedCamera(const Document &doc, OrbitCamera &camera,
+                         SceneToolState &state) {
+  if (!state.tracking())
+    return false;
+  if (doc.session() != state.tracked_source || !doc.loaded()) {
+    stopTracking(state);
+    state.message = "Tracking stopped: capture changed";
+    return false;
+  }
+  const auto point = tracked_anchor(doc, state);
+  if (!point || !state.tracked_anchor) {
+    stopTracking(state);
+    state.message = "Tracking stopped: target lifetime is absent at this frame";
+    return false;
+  }
+  try {
+    const auto delta = d(*point) - d(*state.tracked_anchor);
+    if (dot(delta, delta) == 0)
+      return false;
+    const auto target = f(d(camera.target) + delta);
+    camera.target = target;
+    state.tracked_anchor = point;
+    return true;
+  } catch (const std::exception &e) {
+    stopTracking(state);
+    state.error = e.what();
+    return false;
+  }
+}
+bool applyRecordedCamera(const Document &doc, const std::string &name,
+                         OrbitCamera &camera, SceneToolState &state) {
+  if (!doc.loaded() || !doc.frame()) {
+    state.message = "Open a capture before choosing a camera";
+    return false;
+  }
+  const auto found = doc.frame()->snapshot.cameras.find(name);
+  if (found == doc.frame()->snapshot.cameras.end()) {
+    state.message = "Recorded camera is absent at this frame";
+    return false;
+  }
+  try {
+    auto next = camera;
+    next.set_look_at(found->second);
+    camera = next;
+    stopTracking(state);
+    state.document_source = doc.session();
+    state.recorded_camera = name;
+    state.message = "Using recorded camera: " + name;
+    state.error.clear();
+    return true;
+  } catch (const std::exception &e) {
+    state.message = std::string("Invalid recorded camera: ") + e.what();
+    return false;
+  }
 }
 } // namespace pvd::viewer

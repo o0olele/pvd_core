@@ -100,6 +100,25 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 
 ## 实现边界和依赖
 
+当前多会话主机、加载取消、书签、用户设置和快捷键行为见
+[工作区说明](workspace.md)。**Event curves** 对原始 CPU scope 做原生帧窗口
+分析，支持独立单位组、精确 CSV 及延迟回填；详见
+[事件耗时曲线](profile-curves.md)。**Deformables** 将原生对象面板与视口并排
+显示，提供布料固定点/约束边及粒子属性、速度、独立拾取/隔离/聚焦。
+原生 cloth 的面拓扑未被 SDK PVD 记录，视图明确显示这一限制。
+
+**Export RepX** 异步导出当前显示快照，支持场景、全部、可见 attachment 和
+选中对象范围。严格模式拒绝未知内容或原生格式损失；显式 partial 模式的
+诊断保留在 XML、弹窗和状态条中，长诊断可悬停查看。任务只冻结源会话的
+导入，其他标签页、网络接收和 raw 录制继续工作。
+
+新增验证入口为 `--deformable-smoke CAPTURE`、
+`--workspace-smoke CAPTURE --workspace-state NEW.pvdws` 和
+`--repx-smoke CAPTURE --output NEW.repx [--allow-partial]`。
+`viewer_deformables_gpu` 验证真实 SDK 的 16 个布料点、58 条约束、12 个粒子及
+选择改变 81 个 GPU 像素；`viewer_repx_gpu` 验证严格拒绝与显式 partial 发布。
+工作区、raw 保存、在线快照和曲线 GPU 验证继续保留。
+
 - `viewer/model.*`：与 ImGui、Win32、GPU 无关的文档、时间轴、选择、相机和拾取。
 - `viewer/live_session.*`：与 UI 无关的实时协调、增量导入和跟随状态。
 - `viewer/renderer.*`：独立的 D3D11 场景渲染及 WIC PNG 导出，可由其他原生 UI 复用。

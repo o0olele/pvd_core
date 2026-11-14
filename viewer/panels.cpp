@@ -307,6 +307,178 @@ std::optional<double> interval_ms(const Document &doc,
 std::string scene_label(const SceneInfo &scene) {
   return scene.name.empty() ? "Scene " + id_text(scene.key.id) : scene.name;
 }
+
+void shape_menu(Document &doc, PanelState &state, const PickingKey &key) {
+  if (!ImGui::BeginPopupContextItem("##shape-actions"))
+    return;
+  if (ImGui::MenuItem("Hide attachment"))
+    command(state, [&] { doc.set_visible(key, false); });
+  if (ImGui::MenuItem("Show attachment"))
+    command(state, [&] { doc.set_visible(key, true); });
+  if (ImGui::MenuItem("Isolate attachment"))
+    command(state, [&] { doc.isolate(key); });
+  ImGui::Separator();
+  if (ImGui::MenuItem("Restore all"))
+    command(state, [&] { doc.show_all(); });
+  ImGui::TextDisabled(
+      "Show removes manual hide; category filters still apply.");
+  ImGui::EndPopup();
+}
+void actor_menu(Document &doc, PanelState &state, ObjectKey scene,
+                ObjectKey actor) {
+  if (!ImGui::BeginPopupContextItem("##actor-actions"))
+    return;
+  if (ImGui::MenuItem("Hide actor"))
+    command(state, [&] { doc.set_actor_visible(scene, actor, false); });
+  if (ImGui::MenuItem("Show actor"))
+    command(state, [&] { doc.set_actor_visible(scene, actor, true); });
+  if (ImGui::MenuItem("Isolate actor"))
+    command(state, [&] { doc.isolate_actor(scene, actor); });
+  ImGui::Separator();
+  if (ImGui::MenuItem("Restore all"))
+    command(state, [&] { doc.show_all(); });
+  ImGui::EndPopup();
+}
+void object_categories(Document &doc, PanelState &state,
+                       const std::string &query) {
+  if (state.reveal_object || !query.empty())
+    ImGui::SetNextItemOpen(true);
+  if (!ImGui::CollapsingHeader("All objects by class (all scenes)"))
+    return;
+  const auto prefix = doc.frame()->snapshot.event_count;
+  bool refresh =
+      state.category_source != doc.session() || state.category_prefix != prefix;
+  if (refresh) {
+    state.categories = doc.object_groups();
+    state.category_source = doc.session();
+    state.category_prefix = prefix;
+    state.category_page = 0;
+    state.category_object_pages.clear();
+  }
+  if (refresh || state.category_query != query) {
+    state.category_query = query;
+    state.matching_categories.clear();
+    state.category_matches.clear();
+    state.category_matches.resize(state.categories.size());
+    state.object_count = 0;
+    for (std::size_t gi = 0; gi < state.categories.size(); ++gi) {
+      const auto &group = state.categories[gi];
+      auto &list = state.category_matches[gi];
+      const bool class_match = matches(group.class_name.str(), query);
+      for (std::size_t oi = 0; oi < group.objects.size(); ++oi) {
+        const auto &object = group.objects[oi];
+        if (class_match || matches(object.name + " " + id_text(object.key.id) +
+                                       " " + std::to_string(object.key.id),
+                                   query))
+          list.push_back(oi);
+      }
+      if (!list.empty()) {
+        state.matching_categories.push_back(gi);
+        state.object_count += list.size();
+      }
+    }
+  }
+  constexpr std::size_t group_page_size = 32, object_page_size = 128;
+  if (state.reveal_object)
+    for (std::size_t g = 0; g < state.matching_categories.size(); ++g) {
+      const auto gi = state.matching_categories[g];
+      const auto &objects = state.categories[gi].objects;
+      const auto &list = state.category_matches[gi];
+      for (std::size_t i = 0; i < list.size(); ++i)
+        if (same(objects[list[i]].key, *state.reveal_object)) {
+          state.category_page = g / group_page_size;
+          state.category_object_pages[state.categories[gi].class_name.str()] =
+              i / object_page_size;
+        }
+    }
+  const auto last =
+      state.matching_categories.empty()
+          ? 0
+          : (state.matching_categories.size() - 1) / group_page_size;
+  state.category_page = std::min(state.category_page, last);
+  muted(std::to_string(state.object_count) + " matching live objects | " +
+        std::to_string(state.matching_categories.size()) + " classes");
+  if (last) {
+    DisabledScope prev(!state.category_page);
+    if (ImGui::SmallButton("Previous classes"))
+      --state.category_page;
+  }
+  if (last) {
+    ImGui::SameLine();
+    DisabledScope next(state.category_page == last);
+    if (ImGui::SmallButton("Next classes"))
+      ++state.category_page;
+  }
+  state.object_visible_rows = 0;
+  const auto begin = state.category_page * group_page_size,
+             end = std::min(begin + group_page_size,
+                            state.matching_categories.size());
+  for (auto g = begin; g < end; ++g) {
+    const auto gi = state.matching_categories[g];
+    const auto &group = state.categories[gi];
+    const auto &list = state.category_matches[gi];
+    const auto cls = group.class_name.str();
+    IdScope group_id("class:" + cls);
+    bool reveal = false;
+    if (state.reveal_object)
+      for (auto oi : list)
+        reveal |= same(group.objects[oi].key, *state.reveal_object);
+    if (reveal || !query.empty())
+      ImGui::SetNextItemOpen(true);
+    if (!ImGui::TreeNodeEx(
+            (clipped(cls, 160) + " (" + std::to_string(list.size()) + ")")
+                .c_str(),
+            ImGuiTreeNodeFlags_SpanAvailWidth))
+      continue;
+    auto &page = state.category_object_pages[cls];
+    const auto last_object = (list.size() - 1) / object_page_size;
+    page = std::min(page, last_object);
+    if (last_object) {
+      DisabledScope previous(!page);
+      if (ImGui::SmallButton("Previous objects"))
+        --page;
+    }
+    if (last_object) {
+      ImGui::SameLine();
+      DisabledScope next(page == last_object);
+      if (ImGui::SmallButton("Next objects"))
+        ++page;
+    }
+    const auto first = page * object_page_size,
+               count = std::min(object_page_size, list.size() - first);
+    if (ImGui::BeginTable(
+            "##class-objects", 2,
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_SizingStretchProp,
+            {0, std::min(165.f, ImGui::GetFrameHeightWithSpacing() *
+                                    static_cast<float>(count + 1))})) {
+      ImGui::TableSetupColumn("Object", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableSetupColumn("ID / generation",
+                              ImGuiTableColumnFlags_WidthStretch);
+      ImGuiListClipper clipper;
+      clipper.Begin(static_cast<int>(count));
+      while (clipper.Step())
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+          const auto &object =
+              group.objects[list[first + static_cast<std::size_t>(row)]];
+          IdScope object_id("object:" + std::to_string(object.key.id));
+          ++state.object_visible_rows;
+          ImGui::TableNextRow();
+          ImGui::TableNextColumn();
+          const auto inspected = doc.inspected_object();
+          if (ImGui::Selectable(clipped(object.name, 180).c_str(),
+                                inspected && same(*inspected, object.key)))
+            inspect(doc, state, object.key.id);
+          tooltip(object.class_name + " | " + id_text(object.key.id));
+          ImGui::TableNextColumn();
+          text(id_text(object.key.id) + " / " +
+               std::to_string(object.key.generation));
+        }
+      ImGui::EndTable();
+    }
+    ImGui::TreePop();
+  }
+}
 } // namespace
 
 std::string propertyValueText(const PropertyValue &value, std::size_t item) {
@@ -436,15 +608,18 @@ void drawEmptyState(const char *title, const char *description) {
 }
 
 void drawHierarchy(Document &doc, PanelState &state) {
+  state.object_visible_rows = 0;
   try {
     if (!doc.loaded()) {
       drawEmptyState("No capture loaded",
                      "Open a PVD recording to browse its scenes and objects.");
       return;
     }
+    if (ImGui::SmallButton("Restore all visibility"))
+      command(state, [&] { doc.show_all(); });
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint(
-        "##hierarchy-search", "Search this scene by name, class or ID...",
+        "##hierarchy-search", "Search objects by name, class or ID...",
         state.hierarchy_search.data(), state.hierarchy_search.size());
     ImGui::Spacing();
     const auto query = lower(state.hierarchy_search.data());
@@ -534,6 +709,7 @@ void drawHierarchy(Document &doc, PanelState &state) {
                 (shapes.empty() ? ImGuiTreeNodeFlags_Leaf : 0));
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
           inspect(doc, state, actor.key.id);
+        actor_menu(doc, state, scene_key, actor.key);
         tooltip(actor.class_name + " | " + id_text(actor.key.id));
         if (!actor_open)
           continue;
@@ -554,7 +730,9 @@ void drawHierarchy(Document &doc, PanelState &state) {
               ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
                   ImGuiTreeNodeFlags_SpanAvailWidth |
                   (shape_active ? ImGuiTreeNodeFlags_Selected : 0));
-          if (ImGui::IsItemClicked())
+          const bool shape_clicked = ImGui::IsItemClicked();
+          shape_menu(doc, state, key);
+          if (shape_clicked)
             command(state, [&] {
               if (!doc.select(key) && !doc.inspect(shape->key.id))
                 throw std::runtime_error(
@@ -562,13 +740,16 @@ void drawHierarchy(Document &doc, PanelState &state) {
               state.reveal_object = shape->key;
             });
           tooltip(shape->class_name + " | " + id_text(shape->key.id) +
-                  (shape->present ? "" : " | Not present at this frame"));
+                  (shape->present ? "" : " | Not present at this frame") +
+                  (doc.visible(key) ? " | Visible"
+                                    : " | Hidden, filtered or no geometry"));
         }
       }
       if (!any)
         muted(query.empty() ? "No objects at this frame."
                             : "No matching objects.");
     }
+    object_categories(doc, state, query);
     state.reveal_object.reset();
     panel_error(state);
   } catch (const std::exception &e) {

@@ -245,6 +245,7 @@ struct Renderer::Impl {
         stats={};if(!target)return;
         need(std::isfinite(options.point_size)&&options.point_size>=1&&options.point_size<=64,"viewer point size must be in [1,64]");
         need(std::isfinite(options.contact_normal_length)&&options.contact_normal_length>=0,"viewer contact normal length must be finite/nonnegative");
+        need(std::isfinite(options.particle_velocity_scale)&&options.particle_velocity_scale>=0&&options.particle_velocity_scale<=1e6f,"viewer particle velocity scale must be finite and in [0,1000000]");
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
         ID3D11ShaderResourceView* unbound=nullptr;context->PSSetShaderResources(0,1,&unbound);
         auto* output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
@@ -269,7 +270,7 @@ struct Renderer::Impl {
         draw_dynamic({},grid,projection);
         std::set<render::PickingKey> triggers;for(const auto& shape:frame.render.instances)if(shape.flags.trigger)triggers.insert(shape.picking_key());
         for(const auto& item:frame.draws) {
-            if(!item.mesh||item.mesh->indices.empty())continue;
+            if(!item.visible||!item.mesh||item.mesh->indices.empty())continue;
             const bool trigger=triggers.count(item.key)!=0;
             // Visibility masks also hide selection overlays. Selection must not
             // accidentally resurrect geometry in a debug-primitives-only view.
@@ -303,6 +304,50 @@ struct Renderer::Impl {
         if(options.show_contacts)for(const auto& c:frame.debug.contacts) {
             point(c.position,{1,0.49f,0.22f,1},options.point_size+1);
             line(lines,c.position,add(c.position,scale(c.normal,options.contact_normal_length)),{1,0.73f,0.31f,1},{1,0.73f,0.31f,1});
+        }
+        // Native deformables have their own owner/element identity. These are
+        // camera-facing point markers and exact fabric edges, never rigid
+        // shapes or reconstructed cloth surface triangles.
+        const auto visible_owner=[&](deformables::OwnerKey key) {
+            return std::any_of(frame.deformable_draws.begin(),frame.deformable_draws.end(),[&](const auto& draw){return draw.key==key&&draw.visible;});
+        };
+        const auto selected=[&](deformables::OwnerKey key,deformables::ElementKind kind,std::uint32_t index) {
+            const auto& selection=frame.deformable_selection;
+            return selection&&selection->object==key&&
+                (selection->kind==deformables::ElementKind::owner||
+                 (selection->sample_event_count==frame.snapshot.event_count&&selection->kind==kind&&selection->index==index));
+        };
+        if(options.show_cloth)for(const auto& cloth:frame.deformables.cloths) {
+            if(!visible_owner(cloth.key))continue;
+            const auto base=cloth.color?rgba(*cloth.color):std::array<float,4>{.43f,.69f,.82f,1};
+            for(std::size_t i=0;i<cloth.world_positions.size();++i) {
+                const bool pin=i<cloth.inverse_masses.size()&&cloth.inverse_masses[i]==0;
+                const bool active=selected(cloth.key,deformables::ElementKind::cloth_vertex,static_cast<std::uint32_t>(i));
+                point(cloth.world_positions[i],active?std::array<float,4>{1,.82f,.23f,1}:
+                    pin&&options.show_cloth_pins?std::array<float,4>{1,.48f,.22f,1}:base,
+                    options.point_size+(active?4.f:pin&&options.show_cloth_pins?2.f:0.f));
+                ++stats.cloth_points;
+            }
+            if(options.show_cloth_constraints)for(const auto& edge:cloth.constraints) {
+                if(edge.particle0>=cloth.world_positions.size()||edge.particle1>=cloth.world_positions.size())continue;
+                const auto color=selected(cloth.key,deformables::ElementKind::cloth_constraint,edge.index)?
+                    std::array<float,4>{.15f,.93f,.81f,1}:std::array<float,4>{base[0]*.85f,base[1]*.85f,base[2]*.85f,.8f};
+                line(lines,cloth.world_positions[edge.particle0],cloth.world_positions[edge.particle1],color,color);++stats.cloth_constraints;
+            }
+        }
+        if(options.show_particles)for(const auto& cloud:frame.deformables.particle_clouds) {
+            if(!visible_owner(cloud.key))continue;
+            const auto base=cloud.color?rgba(*cloud.color):cloud.kind==deformables::ParticleKind::fluid?
+                std::array<float,4>{.26f,.68f,.97f,1}:std::array<float,4>{.91f,.72f,.32f,1};
+            for(const auto& particle:cloud.particles)if(particle.position) {
+                const bool active=selected(cloud.key,deformables::ElementKind::particle,particle.index);
+                point(*particle.position,active?std::array<float,4>{1,.82f,.23f,1}:base,options.point_size+(active?4.f:0.f));++stats.particle_points;
+                if(options.show_particle_velocity&&particle.velocity) {
+                    const auto color=std::array<float,4>{.38f,.87f,.72f,.9f};
+                    line(lines,*particle.position,add(*particle.position,scale(*particle.velocity,options.particle_velocity_scale)),color,color);
+                    ++stats.particle_velocity_vectors;
+                }
+            }
         }
         draw_dynamic(triangles,lines,projection);
         // Avoid retaining the viewport as an output when the host samples its SRV.
