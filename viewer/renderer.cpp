@@ -3,6 +3,7 @@
 #endif
 #include "renderer.hpp"
 #include "model.hpp"
+#include "pvd/body_overlays.hpp"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wincodec.h>
@@ -123,6 +124,7 @@ struct Renderer::Impl {
     bool mirrored=false,msaa_checked=false,color4x=false,depth4x=false,resolve_color=false;
     MultisampleStatus multisampling;
     RenderStats stats;
+    render::BodyOverlays overlays;
     struct Mesh {
         std::weak_ptr<const render::TriangleBuffer> owner;
         ComPtr<ID3D11Buffer> vertices,indices;
@@ -276,12 +278,13 @@ struct Renderer::Impl {
         }
     }
     void render(const FrameState& frame,const OrbitCamera& camera,const RenderOptions& options) {
-        stats={};configure_samples(options.antialiasing);stats.multisampling=multisampling;if(!target)return;
+        stats={};overlays={};configure_samples(options.antialiasing);stats.multisampling=multisampling;if(!target)return;
         mirrored=camera.handedness==DisplayHandedness::left_handed;
         for(float component:options.background_color)need(std::isfinite(component)&&component>=0&&component<=1,"viewer background color must be finite RGBA in [0,1]");
         need(std::isfinite(options.point_size)&&options.point_size>=1&&options.point_size<=64,"viewer point size must be in [1,64]");
         need(std::isfinite(options.contact_normal_length)&&options.contact_normal_length>=0,"viewer contact normal length must be finite/nonnegative");
         need(std::isfinite(options.particle_velocity_scale)&&options.particle_velocity_scale>=0&&options.particle_velocity_scale<=1e6f,"viewer particle velocity scale must be finite and in [0,1000000]");
+        need(std::isfinite(options.rigid_velocity_scale)&&options.rigid_velocity_scale>=0&&options.rigid_velocity_scale<=1e6f,"viewer rigid velocity scale must be finite and in [0,1000000]");
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
         ID3D11ShaderResourceView* unbound=nullptr;context->PSSetShaderResources(0,1,&unbound);
         auto* output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
@@ -339,6 +342,21 @@ struct Renderer::Impl {
         if(options.show_debug_lines)for(const auto& l:frame.debug.lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_joint_frames)for(const auto& l:frame.joint_frame_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
         if(options.show_joint_limits)for(const auto& l:frame.joint_limit_lines)line(lines,l.position0,l.position1,argb(l.color0),argb(l.color1));
+        if(options.show_bounds||options.show_linear_velocity||options.show_angular_velocity) {
+            render::BodyOverlayOptions request;
+            request.show_bounds=options.show_bounds;
+            request.show_linear_velocity=options.show_linear_velocity;
+            request.show_angular_velocity=options.show_angular_velocity;
+            request.velocity_scale=options.rigid_velocity_scale;
+            request.visible_attachments.emplace();
+            for(const auto& draw:frame.draws)if(draw.visible)request.visible_attachments->push_back(draw.key);
+            overlays=render::build_body_overlays(frame.render,frame.snapshot,request);
+            for(const auto* family:{&overlays.bounds,&overlays.linear_velocity,&overlays.angular_velocity})
+                for(const auto& l:*family)line(lines,l.position0,l.position1,argb(l.color),argb(l.color));
+            stats.body_bounds=overlays.bounds_count;
+            stats.linear_velocity_vectors=overlays.linear_vectors;
+            stats.angular_velocity_vectors=overlays.angular_vectors;
+        }
         if(options.show_scene_queries) {
             const auto query_color=[&](const render::SceneQuerySource& source,std::uint32_t color) {
                 return frame.scene_query_selection&&same_query_source(source,*frame.scene_query_selection)?
@@ -438,6 +456,7 @@ ID3D11Texture2D* Renderer::texture() const noexcept{return impl_->target.Get();}
 std::uint32_t Renderer::width() const noexcept{return impl_->width;}
 std::uint32_t Renderer::height() const noexcept{return impl_->height;}
 RenderStats Renderer::stats() const noexcept{return impl_->stats;}
+const render::BodyOverlays& Renderer::body_overlays() const noexcept{return impl_->overlays;}
 void Renderer::clear_mesh_cache() noexcept{impl_->meshes.clear();impl_->stats.cached_meshes=0;}
 
 RgbaImage readTextureRgba8(ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Texture2D* source) {

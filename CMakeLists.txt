@@ -61,7 +61,7 @@ endif()
 
 if(PVD_BUILD_RENDER)
     add_library(pvd_render src/render.cpp src/debug_render.cpp src/mesh_builder.cpp src/deformables.cpp
-        src/constraint_builder.cpp src/scene_queries.cpp)
+        src/constraint_builder.cpp src/scene_queries.cpp src/body_overlays.cpp)
     add_library(pvd::render ALIAS pvd_render)
     set_target_properties(pvd_render PROPERTIES EXPORT_NAME render VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -131,7 +131,7 @@ if(BUILD_TESTING)
         set_tests_properties(capture PROPERTIES TIMEOUT 30)
     endif()
     if(PVD_BUILD_RENDER)
-        foreach(render_test IN ITEMS render debug_render mesh_builder deformables constraint_builder scene_queries)
+        foreach(render_test IN ITEMS render debug_render mesh_builder deformables constraint_builder scene_queries body_overlays)
             add_executable(pvd_${render_test}_tests tests/${render_test}_tests.cpp)
             target_link_libraries(pvd_${render_test}_tests PRIVATE pvd::render)
             add_test(NAME ${render_test} COMMAND pvd_${render_test}_tests)
@@ -215,6 +215,9 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             add_test(NAME physx34_scene_queries COMMAND pvd_physx34_scene_queries
                 ${PROJECT_BINARY_DIR}/fixtures/queries_capture.pxd2 ${PROJECT_BINARY_DIR}/fixtures/queries_expected.csv)
             set_tests_properties(physx34_scene_queries PROPERTIES FIXTURES_REQUIRED physx34_scene_queries TIMEOUT 30)
+            add_test(NAME body_overlays_physx34 COMMAND pvd_body_overlays_tests
+                ${PROJECT_BINARY_DIR}/fixtures/physical_capture.pxd2)
+            set_tests_properties(body_overlays_physx34 PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
             add_test(NAME physx34_joints_generate COMMAND pvd_physx34_joints_capture
                 ${PROJECT_BINARY_DIR}/fixtures/joints)
             set_tests_properties(physx34_joints_generate PROPERTIES FIXTURES_SETUP physx34_joints TIMEOUT 30)

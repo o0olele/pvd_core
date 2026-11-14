@@ -5,6 +5,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "scene_tools.hpp"
+#include "pvd/body_overlays.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -207,21 +208,35 @@ struct Fixture {
     auto dt = type(t);
     emit(SetPropertyValue{id, h, dt, 1, std::move(b)});
   }
-  Fixture() {
-    for (const char *c :
-         {"PxScene", "PxRigidStatic", "PxShape", "PxBoxGeometry"})
+  explicit Fixture(bool dynamic = false, bool angular = true) {
+    const char *actor = dynamic ? "PxRigidDynamic" : "PxRigidStatic";
+    for (const char *c : {"PxScene", actor, "PxShape", "PxBoxGeometry"})
       emit(CreateClass{type(c)});
-    prop("PxRigidStatic", "Scene", "ObjectRef");
-    prop("PxRigidStatic", "Shapes", "ObjectRef", true);
-    prop("PxRigidStatic", "GlobalPose", "PxTransform");
+    prop(actor, "Scene", "ObjectRef");
+    prop(actor, "Shapes", "ObjectRef", true);
+    prop(actor, "GlobalPose", "PxTransform");
+    if (dynamic) {
+      prop(actor, "RigidBodyFlags", "PvdU32");
+      prop(actor, "IsSleeping", "PvdU8");
+      prop(actor, "LinearVelocity", "PxVec3");
+      if (angular)
+        prop(actor, "AngularVelocity", "PxVec3");
+    }
     prop("PxShape", "Geometry", "ObjectRef");
     prop("PxShape", "LocalPose", "PxTransform");
     prop("PxShape", "Flags", "PvdU8");
     prop("PxBoxGeometry", "HalfExtents", "PxVec3");
     emit(CreateInstance{type("PxScene"), 1});
-    emit(CreateInstance{type("PxRigidStatic"), 10});
+    emit(CreateInstance{type(actor), 10});
     emit(CreateInstance{type("PxShape"), 100});
     emit(CreateInstance{type("PxBoxGeometry"), 200});
+    if (dynamic) {
+      value(10, "RigidBodyFlags", "PvdU32", ints({0}, 4));
+      value(10, "IsSleeping", "PvdU8", {0});
+      value(10, "LinearVelocity", "PxVec3", floats({5, 0, 0}));
+      if (angular)
+        value(10, "AngularVelocity", "PxVec3", floats({0, 5, 0}));
+    }
     value(10, "Scene", "VoidPtr", ints({1}, 8));
     value(10, "Shapes", "VoidPtr", ints({100}, 8));
     value(100, "Geometry", "VoidPtr", ints({200}, 8));
@@ -499,6 +514,43 @@ void gpu() {
   options.show_joint_limits = false;
   renderer.render(joints, camera, options);
   check(renderer.stats().line_segments == 0, "joint limit visibility mask");
+  Fixture body_fixture(true);
+  Document bodies;
+  body_fixture.load(bodies);
+  check(bodies.fit_scene(camera, 211. / 137), "body overlay fit");
+  options = {};
+  options.show_grid = options.show_axes = options.show_solids = false;
+  renderer.render(*bodies.frame(), camera, options);
+  const auto no_overlays = readTextureRgba8(device.Get(), context.Get(), renderer.texture());
+  check(renderer.body_overlays().processed_attachments == 0,
+        "disabled body layers never traverse source properties");
+  options.show_bounds = options.show_linear_velocity = options.show_angular_velocity = true;
+  renderer.render(*bodies.frame(), camera, options);
+  const auto body_image = readTextureRgba8(device.Get(), context.Get(), renderer.texture());
+  check(renderer.stats().body_bounds == 1 &&
+            renderer.stats().linear_velocity_vectors == 1 &&
+            renderer.stats().angular_velocity_vectors == 1 &&
+            renderer.stats().line_segments == 18 && renderer.body_overlays().complete,
+        "real renderer integrates all three body overlay layers");
+  check(body_image.pixels != no_overlays.pixels,
+        "actual GPU body boxes and arrows change the image");
+  const auto body_key = bodies.frame()->draws.front().key;
+  bodies.set_visible(body_key, false);
+  renderer.render(*bodies.frame(), camera, options);
+  check(renderer.stats().line_segments == 0 && renderer.body_overlays().complete &&
+            renderer.body_overlays().diagnostics.empty(),
+        "hidden actor cannot leak a bound, velocity or diagnostic");
+  check(readTextureRgba8(device.Get(), context.Get(), renderer.texture()).pixels == no_overlays.pixels,
+        "hiding last attachment restores original GPU image");
+  Fixture missing_angular(true, false);
+  Document incomplete;
+  missing_angular.load(incomplete);
+  renderer.render(*incomplete.frame(), camera, options);
+  check(!renderer.body_overlays().complete &&
+            renderer.stats().linear_velocity_vectors == 1 &&
+            renderer.stats().angular_velocity_vectors == 0 &&
+            !renderer.body_overlays().diagnostics.empty(),
+        "missing requested source field is exposed with valid independent layers");
   std::cout
       << "Actual WARP 1x/4x/background/resolve/mirror/lighting/selection/grid "
          "tests passed\n";
@@ -546,7 +598,9 @@ void widgets(float width) {
   draw(doc, camera, options, stats, panel, width);
   auto output = draw(doc, camera, options, stats, panel, width);
   check(output.text.find("actual 1x") != std::string::npos &&
-            output.text.find("exports stay unchanged") != std::string::npos,
+            output.text.find("exports stay unchanged") != std::string::npos &&
+            output.text.find("Tight geometry bounds") != std::string::npos &&
+            output.text.find("Angular velocity") != std::string::npos,
         "real ImGui displays actual mode and source/display contract");
   options.antialiasing = Antialiasing::msaa4x;
   stats.multisampling =

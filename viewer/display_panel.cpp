@@ -64,6 +64,17 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
   ImGui::Checkbox("Joint frames", &options.show_joint_frames);
   ImGui::SameLine();
   ImGui::Checkbox("Joint limits", &options.show_joint_limits);
+  ImGui::Checkbox("Tight geometry bounds", &options.show_bounds);
+  ImGui::Checkbox("Linear velocity", &options.show_linear_velocity);
+  ImGui::SameLine();
+  ImGui::Checkbox("Angular velocity", &options.show_angular_velocity);
+  if (options.show_linear_velocity || options.show_angular_velocity) {
+    ImGui::SetNextItemWidth(180);
+    ImGui::DragFloat("Rigid velocity scale", &options.rigid_velocity_scale,
+                     .01f, 0.f, 1e6f, "%.3g", ImGuiSliderFlags_AlwaysClamp);
+  }
+  ImGui::TextWrapped("Bounds use tight captured geometry, not broadphase inflation. "
+                     "Velocity arrows use recorded world-space values at the actor pose.");
   ImGui::BeginDisabled(!doc.loaded());
   if (ImGui::Button("Fit scene with this display"))
     action(state, [&] {

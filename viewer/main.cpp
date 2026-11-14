@@ -1,5 +1,6 @@
 #include "deformable_panel.hpp"
 #include "display_panel.hpp"
+#include "pvd/body_overlays.hpp"
 #include "scene_query_panel.hpp"
 #include "export_panel.hpp"
 #include "imgui_internal.h"
@@ -2701,9 +2702,17 @@ private:
       ImGui::Checkbox("Debug triangles", &options.show_debug_triangles);
       ImGui::SameLine();
       ImGui::Checkbox("Debug text", &ui().show_debug_text);
-      ImGui::Checkbox("Joint frames", &options.show_joint_frames);
-      ImGui::SameLine();
-      ImGui::Checkbox("Joint limits", &options.show_joint_limits);
+      const auto &overlays = renderer_->body_overlays();
+      if (!overlays.complete) {
+        ImGui::Separator();
+        ImGui::TextColored({1,.7f,.35f,1}, "Body overlay diagnostics (%zu retained)",
+                           overlays.diagnostics.size());
+        for (const auto &diagnostic : overlays.diagnostics)
+          ImGui::TextWrapped("Actor %llu:%llu / %s: %s",
+              static_cast<unsigned long long>(diagnostic.source.key.actor.id),
+              static_cast<unsigned long long>(diagnostic.source.key.actor.generation),
+              diagnostic.property.c_str(), diagnostic.message.c_str());
+      }
       ImGui::EndPopup();
     }
     const auto frame = document().frame();
@@ -2820,6 +2829,10 @@ private:
       }
     draw_list->PopClipRect();
     ImGui::TextDisabled("RMB orbit   MMB pan   Wheel zoom   Click select");
+    if (!renderer_->body_overlays().complete)
+      ImGui::GetWindowDrawList()->AddText(
+          {viewport_origin_.x+8,viewport_origin_.y+8}, IM_COL32(255,185,85,255),
+          "Some body overlays unavailable; View... shows diagnostics.");
   }
   void screenshot() {
     ComPtr<ID3D11Texture2D> buffer;

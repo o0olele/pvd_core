@@ -10,6 +10,7 @@ struct ID3D11Device;
 struct ID3D11DeviceContext;
 struct ID3D11Texture2D;
 struct ID3D11ShaderResourceView;
+namespace pvd::render { struct BodyOverlays; }
 
 namespace pvd::viewer {
 struct FrameState;
@@ -51,6 +52,8 @@ struct RenderStats {
                   cloth_constraints = 0, particle_velocity_vectors = 0;
     MultisampleStatus multisampling;
     std::uint64_t query_lines = 0, query_volumes = 0;
+    std::uint64_t body_bounds = 0, linear_velocity_vectors = 0,
+                  angular_velocity_vectors = 0;
 };
 struct RgbaImage {
     std::uint32_t width = 0, height = 0;
@@ -78,6 +81,9 @@ public:
     std::uint32_t width() const noexcept;
     std::uint32_t height() const noexcept;
     RenderStats stats() const noexcept;
+    // Last render's requested rigid overlays and bounded diagnostics. Off
+    // layers leave this empty and never traverse source properties.
+    const render::BodyOverlays& body_overlays() const noexcept;
     void clear_mesh_cache() noexcept;
 private:
     struct Impl;
