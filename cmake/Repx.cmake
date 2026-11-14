@@ -67,7 +67,8 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${PROJECT_BINARY_DIR}/fixtures/articulation_export)
         set_tests_properties(physx34_repx_articulation_generate PROPERTIES FIXTURES_REQUIRED physx34_articulation
             FIXTURES_SETUP physx34_repx_articulation TIMEOUT 30)
-        foreach(suffix IN ITEMS "" _big_endian _scene _component _visible _boundary_partial)
+        foreach(suffix IN ITEMS "" _big_endian _scene _component _visible _boundary_partial
+                _owner_partial _aggregate_owner _union_owners)
             add_test(NAME physx34_repx_articulation${suffix} COMMAND pvd_physx34_repx_validate
                 ${PROJECT_BINARY_DIR}/fixtures/articulation_export${suffix}.repx
                 ${PROJECT_BINARY_DIR}/fixtures/articulation_export${suffix}_expected.csv

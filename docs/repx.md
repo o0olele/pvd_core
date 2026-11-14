@@ -21,9 +21,11 @@ caller. Keys include generation and stale keys are rejected. Selecting a shape
 includes all its supported owning actors; this preserves shared-shape identity.
 Their transitive shape, material, mesh/heightfield dependencies and eligible
 extension joints are included. Joint endpoints never expand this actor selection.
-Rigid actor, articulation-link and shape selection roots are supported; arbitrary
-owner/unknown objects are not quietly converted to rigid bodies. Articulation
-and aggregate containers are retained only for complete selected member graphs.
+Rigid actor, articulation-link, shape and explicit `PxArticulation` / `PxAggregate`
+owner roots are supported. An explicit owner authorizes its complete published
+link/member subgraph; ordinary actor/link roots retain their existing boundaries.
+Unknown objects are not converted to rigid bodies. Containers are retained only
+for complete, validated member graphs.
 
 For viewport selection or visibility, use `Selection::attachments` and
 `Options.attachments`, whose `AttachmentKey` contains scene, actor and shape
@@ -237,6 +239,35 @@ partial export. All links and shapes of an articulation must remain selected
 even if only one link is visually interesting. Actor/link and shape keys still
 include generation; pointer reuse cannot retarget a selection.
 
+### Explicit owner selection
+
+`Selection::objects` accepts an immutable `PxArticulation` or `PxAggregate` key.
+Selecting an articulation authorizes all of its links, inbound joints, shapes and
+resources. Selecting an aggregate authorizes its published ordinary actors and
+complete articulation member graphs. Multiple owner keys form a deduplicated
+union, and overlapping articulation/aggregate keys do not duplicate objects.
+
+```cpp
+options.selection = pvd::repx::Selection::objects;
+options.objects = {{aggregate_id, aggregate_generation}};
+```
+
+This closure applies to explicitly requested owner roots. Selecting a single
+link still requires the rest of its graph to be explicitly selected, and the
+exact-attachment visibility mode still respects omitted actors/shapes. An
+external extension-joint endpoint is never added by owner selection. Scene and
+owner generations are checked before using a root; a requested owner outside
+the supplied scene is rejected. The resulting full closure is charged against
+the same object/geometry/XML budgets as an all-actor export.
+
+An articulation root can belong to an aggregate that also contains other rigid
+actors. Those outer members were not authorized by the articulation key.
+Strict export therefore reports the aggregate boundary; explicit partial export
+can retain the articulation while omitting that aggregate container. Choosing
+the aggregate owner authorizes its whole component and can remain strict.
+Unpublished aggregate membership is rejected, or yields a wholly omitted partial
+artifact with a publication diagnostic. It is never inferred from nearby actors.
+
 `Result.actor_count` includes links; `articulation_link_count` is that subset.
 `articulation_count`, `articulation_joint_count` and `aggregate_count` expose the
 other native objects, while `joint_count` continues to mean extension joints.
@@ -390,12 +421,20 @@ physx34_repx_validate exported_articulations.repx exported_articulations_expecte
 ```
 
 The exporter test directly matches 162 recorded owner/joint scalar components
-against that independent SDK getter CSV and emits six collections: all, big
+against that independent SDK getter CSV and emits nine collections: all, big
 endian, one scene, a complete selected component, equivalent exact visible
-attachments, and explicit aggregate-boundary partial output. Full loading checks
+attachments, explicit aggregate-boundary partial output, an articulation owner
+with partial outer aggregate, one complete aggregate owner, and a union of two
+aggregate owners. Full loading checks
 28 independently mapped SDK objects and 831 fields; scene scope checks 19/554,
 the selected/visible component 16/503, and the boundary-partial graph 13/416.
 Every variant passes actual SDK loading, official XML writing and loading again.
+The new `_owner_partial` collection checks 13 objects/416 fields,
+`_aggregate_owner` checks 16/503 and `_union_owners` checks 25/780. The union
+contains eight authorized actors/links and omits the unrelated third aggregate.
+Owner tests also cover stale owner/scene generations, cross-scene roots,
+unpublished initial membership, closure budgets and unchanged external-joint
+endpoint boundaries.
 
 The official SDK articulation writer rewrites nested link IDs to current
 process pointers even if their collection IDs were stable. The independent

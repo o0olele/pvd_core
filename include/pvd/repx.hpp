@@ -37,7 +37,9 @@ struct Diagnostic {
 };
 struct Options {
   Selection selection = Selection::all_actors;
-  // Selected/visible callers pass their immutable actor/shape keys here.
+  // Immutable actor/link/shape keys, or explicit Articulation/Aggregate owners.
+  // An explicit owner authorizes its complete published link/member subgraph.
+  // A link/ordinary actor never implicitly adds its owner or sibling members.
   // Selecting an attached shape includes its owning actors and dependencies.
   std::vector<ObjectKey> objects;
   // Exact scene/actor/shape attachments, including all three generations.

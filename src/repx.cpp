@@ -287,7 +287,7 @@ struct Build {
   std::map<std::uint64_t, std::uint64_t> link_owners;
   std::map<std::uint64_t, std::set<std::uint64_t>> owner_links;
   std::map<std::uint64_t, std::string> invalid_links;
-  std::set<std::uint64_t> aggregate_candidates;
+  std::set<std::uint64_t> aggregate_candidates, requested_articulation_owners;
   bool omitted_articulation = false;
   std::map<std::uint64_t, Shape> shapes;
   std::map<std::uint64_t, const InstanceState *> materials;
@@ -361,8 +361,60 @@ struct Build {
         }
       }
   }
+  void select_articulation_owner(const InstanceState &owner) {
+    if (!in_scene(owner))
+      throw ExportError(
+          "requested articulation owner is outside selected scene");
+    requested_articulation_owners.insert(owner.id);
+    const auto found = owner_links.find(owner.id);
+    if (found != owner_links.end())
+      selected.insert(found->second.begin(), found->second.end());
+  }
+  void select_aggregate_owner(const InstanceState &owner) {
+    if (!in_scene(owner))
+      throw ExportError("requested aggregate owner is outside selected scene");
+    aggregate_candidates.insert(owner.id);
+    try {
+      if (owner.class_name != QualifiedName{"physx3", "PxAggregate"})
+        throw ExportError("unsupported aggregate owner class");
+      const auto capacity = joint_detail::integer(owner, "MaxNbActors");
+      if (capacity > 128 || joint_detail::integer(owner, "SelfCollision") > 1)
+        throw ExportError("invalid aggregate capacity/self-collision");
+      if (capacity && !owner.property("Actors") &&
+          !owner.property("Articulations"))
+        throw ExportError("aggregate membership has not been published; owner "
+                          "selection cannot infer members");
+      const auto members =
+          articulation_detail::references(owner, "Actors", true);
+      const auto art_owners =
+          articulation_detail::references(owner, "Articulations", true);
+      // Stage the entire explicit root before authorizing any member. Ordinary
+      // actor/link roots, visible attachments and joint endpoints never use it.
+      for (auto id : members) {
+        const auto &actor = resolve(id);
+        if (!(is(actor, "PxRigidStatic") || is(actor, "PxRigidDynamic")))
+          throw ExportError(
+              "aggregate owner contains an unsupported rigid member");
+        if (!in_scene(actor))
+          throw ExportError("aggregate owner member is outside selected scene");
+      }
+      for (auto id : art_owners) {
+        const auto &art = resolve(id);
+        if (!is(art, "PxArticulation"))
+          throw ExportError(
+              "aggregate owner contains a non-articulation reference");
+        if (!in_scene(art))
+          throw ExportError("aggregate articulation is outside selected scene");
+      }
+      selected.insert(members.begin(), members.end());
+      for (auto id : art_owners)
+        select_articulation_owner(resolve(id));
+    } catch (const ExportError &error) {
+      issue(owner, "owner selection", error.what());
+    }
+  }
   void select_articulations() {
-    std::set<std::uint64_t> candidates;
+    std::set<std::uint64_t> candidates = requested_articulation_owners;
     for (auto id : selected)
       if (link_owners.count(id))
         candidates.insert(link_owners.at(id));
@@ -526,7 +578,11 @@ struct Build {
         if (!o || o->generation != requested.generation)
           throw ExportError("requested RepX object is absent/stale: " +
                             std::to_string(requested.id));
-        if (supported_actor(*o)) {
+        if (is(*o, "PxArticulation")) {
+          select_articulation_owner(*o);
+        } else if (is(*o, "PxAggregate")) {
+          select_aggregate_owner(*o);
+        } else if (supported_actor(*o)) {
           if (!in_scene(*o))
             throw ExportError("requested actor is outside selected scene");
           selected.insert(o->id);
@@ -546,8 +602,8 @@ struct Build {
             issue(*o, "Actor", "selected shape has no supported owning actor");
         } else
           issue(*o, "class",
-                "selection roots must be supported rigid actors or attached "
-                "shapes");
+                "selection roots must be supported rigid actors, articulation "
+                "links/owners, aggregate owners or attached shapes");
       }
     select_articulations();
     // A view selection is never expanded across a joint endpoint.

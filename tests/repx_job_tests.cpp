@@ -159,6 +159,19 @@ void native_checks(const char *capture,const std::filesystem::path &dir) {
   const auto partial=repx::export_session(*doc.session(),boundary.event_count,boundary.options);
   check(!partial.complete&&partial.articulation_count<whole.articulation_count,
         "partial visible selection must omit its incomplete native graph");
+  doc.show_all();
+  const auto inspection_frame=doc.frame();
+  for(const auto &object:inspection_frame->snapshot.instances)
+    if(object.second.class_name.name=="PxArticulation") {
+      check(doc.inspect(object.first),"native owner inspection");
+      const auto selected=make_repx_request(doc,RepxScope::selection,true,{});
+      check(selected.options.objects.size()==1&&selected.options.objects.front().id==object.first,
+            "UI native owner adapter replaced explicit root with an attachment");
+      const auto graph=repx::export_session(*doc.session(),selected.event_count,selected.options);
+      check(graph.articulation_count==1&&graph.articulation_link_count>=2,
+            "explicit native owner selection lost its authorized link graph");
+      break;
+    }
 }
 }
 int main(int argc,char **argv) {

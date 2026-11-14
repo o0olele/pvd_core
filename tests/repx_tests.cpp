@@ -961,6 +961,78 @@ void native_articulation_unit() {
             "native joint inline locator collides with first shape");
   check(xml::export_snapshot(f.metadata, big_endian(f.state)).xml == result.xml,
         "native unit BE values");
+  xml::Options art_owner;
+  art_owner.selection = xml::Selection::objects;
+  art_owner.objects = {{500, 0}};
+  check(xml::export_snapshot(f.metadata, f.state, art_owner).xml == result.xml,
+        "explicit articulation owner did not authorize its complete graph");
+  xml::Options aggregate_owner = art_owner;
+  aggregate_owner.objects = {{600, 0}};
+  check(xml::export_snapshot(f.metadata, f.state, aggregate_owner).xml ==
+            result.xml,
+        "explicit aggregate owner did not authorize its complete membership");
+  auto union_roots = aggregate_owner;
+  union_roots.objects.push_back({500, 0});
+  check(xml::export_snapshot(f.metadata, f.state, union_roots).xml ==
+            result.xml,
+        "overlapping owner roots duplicated objects or changed identity");
+  auto stale_owner = aggregate_owner;
+  ++stale_owner.objects[0].generation;
+  rejects([&] { xml::export_snapshot(f.metadata, f.state, stale_owner); });
+  stale_owner = art_owner;
+  ++stale_owner.objects[0].generation;
+  rejects([&] { xml::export_snapshot(f.metadata, f.state, stale_owner); });
+  auto stale_scene = aggregate_owner;
+  stale_scene.scene = xml::ObjectKey{1, 1};
+  rejects([&] { xml::export_snapshot(f.metadata, f.state, stale_scene); });
+  auto unpublished = f.state;
+  unpublished.instances.at(600).properties.erase("Actors");
+  unpublished.instances.at(600).properties.erase("Articulations");
+  rejects(
+      [&] { xml::export_snapshot(f.metadata, unpublished, aggregate_owner); });
+  auto unpublished_options = aggregate_owner;
+  unpublished_options.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto unavailable =
+      xml::export_snapshot(f.metadata, unpublished, unpublished_options);
+  check(!unavailable.complete && unavailable.actor_count == 0 &&
+            unavailable.aggregate_count == 0 &&
+            std::any_of(
+                unavailable.diagnostics.begin(), unavailable.diagnostics.end(),
+                [](const auto &d) {
+                  return d.message.find("published") != std::string::npos;
+                }),
+        "unpublished aggregate root inferred or partially authorized members");
+  auto external = f.state;
+  auto other = external.instances.at(100);
+  other.id = 200;
+  other.class_name = {"physx3", "PxRigidStatic"};
+  other.properties["Scene"] = refs({1});
+  other.properties["Shapes"] = refs({});
+  external.instances.emplace(200, std::move(other));
+  for (const auto *name : {"PxJoint", "PxFixedJoint"}) {
+    QualifiedName q{"physx3", name};
+    f.metadata.classes.emplace(q, ClassDefinition{q, {}, {}});
+  }
+  f.metadata.classes.at({"physx3", "PxFixedJoint"}).parent =
+      QualifiedName{"physx3", "PxJoint"};
+  InstanceState boundary_joint;
+  boundary_joint.id = 800;
+  boundary_joint.class_name = {"physx3", "PxFixedJoint"};
+  boundary_joint.properties["Actors.actor0"] = refs({100});
+  boundary_joint.properties["Actors.actor1"] = refs({200});
+  external.instances.emplace(800, std::move(boundary_joint));
+  rejects([&] { xml::export_snapshot(f.metadata, external, aggregate_owner); });
+  auto no_endpoint_expansion = aggregate_owner;
+  no_endpoint_expansion.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto external_result =
+      xml::export_snapshot(f.metadata, external, no_endpoint_expansion);
+  check(!external_result.complete && external_result.actor_count == 2 &&
+            external_result.articulation_count == 1 &&
+            external_result.joint_count == 0 &&
+            std::none_of(
+                external_result.objects.begin(), external_result.objects.end(),
+                [](const auto &mapping) { return mapping.source.id == 200; }),
+        "explicit owner selection expanded an unrelated joint endpoint");
   xml::Options selected;
   selected.selection = xml::Selection::objects;
   selected.objects = {{101, 0}};
@@ -1130,6 +1202,97 @@ void real_articulations(const char *capture, const char *oracle_file,
         "boundary partial included unselected aggregate actors");
   emit_fixture(std::string(output) + "_boundary_partial", metadata, snapshot,
                partial, &oracle);
+  xml::Options owner;
+  owner.selection = xml::Selection::objects;
+  owner.scene = scoped.scene;
+  owner.objects = {{main, snapshot.instance(main)->generation}};
+  rejects([&] { xml::export_snapshot(metadata, snapshot, owner); });
+  owner.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto owner_graph = xml::export_snapshot(metadata, snapshot, owner);
+  check(owner_graph.xml == omitted_aggregate.xml,
+        "explicit articulation owner expanded members outside its graph");
+  emit_fixture(std::string(output) + "_owner_partial", metadata, snapshot,
+               owner, &oracle);
+  std::uint64_t owner_aggregate = 0, other_aggregate = 0;
+  for (const auto &entry : snapshot.instances)
+    if (entry.second.class_name.name == "PxAggregate") {
+      const auto owned = unique_refs(entry.second, "Articulations");
+      if (std::find(owned.begin(), owned.end(), main) != owned.end())
+        owner_aggregate = entry.first;
+      else if (!owned.empty())
+        other_aggregate = entry.first;
+    }
+  check(owner_aggregate && other_aggregate,
+        "SDK aggregate owner fixtures missing");
+  auto aggregate_owner = owner;
+  aggregate_owner.unsupported = xml::UnsupportedPolicy::reject;
+  aggregate_owner.objects = {
+      {owner_aggregate, snapshot.instance(owner_aggregate)->generation}};
+  const auto owner_component =
+      xml::export_snapshot(metadata, snapshot, aggregate_owner);
+  check(owner_component.xml == selected.xml,
+        "explicit aggregate owner did not exactly match its member component");
+  emit_fixture(std::string(output) + "_aggregate_owner", metadata, snapshot,
+               aggregate_owner, &oracle);
+  auto union_owners = aggregate_owner;
+  union_owners.scene.reset();
+  union_owners.objects.push_back(
+      {other_aggregate, snapshot.instance(other_aggregate)->generation});
+  const auto owner_union =
+      xml::export_snapshot(metadata, snapshot, union_owners);
+  check(owner_union.complete && owner_union.actor_count == 8 &&
+            owner_union.articulation_count == 2 &&
+            owner_union.aggregate_count == 2 &&
+            owner_union.objects.size() == 25,
+        "owner union widened into an unselected aggregate or duplicated its "
+        "graph");
+  emit_fixture(std::string(output) + "_union_owners", metadata, snapshot,
+               union_owners, &oracle);
+  auto wrong_scope = union_owners;
+  wrong_scope.scene = scoped.scene;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, wrong_scope); });
+  wrong_scope = aggregate_owner;
+  ++wrong_scope.scene->generation;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, wrong_scope); });
+  auto stale_owner = aggregate_owner;
+  ++stale_owner.objects[0].generation;
+  rejects([&] { xml::export_snapshot(metadata, snapshot, stale_owner); });
+  auto owner_budget = aggregate_owner;
+  owner_budget.max_objects = 15;
+  bool budget_diagnostic = false;
+  try {
+    xml::export_snapshot(metadata, snapshot, owner_budget);
+  } catch (const xml::ExportError &e) {
+    budget_diagnostic =
+        std::string(e.what()).find("budget") != std::string::npos;
+  }
+  check(budget_diagnostic,
+        "owner closure budget rejection lost its diagnostic");
+  owner_budget.max_objects = 16;
+  check(xml::export_snapshot(metadata, snapshot, owner_budget).objects.size() ==
+            16,
+        "owner budget omitted nested joints/dependencies");
+  std::size_t initial_prefix = 0;
+  for (const auto &section : session.sections())
+    if (section.name == "articulation_initial")
+      initial_prefix = section.event_count;
+  check(initial_prefix, "SDK initial publication marker missing");
+  const auto initial = session.snapshot_at_event(initial_prefix);
+  check(!initial.instance(owner_aggregate)->property("Actors") &&
+            !initial.instance(owner_aggregate)->property("Articulations"),
+        "SDK initial unpublished aggregate fixture changed");
+  rejects([&] { xml::export_snapshot(metadata, initial, aggregate_owner); });
+  auto initial_options = aggregate_owner;
+  initial_options.unsupported = xml::UnsupportedPolicy::allow_partial;
+  const auto pending = xml::export_snapshot(metadata, initial, initial_options);
+  check(
+      !pending.complete && pending.actor_count == 0 &&
+          pending.aggregate_count == 0 &&
+          std::any_of(pending.diagnostics.begin(), pending.diagnostics.end(),
+                      [](const auto &d) {
+                        return d.message.find("published") != std::string::npos;
+                      }),
+      "unpublished real aggregate owner claimed a complete/guessed collection");
   auto one = partial;
   one.objects.resize(1);
   const auto omitted_graph = xml::export_snapshot(metadata, snapshot, one);
