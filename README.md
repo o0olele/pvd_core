@@ -10,6 +10,8 @@
 
 0.4 版新增 Windows 原生 `pvd_viewer`：Direct3D 11 场景视口、帧回放、对象选择和属性检查。前端依赖保持在查看器内部。详见 [构建、操作和验证](docs/viewer.md)。
 
+0.5 版接通 ImGui 实时监听、可选录制、最新帧跟随和历史帧检查。事件按安全前缀增量导入；停止与断连后可重新打开录制。完整应用的后续功能及逐章验收见 [实施清单](docs/application-roadmap.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

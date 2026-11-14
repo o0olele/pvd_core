@@ -17,7 +17,7 @@ struct CaptureOptions {
     SessionOptions session_options;
     std::size_t read_buffer_bytes = 64u * 1024u;
     std::chrono::milliseconds poll_interval{50};
-    // Empty disables recording. A nonempty path is created exclusively, never overwritten.
+    // UTF-8 path. Empty disables recording; nonempty is created exclusively, never overwritten.
     std::string recording_path;
     // Bounds the raw tail since the last complete group with no pending property transaction.
     std::size_t max_pending_record_bytes = 128u * 1024u * 1024u;
@@ -41,6 +41,22 @@ struct CaptureStatus {
     }
 };
 
+// Coherent cursor read under the same transport lock as status publication.
+// events covers [begin_event_count,end_event_count), bounded above by the
+// recoverable transaction prefix. A batch can cut a property transaction; the
+// consumer keeps it pending until subsequent batches close it. No old events
+// before the cursor are copied. The first event may exceed the byte hint so a
+// single valid event cannot stall progress (bounded by decoder group/blob
+// limits).
+struct CapturePoll {
+    std::optional<StreamHeader> header;
+    CaptureStatus status;
+    std::size_t begin_event_count = 0, end_event_count = 0;
+    std::size_t copied_payload_bytes = 0;
+    bool oversized_event = false;
+    std::vector<Event> events;
+    bool caught_up() const noexcept { return end_event_count == status.recoverable_event_count; }
+};
 // One listener, one accepted connection, one Session. Construct a new object to
 // receive another connection. Queries and cancel() may run concurrently with the
 // worker; all query results are independent copies (payload bytes are immutable).
@@ -64,6 +80,8 @@ public:
     PVD_TRANSPORT_API void wait();
 
     PVD_TRANSPORT_API CaptureStatus status() const;
+    PVD_TRANSPORT_API CapturePoll poll_from(std::size_t accepted_event_count,
+        std::size_t max_events = 16384, std::size_t max_payload_bytes = 8u * 1024u * 1024u) const;
     PVD_TRANSPORT_API std::optional<StreamHeader> header() const;
     PVD_TRANSPORT_API Metadata metadata() const;
     PVD_TRANSPORT_API std::vector<Event> events() const;

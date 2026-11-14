@@ -25,6 +25,8 @@
 #include <exception>
 #include <filesystem>
 #include <mutex>
+#include <limits>
+#include <type_traits>
 #include <system_error>
 #include <thread>
 
@@ -102,7 +104,7 @@ struct Recording {
     void create(const std::string& path) {
         if (path.empty()) return;
 #ifdef _WIN32
-        const auto error = _wsopen_s(&fd, std::filesystem::path(path).c_str(),
+        const auto error = _wsopen_s(&fd, std::filesystem::u8path(path).c_str(),
             _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _SH_DENYNO, _S_IREAD | _S_IWRITE);
         if (error) { fd = -1; errno = error; }
 #else
@@ -148,6 +150,35 @@ struct Recording {
     }
 };
 
+std::size_t event_payload_bytes(const Event &event) {
+    std::size_t size = sizeof(Event);
+    auto add = [&](std::size_t amount) {
+        if (amount > std::numeric_limits<std::size_t>::max() - size)
+            throw std::overflow_error("capture poll payload size overflow");
+        size += amount;
+    };
+    std::visit(
+        [&](const auto &v) {
+            using T = std::decay_t<decltype(v)>;
+            if constexpr (std::is_same_v<T, SetPropertyValue> || std::is_same_v<T, AppendPropertyValueData> ||
+                          std::is_same_v<T, SetPropertyMessage> || std::is_same_v<T, SendPropertyMessageFromGroup>)
+                add(v.data.size());
+            else if constexpr (std::is_same_v<T, StringHandleEvent>)
+                add(v.string.size());
+            else if constexpr (std::is_same_v<T, SetCamera> || std::is_same_v<T, AddProfileZone> ||
+                               std::is_same_v<T, AddProfileZoneEvent> || std::is_same_v<T, StreamEndEvent>)
+                add(v.name.size());
+            else if constexpr (std::is_same_v<T, ErrorMessage>) {
+                add(v.message.size());
+                add(v.file.size());
+            } else if constexpr (std::is_same_v<T, CreateProperty>)
+                add(v.values.size() * sizeof(NameHandleValue));
+            else if constexpr (std::is_same_v<T, CreatePropertyMessage>)
+                add(v.message_entries.size() * sizeof(StreamPropMessageArg));
+        },
+        event.payload);
+    return size;
+}
 struct Truncated : std::runtime_error { using std::runtime_error::runtime_error; };
 void error_text(std::string& target, const char* text) noexcept {
     try {
@@ -427,6 +458,43 @@ void TcpCapture::wait() {
 CaptureStatus TcpCapture::status() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->progress;
+}
+CapturePoll TcpCapture::poll_from(std::size_t cursor, std::size_t max_events, std::size_t max_payload_bytes) const {
+    if (!max_events || !max_payload_bytes)
+        throw std::invalid_argument("capture poll limits must be nonzero");
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    CapturePoll out;
+    out.status = impl_->progress;
+    out.begin_event_count = out.end_event_count = cursor;
+    if (cursor > out.status.recoverable_event_count)
+        throw std::out_of_range("capture poll cursor exceeds recoverable event prefix");
+    if (!impl_->session) {
+        if (cursor)
+            throw std::out_of_range("capture has no event source");
+        return out;
+    }
+    out.header = impl_->session->header();
+    const auto &events = impl_->session->events();
+    if (out.status.recoverable_event_count > events.size())
+        throw std::logic_error("recoverable event prefix exceeds accepted source");
+    const auto available = out.status.recoverable_event_count - cursor;
+    const auto count = std::min(max_events, available);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto cost = event_payload_bytes(events[cursor + i]);
+        if (i && cost > max_payload_bytes - std::min(max_payload_bytes, out.copied_payload_bytes))
+            break;
+        if (!i && cost > max_payload_bytes)
+            out.oversized_event = true;
+        if (cost > std::numeric_limits<std::size_t>::max() - out.copied_payload_bytes)
+            throw std::overflow_error("capture poll payload size overflow");
+        out.copied_payload_bytes += cost;
+        ++out.end_event_count;
+        if (out.copied_payload_bytes >= max_payload_bytes)
+            break;
+    }
+    out.events.assign(events.begin() + static_cast<std::ptrdiff_t>(cursor),
+                      events.begin() + static_cast<std::ptrdiff_t>(out.end_event_count));
+    return out;
 }
 std::optional<StreamHeader> TcpCapture::header() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);

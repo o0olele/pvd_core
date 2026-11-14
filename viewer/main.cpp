@@ -1,6 +1,9 @@
 #include "model.hpp"
 #include "panels.hpp"
 #include "renderer.hpp"
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+#include "live_session.hpp"
+#endif
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -13,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cwchar>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -26,7 +30,10 @@ using namespace pvd::viewer;
 namespace {
 struct Options {
     std::filesystem::path capture, screenshot, report;
+    std::filesystem::path recording, ready;
     bool smoke = false, warp = false, hidden = false;
+    bool live_smoke = false;
+    int listen_port = -1;
 };
 std::string utf8(const std::wstring& s) {
     if (s.empty()) return {};
@@ -68,11 +75,25 @@ Options arguments() {
             else if (a == L"--warp") result.warp = true;
             else if (a == L"--hidden") result.hidden = true;
             else if (a == L"--capture") result.capture = value();
+            else if (a == L"--record") result.recording = value();
+            else if (a == L"--ready") result.ready = value();
+            else if (a == L"--live-smoke") result.live_smoke = true;
+            else if (a == L"--listen") {
+                const auto number=value().wstring(); std::size_t used=0;
+                const auto port=std::stoul(number,&used);
+                if (used!=number.size() || port>65535) throw std::runtime_error("Listen port must be in [0,65535]");
+                result.listen_port=static_cast<int>(port);
+            }
             else if (!a.empty() && a[0] != L'-' && result.capture.empty()) result.capture = a;
             else throw std::runtime_error("Unknown command-line option: " + utf8(a));
         }
     } catch (...) { LocalFree(args); throw; }
     LocalFree(args);
+    if (result.listen_port>=0 && !result.capture.empty()) throw std::runtime_error("Choose a file or a live listener as the initial source");
+    if (result.live_smoke && (result.listen_port<0 || result.recording.empty())) throw std::runtime_error("Live smoke requires --listen and --record");
+#ifndef PVD_VIEWER_HAS_TRANSPORT
+    if (result.listen_port>=0 || result.live_smoke) throw std::runtime_error("This viewer was built without the transport module");
+#endif
     return result;
 }
 
@@ -80,6 +101,9 @@ class App {
 public:
     explicit App(Options options) : options_(std::move(options)) {}
     ~App() {
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        live_.stop();
+#endif
         if (pending_.valid()) pending_.wait();
         renderer_.reset();
         if (dx11_backend_) ImGui_ImplDX11_Shutdown();
@@ -92,6 +116,22 @@ public:
     }
     int run() {
         initialize();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        if (options_.listen_port>=0) {
+            capture_port_=options_.listen_port;
+            record_capture_=!options_.recording.empty();
+            if (record_capture_) copy_path(options_.recording);
+            start_capture();
+            if (!error_.empty()) throw std::runtime_error(error_);
+            if (!options_.ready.empty()) {
+                auto temporary=options_.ready;temporary+=L".tmp";
+                { std::ofstream ready(temporary);
+                  ready << "{\"port\":" << live_.status().port << "}\n";
+                  if (!ready) throw std::runtime_error("Cannot write live listener ready file"); }
+                std::filesystem::rename(temporary,options_.ready);
+            }
+        }
+#endif
         if (!options_.capture.empty()) {
             if (options_.smoke) { document_.open_file(utf8(options_.capture.wstring())); loaded(); }
             else open(options_.capture);
@@ -106,6 +146,9 @@ public:
             }
             if (quit_) break;
             poll_load();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+            poll_live();
+#endif
             if (resize_width_ && resize_height_) {
                 context_->OMSetRenderTargets(0, nullptr, nullptr); backbuffer_.Reset();
                 check(swapchain_->ResizeBuffers(0, resize_width_, resize_height_, DXGI_FORMAT_UNKNOWN, 0), "Resize window");
@@ -114,7 +157,7 @@ public:
             if (IsIconic(window_)) { std::this_thread::sleep_for(std::chrono::milliseconds(16)); continue; }
             auto now = std::chrono::steady_clock::now();
             document_.advance(std::min(0.1, std::chrono::duration<double>(now - previous).count())); previous = now;
-            if (options_.smoke && std::chrono::duration<double>(now - started).count() > 25)
+            if ((options_.smoke || options_.live_smoke) && std::chrono::duration<double>(now - started).count() > 30)
                 throw std::runtime_error("Viewer smoke test timed out");
             ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
             draw();
@@ -126,11 +169,15 @@ public:
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
             ++host_frames_;
             if (options_.smoke) smoke_step();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+            else if (options_.live_smoke) live_smoke_step();
+#endif
             else if (!options_.screenshot.empty() && document_.loaded() && host_frames_ > 8) {
                 screenshot(); options_.screenshot.clear();
             }
-            const HRESULT present = swapchain_->Present(options_.smoke ? 0 : 1, 0);
+            const HRESULT present = swapchain_->Present((options_.smoke || options_.live_smoke) ? 0 : 1, 0);
             if (FAILED(present)) check(present, "Present frame");
+            if (options_.live_smoke || present==DXGI_STATUS_OCCLUDED) std::this_thread::sleep_for(std::chrono::milliseconds(8));
         }
         return 0;
     }
@@ -158,6 +205,16 @@ private:
     std::size_t selection_pixels_ = 0;
     std::size_t motion_pixels_ = 0;
     std::optional<std::uint64_t> displayed_scene_;
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+    LiveSession live_;
+    std::array<char,64> capture_address_{'1','2','7','.','0','.','0','.','1'};
+    std::array<char,4096> capture_path_{};
+    int capture_port_=5425;
+    bool record_capture_=true, live_document_seen_=false, capture_setup_requested_=false;
+    std::chrono::steady_clock::time_point next_live_poll_{};
+    std::size_t online_render_frames_=0, live_display_changes_=0;
+    std::optional<std::size_t> last_live_event_count_;
+#endif
 
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         App* self = reinterpret_cast<App*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -277,6 +334,9 @@ private:
         if (GetOpenFileNameW(&dialog)) { buffer.resize(wcslen(buffer.c_str())); open(buffer); }
     }
     void open(const std::filesystem::path& path) {
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        if (live_.active()) { error_="Stop the live capture and wait for its remaining events before opening a file."; return; }
+#endif
         if (pending_.valid()) return;
         error_.clear(); loading_ = utf8(path.filename().wstring());
         document_.set_playing(false);
@@ -295,6 +355,137 @@ private:
         std::wstring title = L"PVD Studio  |  " + std::filesystem::u8path(document_.source_label()).filename().wstring();
         SetWindowTextW(window_, title.c_str());
     }
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+    void copy_path(const std::filesystem::path& path) {
+        const auto text=utf8(path.wstring());
+        if (text.size()>=capture_path_.size()) throw std::runtime_error("Recording path is too long for the capture field");
+        capture_path_.fill('\0');
+        std::copy(text.begin(),text.end(),capture_path_.begin());
+    }
+    void default_recording_path() {
+        SYSTEMTIME time{}; GetLocalTime(&time);
+        wchar_t name[128]{};
+        swprintf_s(name,L"capture-%04u%02u%02u-%02u%02u%02u-%03u.pxd2",time.wYear,time.wMonth,time.wDay,time.wHour,time.wMinute,time.wSecond,time.wMilliseconds);
+        copy_path(std::filesystem::current_path()/L"captures"/name);
+    }
+    void choose_recording() {
+        std::wstring buffer(32768,L'\0');
+        if (capture_path_[0]) {
+            const auto path=std::filesystem::u8path(capture_path_.data()).wstring();
+            std::copy_n(path.data(),std::min(path.size(),buffer.size()-1),buffer.data());
+        }
+        OPENFILENAMEW dialog{sizeof(OPENFILENAMEW)};
+        dialog.hwndOwner=window_; dialog.lpstrFile=buffer.data(); dialog.nMaxFile=static_cast<DWORD>(buffer.size());
+        dialog.lpstrFilter=L"PhysX raw capture (*.pxd2)\0*.pxd2\0All files\0*.*\0";
+        dialog.lpstrDefExt=L"pxd2"; dialog.lpstrTitle=L"Choose a new recording file";
+        dialog.Flags=OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
+        if (GetSaveFileNameW(&dialog)) { buffer.resize(wcslen(buffer.c_str())); copy_path(buffer); }
+    }
+    void start_capture() {
+        try {
+            if (pending_.valid()) throw std::runtime_error("Wait for the file load to finish before listening");
+            pvd::CaptureOptions options;
+            options.address=capture_address_.data();
+            if (capture_port_<0 || capture_port_>65535) throw std::runtime_error("Port must be in [0,65535]; 0 chooses a free port");
+            options.port=static_cast<std::uint16_t>(capture_port_);
+            if (record_capture_) {
+                if (!capture_path_[0]) default_recording_path();
+                const auto path=std::filesystem::u8path(capture_path_.data());
+                if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
+                options.recording_path=capture_path_.data();
+            }
+            live_.start(std::move(options)); live_document_seen_=false;
+            last_live_event_count_.reset(); online_render_frames_=live_display_changes_=0;
+            next_live_poll_={}; error_.clear();
+        } catch (const std::exception& e) { error_=e.what(); }
+    }
+    void poll_live() {
+        const auto now=std::chrono::steady_clock::now();
+        if (now<next_live_poll_) return;
+        next_live_poll_=now+std::chrono::milliseconds(100);
+        try {
+            const auto* previous=document_.session();
+            const bool changed=live_.poll(document_);
+            if (!live_document_seen_ && document_.session()!=previous && live_.status().header_complete) {
+                loaded(); live_document_seen_=true;
+            }
+            if (changed) ++live_display_changes_;
+            if (!live_.error().empty()) error_=live_.error();
+        } catch (const std::exception& e) { live_.stop(); error_=e.what(); }
+    }
+    void capture_setup() {
+        if (capture_setup_requested_) {
+            if (!capture_path_[0]) default_recording_path();
+            ImGui::OpenPopup("Live capture"); capture_setup_requested_=false;
+        }
+        ImGui::SetNextWindowSize({580,0},ImGuiCond_Appearing);
+        if (!ImGui::BeginPopupModal("Live capture",nullptr,ImGuiWindowFlags_AlwaysAutoResize)) return;
+        ImGui::TextUnformatted("Receive a PhysX PVD connection");
+        ImGui::TextWrapped("Start listening, then connect the PhysX application to the address and port below.");
+        ImGui::Spacing(); ImGui::BeginDisabled(live_.active());
+        ImGui::SetNextItemWidth(290); ImGui::InputText("Bind address",capture_address_.data(),capture_address_.size());
+        ImGui::SetNextItemWidth(140); ImGui::InputInt("Port",&capture_port_);
+        ImGui::TextDisabled("5425 is the PVD default; 0 chooses an available port.");
+        ImGui::Checkbox("Record raw capture",&record_capture_);
+        ImGui::BeginDisabled(!record_capture_);
+        ImGui::SetNextItemWidth(425); ImGui::InputText("##recording",capture_path_.data(),capture_path_.size());
+        ImGui::SameLine(); if (ImGui::Button("Browse...")) choose_recording();
+        ImGui::TextDisabled("Choose a new file. Existing recordings are kept.");
+        ImGui::EndDisabled();
+        if (ImGui::Button("Start listening",{150,0})) {
+            start_capture(); if (error_.empty()) ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled(); ImGui::SameLine();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        if (!error_.empty()) ImGui::TextWrapped("%s",error_.c_str());
+        ImGui::EndPopup();
+    }
+    void capture_bar() {
+        const auto& status=live_.status();
+        if (status.state==pvd::CaptureState::idle) return;
+        const bool failed=status.state==pvd::CaptureState::failed || status.state==pvd::CaptureState::truncated;
+        ImGui::TextColored(failed?ImVec4{1,.57f,.42f,1}:ImVec4{.28f,.86f,.75f,1},"%s",pvd::capture_state_name(status.state));
+        ImGui::SameLine(); ImGui::TextDisabled("%s:%u",status.address.c_str(),unsigned(status.port));
+        ImGui::SameLine(); ImGui::Text("%.2f MiB  |  %zu frames",double(status.wire_bytes)/(1024*1024),status.frame_count);
+        ImGui::SameLine(); ImGui::BeginDisabled(!live_.active());
+        if (ImGui::SmallButton("Stop")) live_.stop(); ImGui::EndDisabled(); ImGui::SameLine();
+        bool follow=live_.follow_live(); if (ImGui::Checkbox("Follow live",&follow)) live_.set_follow_live(follow);
+        if (status.recoverable_event_count>live_.accepted_event_count()) {
+            ImGui::SameLine(); ImGui::TextDisabled("%zu events pending",status.recoverable_event_count-live_.accepted_event_count());
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Received %llu bytes; recorded %llu; recoverable %llu; discarded tail %llu",static_cast<unsigned long long>(status.wire_bytes),
+            static_cast<unsigned long long>(status.recorded_bytes),static_cast<unsigned long long>(status.recoverable_bytes),static_cast<unsigned long long>(status.discarded_tail_bytes));
+        if (!status.errors.empty()) ImGui::TextWrapped("%s",status.errors.front().c_str());
+        ImGui::Separator();
+    }
+    void live_smoke_step() {
+        const auto& status=live_.status();
+        if (document_.loaded() && !document_.frame()->draws.empty() && status.state==pvd::CaptureState::receiving) {
+            ++online_render_frames_;
+            last_live_event_count_=document_.frame()->snapshot.event_count;
+        }
+        if (!status.terminal() || live_.active() || !live_.caught_up()) return;
+        if (status.state!=pvd::CaptureState::completed || !status.errors.empty() || !live_.error().empty())
+            throw std::runtime_error("Live GPU capture did not finish cleanly");
+        if (online_render_frames_<3 || live_display_changes_<2 || !renderer_->stats().triangles)
+            throw std::runtime_error("The GPU did not render enough changing frames while receiving");
+        if (status.wire_bytes!=status.recorded_bytes || status.discarded_tail_bytes || status.event_count!=live_.accepted_event_count())
+            throw std::runtime_error("Live recording did not preserve the complete event prefix");
+        Document replay; replay.open_file(utf8(options_.recording.wstring()));
+        if (!replay.session() || replay.session()->event_count()!=document_.session()->event_count() || replay.scenes().size()!=document_.scenes().size())
+            throw std::runtime_error("Live recording cannot be reopened with identical indices");
+        if (!options_.screenshot.empty()) screenshot();
+        if (!options_.report.empty()) {
+            std::ofstream report(options_.report);
+            report << "{\n  \"passed\":true,\n  \"state\":\"completed\",\n  \"online_render_frames\":" << online_render_frames_
+                << ",\n  \"live_display_changes\":" << live_display_changes_ << ",\n  \"wire_bytes\":" << status.wire_bytes
+                << ",\n  \"recorded_bytes\":" << status.recorded_bytes << ",\n  \"events\":" << status.event_count
+                << ",\n  \"frames\":" << status.frame_count << ",\n  \"reopened\":true\n}\n";
+            if (!report) throw std::runtime_error("Cannot write live GPU smoke report");
+        }
+        quit_=true;
+    }
+#endif
     void shortcuts() {
         const auto& io = ImGui::GetIO();
         if (io.WantTextInput) return;
@@ -314,15 +505,26 @@ private:
         ImGui::Begin("PVD Studio##root", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
         ImGui::TextColored({0.28f,0.86f,0.75f,1}, "PVD"); ImGui::SameLine(); ImGui::TextUnformatted("STUDIO");
-        ImGui::SameLine(170); ImGui::BeginDisabled(pending_.valid());
+        ImGui::SameLine(170); ImGui::BeginDisabled(pending_.valid()
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+            || live_.active()
+#endif
+        );
         if (ImGui::Button("Open capture  Ctrl+O")) choose_file(); ImGui::EndDisabled();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        ImGui::SameLine(); if (ImGui::Button("Live capture")) capture_setup_requested_=true;
+        capture_setup();
+#endif
         ImGui::SameLine();
         if (!loading_.empty()) ImGui::TextDisabled("Opening %s ...", loading_.c_str());
         else if (document_.loaded()) ImGui::TextDisabled("%s", std::filesystem::u8path(document_.source_label()).filename().u8string().c_str());
         else ImGui::TextDisabled("PhysX 3.4  /  capture viewer");
         ImGui::Separator();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+        capture_bar();
+#endif
         if (!error_.empty()) {
-            ImGui::TextColored({1,0.57f,0.42f,1}, "Open failed"); ImGui::SameLine();
+            ImGui::TextColored({1,0.57f,0.42f,1}, "Error"); ImGui::SameLine();
             ImGui::TextWrapped("%s", error_.c_str());
             if (ImGui::SmallButton("Dismiss")) error_.clear();
         }

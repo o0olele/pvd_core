@@ -2,6 +2,8 @@
 
 0.2 版将实时功能拆成两层：`pvd::core` 提供可追加的 Session 和通信解码，`pvd::transport` 提供独立 TCP 接收器、后台任务与原始录制。两层都没有 UI 或 PhysX 运行依赖；系统 socket 和线程依赖只进入 transport 目标。
 
+0.5 版提供 ImGui 查看器的实时入口，设置、跟随和录制操作见 [查看器说明](viewer.md#实时采集)。`TcpCapture::poll_from(cursor,max_events,max_payload_bytes)` 在同一个锁内返回 header、status 和安全 recoverable 前缀的新事件，支持有界增量消费者；不会复制 cursor 之前的历史。单个事件超过字节软预算时仍返回它，并设置 `oversized_event`，以免消费者停滞；绝对大小由解码限制约束。
+
 ## 直接采集 PhysX 3.4
 
 ```powershell

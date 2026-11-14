@@ -319,6 +319,12 @@ struct Document::Impl {
   SamplePoint sample = SamplePoint::native_frame;
   std::vector<TimelineEntry> timeline;
   std::size_t index = 0;
+  bool live_ingestion = false, follow = false;
+  std::size_t indexed_lifetimes = 0, indexed_frames = 0, indexed_sections = 0;
+  std::map<std::uint64_t, std::size_t> scene_offsets;
+  std::map<std::uint64_t, std::vector<TimelineEntry>> native_timelines,
+      after_timelines;
+  std::set<std::uint64_t> named_scenes;
   Playback playback;
   double remainder = 0;
   std::shared_ptr<FrameState> frame = std::make_shared<FrameState>();
@@ -398,6 +404,69 @@ struct Document::Impl {
     }
     return data;
   }
+  SceneInfo &ensure_scene(std::uint64_t id, std::uint64_t generation = 0) {
+    auto found = scene_offsets.find(id);
+    if (found != scene_offsets.end())
+      return scenes.at(found->second);
+    const auto offset = scenes.size();
+    scenes.push_back({{id, generation}, "Scene " + std::to_string(id), 0, 0});
+    scene_offsets.emplace(id, offset);
+    if (!scene)
+      scene = id;
+    return scenes.back();
+  }
+  void index_new() {
+    const auto &lives = session->lifetimes();
+    for (; indexed_lifetimes < lives.size(); ++indexed_lifetimes) {
+      const auto &life = lives[indexed_lifetimes];
+      if (life.class_name == QualifiedName{"physx3", "PxScene"} ||
+          session->metadata().is_a(life.class_name, {"physx3", "PxScene"}))
+        ensure_scene(life.id, life.generation);
+    }
+    const auto &frames = session->frames();
+    for (; indexed_frames < frames.size(); ++indexed_frames) {
+      const auto &f = frames[indexed_frames];
+      auto &info = ensure_scene(f.scene_id);
+      ++info.native_frames;
+      auto &entries = native_timelines[f.scene_id];
+      TimelineEntry entry{f.scene_id,
+                          f.stream_id,
+                          entries.size(),
+                          f.begin_event_count,
+                          f.event_count,
+                          SamplePoint::native_frame,
+                          "Native frame " + std::to_string(f.index) +
+                              " (EndSection)"};
+      entries.push_back(entry);
+      if (scene == f.scene_id && sample == SamplePoint::native_frame)
+        timeline.push_back(entry);
+      if (!named_scenes.count(f.scene_id)) {
+        auto snapshot = session->snapshot_at_event(f.event_count);
+        if (auto object = snapshot.instance(f.scene_id))
+          info.name = name(*object);
+        named_scenes.insert(f.scene_id);
+      }
+    }
+    const auto &sections = session->sections();
+    for (; indexed_sections < sections.size(); ++indexed_sections) {
+      const auto &s = sections[indexed_sections];
+      if (s.name != "validation_after_fetch")
+        continue;
+      ++ensure_scene(s.section_id).after_fetch_frames;
+      auto &entries = after_timelines[s.section_id];
+      TimelineEntry entry{s.section_id,
+                          s.stream_id,
+                          entries.size(),
+                          s.begin_event_count,
+                          s.event_count,
+                          SamplePoint::after_fetch,
+                          "After fetch " + std::to_string(entries.size()) +
+                              " (explicit validation marker)"};
+      entries.push_back(entry);
+      if (scene == s.section_id && sample == SamplePoint::after_fetch)
+        timeline.push_back(entry);
+    }
+  }
   void make_timeline() {
     timeline.clear();
     index = 0;
@@ -405,22 +474,15 @@ struct Document::Impl {
     playback.playing = false;
     if (!session || !scene)
       return;
-    if (sample == SamplePoint::native_frame) {
-      for (const auto &f : session->frames())
-        if (f.scene_id == *scene)
-          timeline.push_back(
-              {f.scene_id, f.stream_id, timeline.size(), f.begin_event_count,
-               f.event_count, sample,
-               "Native frame " + std::to_string(f.index) + " (EndSection)"});
-    } else {
-      for (const auto &s : session->sections())
-        if (s.section_id == *scene && s.name == "validation_after_fetch")
-          timeline.push_back({s.section_id, s.stream_id, timeline.size(),
-                              s.begin_event_count, s.event_count, sample,
-                              "After fetch " + std::to_string(timeline.size()) +
-                                  " (explicit validation marker)"});
-    }
+    auto &all = sample == SamplePoint::native_frame ? native_timelines
+                                                    : after_timelines;
+    auto found = all.find(*scene);
+    if (found != all.end())
+      timeline = found->second;
+    if (live_ingestion && follow && !timeline.empty())
+      index = timeline.size() - 1;
   }
+
   void update_selection() {
     if (selected) {
       auto found = std::find_if(
@@ -440,6 +502,11 @@ struct Document::Impl {
       d.selected = selected && d.key == *selected;
   }
   void build_frame() {
+    // A bounded import can end inside a property transaction. Never substitute
+    // that uncommitted latest/EOF state for the previously published viewport.
+    if (live_ingestion && session && timeline.empty() &&
+        !session->at_transaction_boundary())
+      return;
     auto next = std::make_shared<FrameState>();
     if (!session) {
       next->label = "No recording";
@@ -453,7 +520,9 @@ struct Document::Impl {
       next->label = timeline[index].label;
       next->snapshot = session->snapshot_at_event(timeline[index].event_count);
     } else {
-      next->label = sample == SamplePoint::after_fetch
+      next->label = live_ingestion ? "Live capture: waiting for a completed "
+                                     "frame (safe current state)"
+                    : sample == SamplePoint::after_fetch
                         ? "No explicit after-fetch markers; showing capture EOF"
                         : "No completed frames; showing capture EOF";
       next->snapshot = session->latest();
@@ -514,42 +583,9 @@ struct Document::Impl {
     update_selection();
   }
   void initialize() {
-    std::map<std::uint64_t, SceneInfo> map;
-    for (const auto &life : session->lifetimes())
-      if (life.class_name == QualifiedName{"physx3", "PxScene"} ||
-          session->metadata().is_a(life.class_name, {"physx3", "PxScene"}))
-        map.emplace(life.id, SceneInfo{{life.id, life.generation},
-                                       "Scene " + std::to_string(life.id),
-                                       0,
-                                       0});
-    for (const auto &f : session->frames())
-      ++map.try_emplace(f.scene_id,
-                        SceneInfo{{f.scene_id, 0},
-                                  "Scene " + std::to_string(f.scene_id),
-                                  0,
-                                  0})
-            .first->second.native_frames;
-    for (const auto &s : session->sections())
-      if (s.name == "validation_after_fetch")
-        ++map.try_emplace(s.section_id,
-                          SceneInfo{{s.section_id, 0},
-                                    "Scene " + std::to_string(s.section_id),
-                                    0,
-                                    0})
-              .first->second.after_fetch_frames;
-    for (auto &[id, s] : map) {
-      for (const auto &f : session->frames())
-        if (f.scene_id == id) {
-          auto snapshot = session->snapshot_at_event(f.event_count);
-          if (auto object = snapshot.instance(id))
-            s.name = name(*object);
-          break;
-        }
-      scenes.push_back(std::move(s));
-    }
-    if (!scenes.empty())
-      scene = scenes.front().key.id;
-    make_timeline();
+    index_new();
+    if (live_ingestion && follow && !timeline.empty())
+      index = timeline.size() - 1;
     build_frame();
   }
 };
@@ -587,6 +623,67 @@ void Document::adopt(std::unique_ptr<Session> s, std::string label) {
   next->initialize();
   impl_.swap(next);
 }
+void Document::begin_live(StreamHeader header, std::string label,
+                          SessionOptions options) {
+  auto next = std::make_unique<Impl>(impl_->options);
+  next->session = std::make_unique<Session>(header, options);
+  next->source = std::move(label);
+  next->live_ingestion = true;
+  next->follow = true;
+  next->initialize();
+  impl_.swap(next);
+}
+bool Document::append_live(std::vector<Event> events) {
+  if (!impl_->live_ingestion || !impl_->session)
+    throw std::logic_error("document has no live input session");
+  if (events.empty())
+    return false;
+  auto previous = impl_->frame;
+  impl_->session->append(std::move(events));
+  impl_->index_new();
+  if (!impl_->session->at_transaction_boundary())
+    return false;
+  if (impl_->follow) {
+    if (!impl_->timeline.empty()) {
+      impl_->index = impl_->timeline.size() - 1;
+      const auto &marker = impl_->timeline.back();
+      if (!previous->marker ||
+          previous->marker->event_count != marker.event_count ||
+          previous->marker->scene_id != marker.scene_id ||
+          previous->marker->sample_point != marker.sample_point)
+        impl_->build_frame();
+    } else if (previous->snapshot.event_count != impl_->session->event_count())
+      impl_->build_frame();
+  }
+  // Paused historical FrameState is immutable and is not rebuilt on polling.
+  // timeline()/scenes() expose current counts independently of that
+  // publication.
+  return impl_->frame != previous;
+}
+void Document::finish_live() {
+  if (!impl_->live_ingestion)
+    return;
+  impl_->session->finish();
+  impl_->live_ingestion = false;
+  impl_->follow = false;
+}
+bool Document::live() const noexcept { return impl_->live_ingestion; }
+std::size_t Document::live_event_count() const noexcept {
+  return impl_->session ? impl_->session->event_count() : 0;
+}
+bool Document::follow_live() const noexcept { return impl_->follow; }
+void Document::set_follow_live(bool follow) {
+  impl_->follow = follow && impl_->live_ingestion;
+  if (impl_->follow) {
+    impl_->playback.playing = false;
+    impl_->remainder = 0;
+    if (impl_->session->at_transaction_boundary()) {
+      if (!impl_->timeline.empty())
+        impl_->index = impl_->timeline.size() - 1;
+      impl_->build_frame();
+    }
+  }
+}
 bool Document::loaded() const noexcept { return bool(impl_->session); }
 const Session *Document::session() const noexcept {
   return impl_->session.get();
@@ -611,11 +708,7 @@ bool Document::set_scene(std::uint64_t id) {
     return true;
   impl_->scene = id;
   if (impl_->sample == SamplePoint::after_fetch &&
-      std::none_of(impl_->session->sections().begin(),
-                   impl_->session->sections().end(), [&](const auto &s) {
-                     return s.section_id == id &&
-                            s.name == "validation_after_fetch";
-                   }))
+      impl_->after_timelines[id].empty())
     impl_->sample = SamplePoint::native_frame;
   impl_->selected.reset();
   impl_->inspected.reset();
@@ -628,11 +721,7 @@ bool Document::set_sample_point(SamplePoint s) {
   if (!loaded())
     return false;
   if (s == SamplePoint::after_fetch &&
-      std::none_of(impl_->session->sections().begin(),
-                   impl_->session->sections().end(), [&](const auto &x) {
-                     return x.name == "validation_after_fetch" &&
-                            impl_->scene == x.section_id;
-                   }))
+      (!impl_->scene || impl_->after_timelines[*impl_->scene].empty()))
     return false;
   impl_->sample = s;
   impl_->make_timeline();
@@ -647,6 +736,7 @@ bool Document::set_frame(std::size_t i) {
   if (i >= impl_->timeline.size())
     return false;
   impl_->playback.playing = false;
+  impl_->follow = false;
   impl_->remainder = 0;
   if (i == impl_->index)
     return true;
@@ -676,12 +766,16 @@ void Document::set_playback(Playback p) {
     throw std::invalid_argument(
         "playback FPS must be nonzero, finite, within [-1000,1000]");
   impl_->playback = p;
+  if (p.playing)
+    impl_->follow = false;
   if (impl_->timeline.empty())
     impl_->playback.playing = false;
   impl_->remainder = 0;
 }
 void Document::set_playing(bool p) {
   impl_->playback.playing = p && !impl_->timeline.empty();
+  if (p)
+    impl_->follow = false;
   impl_->remainder = 0;
 }
 bool Document::advance(double elapsed) {

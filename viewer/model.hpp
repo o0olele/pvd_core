@@ -105,6 +105,17 @@ public:
   // concurrently.
   void open_file(const std::string &);
   void adopt(std::unique_ptr<Session>, std::string source_label = {});
+  // Incremental live ingestion. Caller serializes these with all UI queries.
+  // Partial property transactions stay pending; the published frame is retained
+  // until a complete boundary. No accepted event prefix is reparsed/rebuilt.
+  void begin_live(StreamHeader, std::string source_label = {},
+                  SessionOptions options = {});
+  bool append_live(std::vector<Event>);
+  void finish_live();
+  bool live() const noexcept;
+  std::size_t live_event_count() const noexcept;
+  bool follow_live() const noexcept;
+  void set_follow_live(bool);
   bool loaded() const noexcept;
   const Session *session() const noexcept;
   const Metadata *metadata() const;
