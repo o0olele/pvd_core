@@ -269,6 +269,12 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             add_test(NAME physx34_writer_render COMMAND pvd_writer_tests
                 ${CMAKE_CURRENT_BINARY_DIR}/fixtures/render_capture.pxd2)
             set_tests_properties(physx34_writer_render PROPERTIES FIXTURES_REQUIRED physx34_render TIMEOUT 30)
+            add_test(NAME physx34_writer_native COMMAND pvd_writer_tests
+                ${PROJECT_BINARY_DIR}/fixtures/articulation_capture.pxd2
+                ${PROJECT_BINARY_DIR}/fixtures/queries_capture.pxd2
+                ${PROJECT_BINARY_DIR}/fixtures/deformables_capture.pxd2)
+            set_tests_properties(physx34_writer_native PROPERTIES
+                FIXTURES_REQUIRED "physx34_articulation;physx34_scene_queries;physx34_deformables" TIMEOUT 30)
         endif()
         if(PVD_BUILD_TRANSPORT)
             add_executable(pvd_physx34_live tests/physx34_live.cpp)

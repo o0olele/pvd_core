@@ -92,9 +92,9 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 
 `export_job` 验证真实异步写出、覆盖保护、取消、安全尾及两种分析 provider。`viewer_export_gpu` 通过真实窗口后台任务保存整份录制和第 3–15 帧，重开并与源结束前缀逐状态核对；最新输出索引为 `viewer-export-latest.json`。`viewer_live_gpu` 还在接收期间独立保存快照并核对其原始前缀，同时验证完整 TCP 录制继续写完。
 
-这些是程序内模型及渲染验证，未替代系统鼠标、文件对话框及高 DPI 多显示器的人工交互验收。性能、内存、曲线、工程剪辑和旧版容器等完整应用功能按 [实施清单](application-roadmap.md) 继续建设。
+这些是程序内模型及渲染验证，未替代系统鼠标、文件对话框及物理多显示器的人工交互验收。性能、内存、曲线、工程剪辑、RepX 和原生扩展对象的当前覆盖见 [PhysX 3.4 验收说明](physx34-acceptance.md)；旧 SDK/旧容器按用户确定的范围后续兼容。
 
-本机验证结果：Debug 15 项及 Release 共享构建 7 项测试通过；最终相机/渲染调整后，重新通过全部 viewer 测试。安装后的 Release 程序已从其他工作目录启动并使用硬件渲染真实 PhysX 3.4 捕获。12 个 shape、3048 个渲染三角形（含高亮和调试图元），固定相机跨帧变化 1151 像素、选择变化 142 像素。WARP 对照同样通过；中文及带空格路径、无效文件错误出口已验证。
+早期 0.4 基线验证结果：Debug 15 项及 Release 共享构建 7 项测试通过；最终相机/渲染调整后，重新通过全部 viewer 测试。安装后的 Release 程序已从其他工作目录启动并使用硬件渲染真实 PhysX 3.4 捕获。12 个 shape、3048 个渲染三角形（含高亮和调试图元），固定相机跨帧变化 1151 像素、选择变化 142 像素。WARP 对照同样通过；中文及带空格路径、无效文件错误出口已验证。当前 0.7 新增验证不以这些历史数量作为完整性或性能保证。
 
 实际输出位于 `build-physx34/fixtures/pvd-studio.png`，对应 `viewer-hardware.json`；CTest 的 WARP 输出为 `viewer-smoke.png` / `viewer-smoke.json`。这些数量来自当前验证录制，并非所有录制的性能或完整性保证。
 
@@ -118,6 +118,10 @@ ctest --test-dir build-physx34 -C Debug --output-on-failure
 `viewer_deformables_gpu` 验证真实 SDK 的 16 个布料点、58 条约束、12 个粒子及
 选择改变 81 个 GPU 像素；`viewer_repx_gpu` 验证严格拒绝与显式 partial 发布。
 工作区、raw 保存、在线快照和曲线 GPU 验证继续保留。
+
+**Scene queries** 展示原生及批量 raycast/sweep/overlap 的真实参数、命中、来源和查询几何；空命中与未发送的字段分别说明。View 弹窗提供上下轴/镜像手系、背景、真实 MSAA、原生关节限制线、tight geometry bounds 与记录的线/角速度，详见[查询视图](scene-query-viewer.md)和[显示设置](display-settings.md)。
+
+界面按显示器 DPI 重新栅格化字体及缩放逻辑尺寸；`WM_DPICHANGED` 在下一帧前安全更新 CPU atlas 和 D3D11 纹理。可用 `--ui-scale 1.5` 显式覆盖本次进程的自动 DPI，或用 `--dpi-smoke CAPTURE --warp --hidden` 验证 1x→1.5x→2x→1x 的实际窗口/字体/GPU 路径。OS 可以约束过大的窗口；JSON 保留实际 client 尺寸。物理显示器人工验收的限制见[缩放说明](ui-scale.md)。
 
 - `viewer/model.*`：与 ImGui、Win32、GPU 无关的文档、时间轴、选择、相机和拾取。
 - `viewer/live_session.*`：与 UI 无关的实时协调、增量导入和跟随状态。

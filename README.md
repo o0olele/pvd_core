@@ -28,6 +28,8 @@
 
 0.7 版补齐六类扩展关节与原生 [Articulation/Aggregate](docs/articulations.md) 的回放及 RepX 回载验证。新增[场景查询索引](docs/scene-queries.md)和[查询视图](docs/scene-query-viewer.md)、[刚体包围盒及速度图层](docs/body-overlays.md)、[显示设置](docs/display-settings.md)和[属性检查偏好](docs/inspection-preferences.md)。这些数据接口仍可通过[已安装的独立 CMake 包](docs/library-consumption.md)使用。
 
+ImGui 主机与面板支持[每显示器 DPI 和字体重建](docs/ui-scale.md)。本轮原生 3.4 工作流的功能覆盖、重现命令和已知验收限制统一记录在 [PhysX 3.4 验收说明](docs/physx34-acceptance.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
