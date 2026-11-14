@@ -332,6 +332,31 @@ void malformed() {
                          {1, 2, 1, {}}, limit);
   check(result.points.empty() && !result.complete, "packet byte limit");
 }
+void flattened_joint_scene_ownership() {
+  auto snap = snapshot();
+  auto meta = metadata();
+  meta.classes.emplace(QualifiedName{"physx3", "PxJoint"},
+                       ClassDefinition{{"physx3", "PxJoint"}, {}, {}});
+  std::vector<ChannelPacket> packets;
+  for (auto actor : {10ull, 20ull}) {
+    InstanceState joint;
+    joint.id = actor + 100;
+    joint.class_name = {"physx3", "PxJoint"};
+    auto world = value({}); world.reference_ids = std::vector<std::uint64_t>{0};
+    auto body = value({}); body.reference_ids = std::vector<std::uint64_t>{actor};
+    joint.properties["Actors.actor0"] = world;
+    joint.properties["Actors.actor1"] = body;
+    snap.instances.emplace(joint.id, joint);
+    Writer w;w.u(1, 1);w.u(joint.id, 8);w.u(5, 1);w.transform();w.transform();
+    packets.push_back(packet(w, packets.size() + 3));
+  }
+  const auto first = extract_debug(snap, meta, packets, {3, 5, 1, {100}});
+  const auto second = extract_debug(snap, meta, packets, {3, 5, 2, {100}});
+  check(first.constraints.size() == 1 && second.constraints.size() == 1 &&
+            first.constraints[0].source.instance_id == 110 &&
+            second.constraints[0].source.instance_id == 120,
+        "native flattened joint references lost scene ownership or leaked across scenes");
+}
 Writer contact(ByteOrder order, std::uint8_t width, bool force = true) {
   Writer w(order);
   w.vec(1, 2, 3);
@@ -406,6 +431,7 @@ int main() {
     debug_formats();
     ranges_and_state();
     malformed();
+    flattened_joint_scene_ownership();
     contacts();
     std::cout << "debug render tests passed\n";
     return 0;

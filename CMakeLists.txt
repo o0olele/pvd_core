@@ -60,7 +60,8 @@ if(PVD_BUILD_TRANSPORT)
 endif()
 
 if(PVD_BUILD_RENDER)
-    add_library(pvd_render src/render.cpp src/debug_render.cpp src/mesh_builder.cpp src/deformables.cpp)
+    add_library(pvd_render src/render.cpp src/debug_render.cpp src/mesh_builder.cpp src/deformables.cpp
+        src/constraint_builder.cpp)
     add_library(pvd::render ALIAS pvd_render)
     set_target_properties(pvd_render PROPERTIES EXPORT_NAME render VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
@@ -75,6 +76,8 @@ if(PVD_BUILD_RENDER)
         target_compile_options(pvd_render PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     list(APPEND PVD_INSTALL_TARGETS pvd_render)
+    install(FILES docs/constraint-visualization-LICENSE.txt
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/pvd_render)
 endif()
 
 if(PVD_BUILD_ANALYSIS)
@@ -128,7 +131,7 @@ if(BUILD_TESTING)
         set_tests_properties(capture PROPERTIES TIMEOUT 30)
     endif()
     if(PVD_BUILD_RENDER)
-        foreach(render_test IN ITEMS render debug_render mesh_builder deformables)
+        foreach(render_test IN ITEMS render debug_render mesh_builder deformables constraint_builder)
             add_executable(pvd_${render_test}_tests tests/${render_test}_tests.cpp)
             target_link_libraries(pvd_${render_test}_tests PRIVATE pvd::render)
             add_test(NAME ${render_test} COMMAND pvd_${render_test}_tests)
@@ -147,6 +150,27 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
         set_property(TARGET pvd_physx34_deformables_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
         target_compile_options(pvd_physx34_deformables_capture PRIVATE /utf-8)
         target_link_libraries(pvd_physx34_deformables_capture PRIVATE
+            ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
+        pvd_add_physx34_capture(pvd_physx34_joints_capture
+            ${PROJECT_SOURCE_DIR}/examples/physx34_joints_capture.cpp)
+        set_property(TARGET pvd_physx34_joints_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
+        target_compile_options(pvd_physx34_joints_capture PRIVATE /W4 /utf-8)
+        target_link_libraries(pvd_physx34_joints_capture PRIVATE
+            ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
+        pvd_add_physx34_capture(pvd_physx34_constraints
+            ${PROJECT_SOURCE_DIR}/tests/physx34_constraints.cpp)
+        target_link_libraries(pvd_physx34_constraints PRIVATE pvd::render)
+        target_include_directories(pvd_physx34_constraints SYSTEM PRIVATE
+            ${PROJECT_SOURCE_DIR}/examples/physx34_compat
+            ${PHYSX34_ROOT}/PhysX_3.4/Source/Common/src
+            ${PHYSX34_ROOT}/PhysX_3.4/Include/common
+            ${PHYSX34_ROOT}/PxShared/src/foundation/include)
+        target_compile_options(pvd_physx34_constraints PRIVATE /utf-8)
+        pvd_add_physx34_capture(pvd_physx34_stress_capture
+            ${PROJECT_SOURCE_DIR}/examples/physx34_stress_capture.cpp)
+        set_property(TARGET pvd_physx34_stress_capture PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDebug)
+        target_compile_options(pvd_physx34_stress_capture PRIVATE /W4 /utf-8)
+        target_link_libraries(pvd_physx34_stress_capture PRIVATE
             ${PHYSX34_ROOT}/PhysX_3.4/Lib/vc15win64/PhysX3ExtensionsDEBUG.lib)
     endif()
     if(BUILD_TESTING)
@@ -172,6 +196,21 @@ if(PVD_BUILD_PHYSX34_VALIDATION)
             ${CMAKE_CURRENT_BINARY_DIR}/fixtures/physical_custom.pxd2)
         set_tests_properties(physx34_writer PROPERTIES FIXTURES_REQUIRED physx34_capture TIMEOUT 30)
         if(PVD_BUILD_RENDER)
+            add_test(NAME physx34_joints_generate COMMAND pvd_physx34_joints_capture
+                ${PROJECT_BINARY_DIR}/fixtures/joints)
+            set_tests_properties(physx34_joints_generate PROPERTIES FIXTURES_SETUP physx34_joints TIMEOUT 30)
+            add_test(NAME physx34_constraints COMMAND pvd_physx34_constraints
+                ${PROJECT_BINARY_DIR}/fixtures/joints_capture.pxd2)
+            set_tests_properties(physx34_constraints PROPERTIES FIXTURES_REQUIRED physx34_joints TIMEOUT 30)
+            add_executable(pvd_physx34_stress tests/physx34_stress.cpp)
+            target_link_libraries(pvd_physx34_stress PRIVATE pvd::render)
+            add_test(NAME physx34_stress_generate COMMAND pvd_physx34_stress_capture
+                ${PROJECT_BINARY_DIR}/fixtures/stress)
+            set_tests_properties(physx34_stress_generate PROPERTIES FIXTURES_SETUP physx34_stress TIMEOUT 60)
+            add_test(NAME physx34_stress COMMAND pvd_physx34_stress
+                ${PROJECT_BINARY_DIR}/fixtures/stress_capture.pxd2
+                ${PROJECT_BINARY_DIR}/fixtures/stress_expected.csv)
+            set_tests_properties(physx34_stress PROPERTIES FIXTURES_REQUIRED physx34_stress TIMEOUT 60)
             add_test(NAME physx34_deformables_generate COMMAND pvd_physx34_deformables_capture
                 ${PROJECT_BINARY_DIR}/fixtures/deformables)
             set_tests_properties(physx34_deformables_generate PROPERTIES FIXTURES_SETUP physx34_deformables TIMEOUT 30)

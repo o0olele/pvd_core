@@ -46,3 +46,18 @@ roundtrips, memory/profile/deformables/RepX oracles, repeated message arguments,
 negative zero, incoming-type changes, retained snapshots and identical repeated
 channel packets. Clang static allocation-fault verification passed 157 fault
 points; Debug static and Release shared Session tests also passed.
+
+A second SDK workload exercises 128 simultaneous rigid actors (96 dynamic,
+32 static) and 48 frames, with boxes, spheres and capsules and one shared
+material. `physx34_stress` compares all 12,288 actor/frame poses and types in
+forward/reverse order with independent SDK getters, and checks first/last
+geometry extraction. The 751,551-byte / 8,922-event recording measured a
+53.90 ms Release load, 23,687,168-byte peak working set, 1.252 ms random-seek
+p95 (128 samples) and 1.048 ms reverse-seek p95 (48 samples). This is a modest
+many-actor workload, still not a mesh-heavy production-scene benchmark.
+
+Regenerate with `pvd_physx34_stress_capture PREFIX [actors=128] [frames=48]`;
+supported ranges are 16–2048 actors and 16–1024 frames. Its `_expected.csv`
+records SDK poses before each simulate call, matching the documented native
+EndFrame boundary. The optional `physx34_stress_generate` / `physx34_stress`
+CTest fixture uses the default workload; it does not alter the SDK tree.

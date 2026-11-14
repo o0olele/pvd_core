@@ -121,7 +121,8 @@ std::optional<bool> belongs(const Snapshot &snapshot, const Metadata &meta,
     return false;
   bool known = false;
   for (const char *key :
-       {"Scene", "Actor", "Actors", "Actors[0]", "Actors[1]"}) {
+       {"Scene", "Actor", "Actors", "Actors[0]", "Actors[1]",
+        "Actors.actor0", "Actors.actor1"}) {
     const auto *p = object->property(key);
     if (!p || !p->reference_ids)
       continue;
