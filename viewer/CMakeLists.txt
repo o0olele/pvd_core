@@ -565,5 +565,16 @@ if(BUILD_TESTING)
             --report ${PROJECT_BINARY_DIR}/fixtures/viewer-scaled.json
             --screenshot ${PROJECT_BINARY_DIR}/fixtures/viewer-scaled.png)
         set_tests_properties(viewer_gpu_scaled PROPERTIES FIXTURES_REQUIRED physx34_render TIMEOUT 45)
+        foreach(layout IN ITEMS normal compact)
+            set(size_args)
+            if(layout STREQUAL "compact")
+                set(size_args --size 1060 700)
+            endif()
+            add_test(NAME viewer_scene_first_${layout}_gpu COMMAND pvd_viewer --layout-smoke
+                ${PROJECT_BINARY_DIR}/fixtures/render_capture.pxd2 --warp --hidden ${size_args}
+                --report ${PROJECT_BINARY_DIR}/fixtures/viewer-scene-first-${layout}.json
+                --screenshot ${PROJECT_BINARY_DIR}/fixtures/viewer-scene-first-${layout}.png)
+            set_tests_properties(viewer_scene_first_${layout}_gpu PROPERTIES FIXTURES_REQUIRED physx34_render TIMEOUT 45)
+        endforeach()
     endif()
 endif()

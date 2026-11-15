@@ -1,6 +1,7 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "panels.hpp"
+#include "ui_scale.hpp"
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -339,8 +340,8 @@ struct Harness {
   }
   ImVec2 focused() const {
     const auto &g = *ImGui::GetCurrentContext();
-    auto p = g.NavWindow->NavRectRel[ImGuiNavLayer_Main].GetCenter();
-    return {p.x + g.NavWindow->Pos.x, p.y + g.NavWindow->Pos.y};
+    return ImGui::WindowRectRelToAbs(
+        g.NavWindow, g.NavWindow->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
   }
   ImGuiWindow *popup() {
     frame();
@@ -373,9 +374,20 @@ void widgets(float width) {
                             ->snapshot.instance(object_id)
                             ->property("BFloat")
                             ->raw_bytes();
+  // Logging temporarily expands array trees. Let the following ordinary
+  // frames settle the scrollbar before measuring this compact header button.
+  h.frame();
+  h.frame();
   const auto &style = ImGui::GetStyle();
-  h.click({style.WindowPadding.x + 25,
-           style.WindowPadding.y + ImGui::GetTextLineHeight() * .5f});
+  const float settings_width = ui_pixels(24);
+  const ImVec2 settings_button{
+      h.window->WorkRect.Max.x - settings_width * .5f,
+      h.window->DC.CursorStartPos.y + settings_width * .5f};
+  h.frame(settings_button, false);
+  check(ImGui::GetCurrentContext()->HoveredId ==
+            h.window->GetID("Settings##Inspector settings"),
+        "settings button is mouse-accessible at the inspector header");
+  h.click(settings_button);
   auto *preferences = h.popup();
   h.choose(preferences, "Number format", 1);
   check(h.panel.inspector_preferences.number_format == NumberFormat::scientific,
@@ -460,10 +472,14 @@ void widgets(float width) {
   h.timeline = true;
   h.frame();
   h.frame();
-  h.focus(h.window, "Reverse");
+  h.focus(h.window, "...##playback-options");
+  h.click(h.focused());
+  auto *playback_options = h.popup();
+  h.focus(playback_options, "Reverse");
   h.click(h.focused());
   check(h.doc.playback().frames_per_second < 0,
         "real mouse Reverse toggle updates signed playback");
+  h.key(ImGuiKey_Escape);
   h.doc.set_frame(4);
   h.doc.set_playing(true);
   h.doc.advance(1. / 60);

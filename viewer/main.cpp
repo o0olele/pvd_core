@@ -1,6 +1,7 @@
 #include "deformable_panel.hpp"
 #include "display_panel.hpp"
 #include "ui_scale.hpp"
+#include "ui_widgets.hpp"
 #include "camera_panel.hpp"
 #include "recorded_camera.hpp"
 #include "clip_panel.hpp"
@@ -63,6 +64,7 @@ struct Options {
   std::filesystem::path live_snapshot;
   std::filesystem::path output;
   bool smoke = false, warp = false, hidden = false;
+  bool scene_first_smoke = false;
   bool live_smoke = false;
   bool analysis_smoke = false;
   bool deformable_smoke = false;
@@ -122,8 +124,9 @@ Options arguments() {
           throw std::runtime_error("Missing option value");
         return args[i];
       };
-      if (a == L"--smoke") {
+      if (a == L"--smoke" || a == L"--layout-smoke") {
         result.smoke = true;
+        result.scene_first_smoke = a == L"--layout-smoke";
         result.capture = value();
       } else if (a == L"--deformable-smoke") {
         result.deformable_smoke = true;
@@ -437,6 +440,9 @@ public:
       update_ui_scale();
       ImGui_ImplDX11_NewFrame();
       ImGui_ImplWin32_NewFrame();
+      if (options_.scene_first_smoke) layout_smoke_input();
+      popup_open_at_frame_start_ = ImGui::IsPopupOpen(nullptr,
+          ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel);
       ImGui::NewFrame();
       draw();
       ImGui::Render();
@@ -491,6 +497,7 @@ private:
   Options options_;
   HWND window_ = nullptr;
   bool quit_ = false, imgui_ = false, using_warp_ = false;
+  bool popup_open_at_frame_start_ = false;
   bool win32_backend_ = false, dx11_backend_ = false;
   UINT resize_width_ = 0, resize_height_ = 0;
   ComPtr<ID3D11Device> device_;
@@ -499,6 +506,9 @@ private:
   ComPtr<ID3D11RenderTargetView> backbuffer_;
   std::unique_ptr<Renderer> renderer_;
   struct SlotUiState {
+    // Drawers overlay the scene instead of changing its camera aspect/texture.
+    enum class Sidebar { none, objects, properties, diagnostics };
+    Sidebar sidebar = Sidebar::none;
     ImVec2 auto_fit_size{};
     unsigned auto_fit_stable_frames = 0;
     PanelState panels;
@@ -510,11 +520,12 @@ private:
     std::uint64_t clips_revision = std::numeric_limits<std::uint64_t>::max();
     bool clips_resync = false;
     bool view_popup_requested = false;
+    int view_settings_page = 2;
     DisplayPanelState display;
     SceneQueryPanelState scene_queries;
     ExportPanelState export_panel;
-    bool diagnostics = false, show_debug_text = true;
-    int page = 0, synchronized_page = -1;
+    bool show_debug_text = true;
+    int page = 0;
     DeformablePanelState deformables;
     std::optional<std::uint64_t> displayed_scene;
 #ifdef PVD_VIEWER_HAS_ANALYSIS
@@ -563,7 +574,7 @@ private:
   std::filesystem::path settings_directory_, settings_file_;
   std::string ini_path_;
   bool automatic_settings_ = false, settings_writable_ = false,
-       help_requested_ = false;
+       help_requested_ = false, activity_popup_requested_ = false;
   int layout_generation_ = 0;
   std::unique_ptr<UiScale> ui_scale_;
   std::optional<float> pending_ui_scale_;
@@ -584,6 +595,18 @@ private:
   std::string loading_, error_;
   std::size_t host_frames_ = 0;
   ImVec2 viewport_origin_{}, viewport_size_{};
+  ImVec2 scene_drawer_min_{}, scene_drawer_max_{};
+  ImVec2 objects_button_center_{}, properties_button_center_{}, drawer_close_center_{};
+  ImVec2 selection_chip_center_{};
+  ImVec2 file_menu_center_{}, more_menu_center_{}, activity_button_center_{};
+  ImVec2 display_menu_center_{};
+  ImGuiID file_menu_popup_ = 0, more_menu_popup_ = 0, activity_popup_id_ = 0;
+  ImGuiID display_menu_popup_ = 0, view_settings_popup_ = 0;
+  ImGuiWindow *inspector_test_window_ = nullptr;
+  ImVec2 layout_smoke_viewport_{};
+  OrbitCamera layout_smoke_camera_;
+  std::optional<PickingKey> layout_smoke_selection_;
+  bool layout_smoke_drawer_visible_ = false;
   RgbaImage unselected_;
   bool smoke_navigation_ = false, smoke_picking_ = false;
   std::size_t selection_pixels_ = 0;
@@ -1127,6 +1150,8 @@ private:
   }
   void reset_layout() {
     ImGui::ClearIniSettings();
+    for (auto &entry : slot_ui_)
+      entry.second->sidebar = SlotUiState::Sidebar::none;
     ++layout_generation_;
     if (automatic_settings_ && !ini_path_.empty())
       ImGui::SaveIniSettingsToDisk(ini_path_.c_str());
@@ -1138,7 +1163,7 @@ private:
       help_requested_ = false;
     }
     ImGui::SetNextWindowSize({ui_pixels(560), 0}, ImGuiCond_Appearing);
-    if (ImGui::BeginPopupModal("Help and shortcuts", nullptr,
+    if (ui::begin_popup_modal("Help and shortcuts", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
       ImGui::TextUnformatted("PVD Studio " PVD_VIEWER_VERSION " / PhysX 3.4 raw captures");
       ImGui::TextWrapped(
@@ -1151,6 +1176,7 @@ private:
       ImGui::TextWrapped("Clips: Ctrl+Alt+Y splits at the native playhead; "
                          "Ctrl+Alt+S trims left; Ctrl+Alt+E trims right.");
       ImGui::TextWrapped("Ctrl+Shift+S opens view preferences; Ctrl+Shift+R restores built-in preferences.");
+      ImGui::TextWrapped("Scene-first layout: Objects and Properties open one overlay drawer at a time. Escape closes the drawer. Analysis and scene tools are grouped in the top menu.");
       ImGui::TextWrapped(
           "RMB look, MMB pan, wheel zoom; hover the viewport for WASD/QE, Shift 2x. "
           "View offers orbit/first-person controllers, speed, look-at and clipping. Click picks a visible shape. View "
@@ -1168,7 +1194,7 @@ private:
             "Automatic user settings are disabled for this run.");
       if (ImGui::Button("Close"))
         ImGui::CloseCurrentPopup();
-      ImGui::EndPopup();
+      ui::end_popup();
     }
   }
   void load_bar() {
@@ -1392,6 +1418,8 @@ private:
         nullptr; // Viewer layout is deterministic; no cwd side effects.
     theme();
     configure_persistence();
+    UiScaleOptions font_options;
+    font_options.base_font_pixels = ui::font_size_dp;
     ui_scale_=std::make_unique<UiScale>(ImGui::GetStyle(),[](ImFontAtlas &atlas,float pixels) {
       ImFontConfig font;font.SizePixels=pixels;
       const std::filesystem::path segoe=L"C:/Windows/Fonts/segoeui.ttf";
@@ -1405,14 +1433,15 @@ private:
         if(ranges.empty()) {
           ImFontGlyphRangesBuilder builder;
           builder.AddRanges(atlas.GetGlyphRangesChineseSimplifiedCommon());
-          builder.AddText(u8"帧");builder.BuildRanges(&ranges);
+          builder.AddText(u8"帧文件工作区帮助场景分析更多透视聚焦显示选择已模拟完成后结束对象属性诊断数值格式精度右键观察中平移滚轮缩放就绪");
+          builder.BuildRanges(&ranges);
         }
         ImFontConfig merge;merge.MergeMode=true;merge.PixelSnapH=true;
         atlas.AddFontFromFileTTF(cjk.string().c_str(),pixels,&merge,
             ranges.Data);
       }
       return primary;
-    });
+    }, font_options);
     ui_scale_->reload_fonts(effective_ui_scale(window_));
     pending_ui_scale_.reset();
     if (!ImGui_ImplWin32_Init(window_))
@@ -1436,41 +1465,43 @@ private:
     s.FramePadding = {9, 6};
     s.ItemSpacing = {9, 8};
     s.WindowRounding = 0;
-    s.ChildRounding = 7;
-    s.FrameRounding = 5;
+    s.ChildRounding = 0;
+    s.FrameRounding = 4;
     s.PopupRounding = 7;
+    s.PopupBorderSize = 1;
     s.GrabRounding = 4;
     s.ScrollbarRounding = 5;
     s.WindowBorderSize = 0;
     s.ChildBorderSize = 1;
     s.FrameBorderSize = 0;
     auto *c = s.Colors;
-    c[ImGuiCol_WindowBg] = {0.043f, 0.059f, 0.082f, 1};
-    c[ImGuiCol_ChildBg] = {0.063f, 0.082f, 0.110f, 1};
-    c[ImGuiCol_Text] = {0.87f, 0.91f, 0.95f, 1};
-    c[ImGuiCol_TextDisabled] = {0.43f, 0.52f, 0.62f, 1};
-    c[ImGuiCol_Border] = {0.15f, 0.20f, 0.27f, 1};
-    c[ImGuiCol_FrameBg] = {0.10f, 0.14f, 0.18f, 1};
+    c[ImGuiCol_WindowBg] = {0.063f, 0.082f, 0.106f, 1};
+    c[ImGuiCol_ChildBg] = {0.090f, 0.118f, 0.149f, 1};
+    c[ImGuiCol_MenuBarBg] = {0.110f, 0.141f, 0.176f, 1};
+    c[ImGuiCol_Text] = {0.871f, 0.902f, 0.929f, 1};
+    c[ImGuiCol_TextDisabled] = {0.584f, 0.651f, 0.714f, 1};
+    c[ImGuiCol_Border] = {0.173f, 0.216f, 0.263f, 1};
+    c[ImGuiCol_FrameBg] = {0.125f, 0.169f, 0.212f, 1};
     c[ImGuiCol_FrameBgHovered] = {0.14f, 0.22f, 0.26f, 1};
     c[ImGuiCol_FrameBgActive] = {0.12f, 0.28f, 0.29f, 1};
-    c[ImGuiCol_Button] = {0.11f, 0.20f, 0.24f, 1};
-    c[ImGuiCol_ButtonHovered] = {0.13f, 0.33f, 0.35f, 1};
-    c[ImGuiCol_ButtonActive] = {0.10f, 0.44f, 0.43f, 1};
-    c[ImGuiCol_Header] = {0.10f, 0.28f, 0.30f, 1};
+    c[ImGuiCol_Button] = {0.125f, 0.169f, 0.212f, 1};
+    c[ImGuiCol_ButtonHovered] = {0.18f, 0.26f, 0.29f, 1};
+    c[ImGuiCol_ButtonActive] = {0.12f, 0.31f, 0.30f, 1};
+    c[ImGuiCol_Header] = {0.137f, 0.243f, 0.243f, 1};
     c[ImGuiCol_HeaderHovered] = {0.12f, 0.33f, 0.36f, 1};
     c[ImGuiCol_HeaderActive] = {0.12f, 0.39f, 0.40f, 1};
-    c[ImGuiCol_CheckMark] = c[ImGuiCol_SliderGrab] = {0.24f, 0.82f, 0.72f, 1};
+    c[ImGuiCol_CheckMark] = c[ImGuiCol_SliderGrab] = {0.341f, 0.812f, 0.729f, 1};
     c[ImGuiCol_SliderGrabActive] = {0.40f, 0.94f, 0.82f, 1};
     c[ImGuiCol_Separator] = c[ImGuiCol_Border];
     c[ImGuiCol_TableHeaderBg] = {0.08f, 0.12f, 0.16f, 1};
     c[ImGuiCol_TableRowBgAlt] = {0.12f, 0.16f, 0.21f, 0.35f};
-    c[ImGuiCol_Tab] = {0.08f, 0.16f, 0.20f, 1};
+    c[ImGuiCol_Tab] = {0.090f, 0.118f, 0.149f, 1};
     c[ImGuiCol_TabHovered] = {0.12f, 0.33f, 0.35f, 1};
-    c[ImGuiCol_TabSelected] = {0.10f, 0.28f, 0.30f, 1};
-    c[ImGuiCol_TabSelectedOverline] = {0.24f, 0.82f, 0.72f, 1};
+    c[ImGuiCol_TabSelected] = {0.090f, 0.118f, 0.149f, 1};
+    c[ImGuiCol_TabSelectedOverline] = {0.341f, 0.812f, 0.729f, 1};
     c[ImGuiCol_TitleBg] = {0.06f, 0.10f, 0.14f, 1};
     c[ImGuiCol_TitleBgActive] = {0.08f, 0.18f, 0.20f, 1};
-    c[ImGuiCol_PopupBg] = {0.063f, 0.082f, 0.110f, 1};
+    c[ImGuiCol_PopupBg] = {0.110f, 0.141f, 0.176f, 1};
     c[ImGuiCol_ModalWindowDimBg] = {0, 0, 0, .62f};
   }
   void choose_file(std::optional<SlotId> target = {}) {
@@ -1785,7 +1816,7 @@ private:
       capture_setup_requested_ = false;
     }
     ImGui::SetNextWindowSize({ui_pixels(580), 0}, ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Live capture", nullptr,
+    if (!ui::begin_popup_modal("Live capture", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize))
       return;
     ImGui::TextUnformatted("Receive a PhysX PVD connection");
@@ -1820,7 +1851,7 @@ private:
       ImGui::CloseCurrentPopup();
     if (!error_.empty())
       ImGui::TextWrapped("%s", error_.c_str());
-    ImGui::EndPopup();
+    ui::end_popup();
   }
   void capture_bar() {
     const auto &status = live_.status();
@@ -1993,6 +2024,13 @@ private:
         ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId |
                                         ImGuiPopupFlags_AnyPopupLevel))
       return;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+      // NewFrame may already have dismissed a native popup. That same Escape
+      // belongs to the popup and must not also close its owning drawer.
+      if (!popup_open_at_frame_start_)
+        ui().sidebar = SlotUiState::Sidebar::none;
+      return;
+    }
     if(io.KeyCtrl&&io.KeyShift&&ImGui::IsKeyPressed(ImGuiKey_R,false)) {
       try{restore_default_preferences();}catch(const std::exception &e){error_=e.what();}
       return;
@@ -2098,7 +2136,7 @@ private:
       export_popup_requested_ = false;
     }
     ImGui::SetNextWindowSize({ui_pixels(660), ui_pixels(530)}, ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Save / crop capture", nullptr,
+    if (!ui::begin_popup_modal("Save / crop capture", nullptr,
                                 ImGuiWindowFlags_None))
       return;
     const auto id = export_popup_slot_.value_or(active_slot().id());
@@ -2108,7 +2146,7 @@ private:
       draw_export_progress(export_job_);
       if (ImGui::Button("Close"))
         ImGui::CloseCurrentPopup();
-      ImGui::EndPopup();
+      ui::end_popup();
       return;
     }
     bool other_lock = slot->lock_reason() &&
@@ -2121,7 +2159,7 @@ private:
       ImGui::TextWrapped("Finish this tab's current operation before saving.");
       if (ImGui::Button("Close"))
         ImGui::CloseCurrentPopup();
-      ImGui::EndPopup();
+      ui::end_popup();
       return;
     }
     if (slot->document().live()) {
@@ -2168,7 +2206,7 @@ private:
       if (result.close_requested)
         ImGui::CloseCurrentPopup();
     }
-    ImGui::EndPopup();
+    ui::end_popup();
   }
 #ifdef PVD_VIEWER_HAS_REPX
   void start_repx(SlotId id, RepxRequest request) {
@@ -2256,7 +2294,7 @@ private:
       repx_popup_requested_ = false;
     }
     ImGui::SetNextWindowSize({ui_pixels(650), ui_pixels(600)}, ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Export RepX", nullptr, ImGuiWindowFlags_None))
+    if (!ui::begin_popup_modal("Export RepX", nullptr, ImGuiWindowFlags_None))
       return;
     const auto id = repx_popup_slot_.value_or(active_slot().id());
     auto *slot = workspace_.find(id);
@@ -2265,7 +2303,7 @@ private:
       draw_repx_progress(repx_job_);
       if (ImGui::Button("Close"))
         ImGui::CloseCurrentPopup();
-      ImGui::EndPopup();
+      ui::end_popup();
       return;
     }
     if (export_job_.running() ||
@@ -2275,7 +2313,7 @@ private:
                          "before exporting RepX.");
       if (ImGui::Button("Close"))
         ImGui::CloseCurrentPopup();
-      ImGui::EndPopup();
+      ui::end_popup();
       return;
     }
     const auto result = draw_repx_panel(
@@ -2300,7 +2338,7 @@ private:
     }
     if (result.close_requested)
       ImGui::CloseCurrentPopup();
-    ImGui::EndPopup();
+    ui::end_popup();
   }
 #endif
   void clip_smoke_step() {
@@ -2813,7 +2851,7 @@ private:
         client.right>options_.window_width&&client.bottom>options_.window_height;
     if (!document().loaded() || !document().frame() || !renderer_->stats().triangles ||
         actual.screen_scale!=expected || actual.generation!=dpi_smoke_phase_+1 ||
-        actual.font_pixels!=std::floor(17*expected+.5f) ||
+        actual.font_pixels!=std::floor(ui::font_size_dp*expected+.5f) ||
         ImGui::GetIO().Fonts->TexID==0 || ImGui::GetIO().FontGlobalScale!=1 ||
         ImGui::GetDrawData()->TotalVtxCount<100 || !client_size) {
       std::ostringstream reason;
@@ -2872,8 +2910,174 @@ private:
     // were moved or their system DPI was changed during this test.
     SendMessageW(window_,WM_DPICHANGED,MAKEWPARAM(dpi,dpi),reinterpret_cast<LPARAM>(&suggested));
   }
+  bool top_menu(const char *id, const char *label) {
+    ImGui::PushStyleColor(ImGuiCol_Button, {0, 0, 0, 0});
+    const std::string button = std::string(label) + "###" + id;
+    const bool clicked = ImGui::Button(button.c_str(), {0, ui_pixels(30)});
+    if (options_.scene_first_smoke && std::string(id) == "File") {
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      file_menu_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+      file_menu_popup_ = ImGui::GetID(id);
+    }
+    ImGui::PopStyleColor();
+    if (clicked) {
+      ui::anchor_popup_to_item();
+      ImGui::OpenPopup(id);
+    }
+    return ui::begin_popup(id);
+  }
+  void menu_bar() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ui_pixels(16), ui_pixels(8)});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {ui_pixels(8), 0});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.110f, 0.141f, 0.176f, 1});
+    ImGui::BeginChild("Application bar", {0, ui_pixels(ui::menu_height_dp)},
+        ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+    const auto brand = ImGui::GetCursorScreenPos();
+    auto *draw = ImGui::GetWindowDrawList();
+    ui::icon(ui::Icon::cube, {brand.x, brand.y + ui_pixels(7)}, ui_pixels(16), ImGui::GetColorU32(ImGuiCol_Text));
+    draw->AddText({brand.x + ui_pixels(26), brand.y + ui_pixels(6)},
+                   ImGui::GetColorU32(ImGuiCol_Text), "PVD");
+    draw->AddText(ImGui::GetFont(), ui_pixels(11),
+        {brand.x + ui_pixels(63), brand.y + ui_pixels(8)},
+        ImGui::GetColorU32(ImGuiCol_TextDisabled), "S T U D I O");
+    ImGui::Dummy({ui_pixels(119), ui_pixels(30)});
+    ImGui::SameLine();
+    if (top_menu("File", "File")) {
+      if (ImGui::MenuItem("Open capture...", "Ctrl+O")) choose_file();
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+      if (ImGui::MenuItem("Live capture...")) capture_setup_requested_ = true;
+#endif
+      ImGui::Separator();
+      if (ImGui::MenuItem("Save / crop...", "Ctrl+S", false, document().loaded())) {
+        export_popup_requested_ = true;
+        export_popup_slot_ = active_slot().id();
+      }
+#ifdef PVD_VIEWER_HAS_REPX
+      if (ImGui::MenuItem("Export RepX...", nullptr, false, document().loaded())) {
+        repx_popup_requested_ = true;
+        repx_popup_slot_ = active_slot().id();
+      }
+#endif
+      ui::end_popup();
+    }
+    ImGui::SameLine();
+    if (top_menu("Workspace", "Workspace")) {
+      if (ImGui::MenuItem("Manage tabs and bookmarks")) ui().page = 6;
+      if (ImGui::MenuItem("New empty tab"))
+        try { activate_slot(workspace_.create_empty()); }
+        catch (const std::exception &e) { error_ = e.what(); }
+      ImGui::BeginDisabled(active_slot().lock_reason().has_value());
+      if (ImGui::MenuItem("Replace active source...")) choose_file(active_slot().id());
+      if (ImGui::MenuItem("Close active tab")) close_slot(active_slot().id());
+      ImGui::EndDisabled();
+      ImGui::Separator();
+      if (ImGui::MenuItem("Save workspace...")) save_workspace();
+      if (ImGui::MenuItem("Load workspace...", nullptr, false, !workspace_.any_locked())) load_workspace();
+      if (ImGui::MenuItem("Reset layout")) reset_layout();
+      ui::end_popup();
+    }
+    ImGui::SameLine();
+    if (top_menu("Help", "Help")) {
+      if (ImGui::MenuItem("Help / shortcuts", "F1")) help_requested_ = true;
+      ui::end_popup();
+    }
+    const auto pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+    draw->AddLine({pos.x, pos.y + size.y - 1}, {pos.x + size.x, pos.y + size.y - 1},
+                  ImGui::GetColorU32(ImGuiCol_Border));
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
+  }
+  bool mode_menu(const char *id, ui::Icon icon, const char *label, bool selected) {
+    const auto text = std::string(label) + "    ";
+    bool clicked = false;
+    if (icon == ui::Icon::more) {
+      const float width = ImGui::CalcTextSize(label).x + ui_pixels(39);
+      ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImGui::GetStyleColorVec4(ImGuiCol_Header) : ImVec4{0,0,0,0});
+      ImGui::PushStyleColor(ImGuiCol_Text, {0,0,0,0});
+      clicked = ImGui::Button(id, {width, ui_pixels(30)});
+      ImGui::PopStyleColor(2);
+      const auto min = ImGui::GetItemRectMin();
+      ImGui::GetWindowDrawList()->AddText({min.x + ui_pixels(9), min.y + (ui_pixels(30) - ImGui::GetFontSize()) / 2},
+          ImGui::GetColorU32(selected ? ImGuiCol_CheckMark : ImGuiCol_Text), label);
+    } else clicked = ui::labeled_button(id, icon, text.c_str(), selected);
+    if (clicked) {
+      ui::anchor_popup_to_item();
+      ImGui::OpenPopup(id);
+    }
+    if (options_.scene_first_smoke && icon == ui::Icon::more) {
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      more_menu_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+      more_menu_popup_ = ImGui::GetID(id);
+    }
+    const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+    ui::icon(ui::Icon::chevron_down, {max.x - ui_pixels(21), min.y + ui_pixels(8)},
+              ui_pixels(14), ImGui::GetColorU32(ImGuiCol_TextDisabled));
+    return ui::begin_popup(id);
+  }
+  void workspace_modes() {
+    if (ui::labeled_button("Scene mode", ui::Icon::cube, "Scene", ui().page == 0)) ui().page = 0;
+    ImGui::SameLine(0, ui_pixels(4));
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+    if (mode_menu("Analysis", ui::Icon::chart, "Analysis", ui().page >= 1 && ui().page <= 7 && ui().page != 6)) {
+      const auto page = [&](const char *label, int value) {
+        if (ImGui::MenuItem(label, nullptr, ui().page == value)) ui().page = value;
+      };
+      ImGui::TextDisabled("Performance and diagnostics");
+      page("Profiler", 1); page("Memory", 2); page("Errors", 3);
+      ImGui::Separator();
+      ImGui::TextDisabled("Changes over time");
+      page("Property curves", 4); page("Event curves", 7); page("Frame diff", 5);
+      ui::end_popup();
+    }
+    ImGui::SameLine(0, ui_pixels(4));
+#endif
+    if (mode_menu("More", ui::Icon::more, "More", ui().page >= 8 || ui().page == 6)) {
+      if (ImGui::MenuItem("Deformables", nullptr, ui().page == 8)) ui().page = 8;
+      if (ImGui::MenuItem("Scene queries", nullptr, ui().page == 9)) ui().page = 9;
+      if (ImGui::MenuItem("Named clips", nullptr, ui().page == 10)) ui().page = 10;
+      ImGui::Separator();
+      if (ImGui::BeginMenu("Recorded scene", !document().scenes().empty())) {
+        for (const auto &scene : document().scenes()) {
+          ImGui::PushID(std::to_string(scene.key.id).c_str());
+          const auto name = scene.name.empty() ? "Scene " + std::to_string(scene.key.id) : scene.name;
+          if (ImGui::MenuItem(name.c_str(), nullptr, document().scene_id() == scene.key.id))
+            try { document().set_scene(scene.key.id); }
+            catch (const std::exception &e) { error_ = e.what(); }
+          ImGui::PopID();
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::MenuItem("Workspace", nullptr, ui().page == 6)) ui().page = 6;
+      ui::end_popup();
+    }
+  }
+  void session_bar() {
+    ImGui::SetCursorPosY(ui_pixels(ui::menu_height_dp));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ui_pixels(16), 0});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0, 0});
+    ImGui::BeginChild("Session bar", {0, ui_pixels(ui::documents_height_dp)},
+        ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+    float modes_width = ui_pixels(41 + 39 + 4) + ImGui::CalcTextSize("Scene").x + ImGui::CalcTextSize("More").x;
+#ifdef PVD_VIEWER_HAS_ANALYSIS
+    modes_width += ui_pixels(41 + 4) + ImGui::CalcTextSize("Analysis    ").x;
+#endif
+    const auto width = ImGui::GetContentRegionAvail().x;
+    ImGui::BeginChild("Recording tabs", {std::max(ui_pixels(120), width - modes_width), ui_pixels(42)},
+                      ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    draw_workspace_tabs(workspace_, workspace_actions());
+    ImGui::EndChild();
+    ImGui::SetCursorPos({ImGui::GetWindowWidth() - modes_width - ui_pixels(16), ui_pixels(6)});
+    workspace_modes();
+    const auto pos = ImGui::GetWindowPos(), size = ImGui::GetWindowSize();
+    ImGui::GetWindowDrawList()->AddLine({pos.x, pos.y + size.y - 1}, {pos.x + size.x, pos.y + size.y - 1},
+                                      ImGui::GetColorU32(ImGuiCol_Border));
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+  }
   void draw() {
     const UiPixelScope pixel_scope(ui_scale_->current().screen_scale);
+    layout_smoke_drawer_visible_ = false;
     try{shortcuts();}
     catch(const std::exception &e) {
       if(smoke_mode())throw;
@@ -2882,198 +3086,106 @@ private:
     const auto *main = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(main->Pos);
     ImGui::SetNextWindowSize(main->Size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
     ImGui::Begin("PVD Studio##root", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::TextColored({.28f, .86f, .75f, 1}, "PVD");
-    ImGui::SameLine();
-    ImGui::TextUnformatted("STUDIO");
-    ImGui::SameLine(ui_pixels(150));
-    if (ImGui::Button("Open  Ctrl+O"))
-      choose_file();
+                     ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    menu_bar();
 #ifdef PVD_VIEWER_HAS_TRANSPORT
-    ImGui::SameLine();
-    if (ImGui::Button("Live capture"))
-      capture_setup_requested_ = true;
     capture_setup();
 #endif
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!document().loaded());
-    if (ImGui::Button("Save / crop")) {
-      export_popup_requested_ = true;
-      export_popup_slot_ = active_slot().id();
-    }
-    ImGui::EndDisabled();
-#ifdef PVD_VIEWER_HAS_REPX
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!document().loaded());
-    if (ImGui::Button("Export RepX")) {
-      repx_popup_requested_ = true;
-      repx_popup_slot_ = active_slot().id();
-    }
-    ImGui::EndDisabled();
-#endif
-    ImGui::SameLine();
-    if (ImGui::Button("Workspace"))
-      ImGui::OpenPopup("Workspace menu");
-    if (ImGui::BeginPopup("Workspace menu")) {
-      if (ImGui::MenuItem("Manage tabs and bookmarks"))
-        ui().page = 6;
-      if (ImGui::MenuItem("New empty tab"))
-        try {
-          auto id = workspace_.create_empty();
-          activate_slot(id);
-        } catch (const std::exception &e) {
-          error_ = e.what();
-        }
-      ImGui::BeginDisabled(active_slot().lock_reason().has_value());
-      if (ImGui::MenuItem("Replace active source..."))
-        choose_file(active_slot().id());
-      if (ImGui::MenuItem("Close active tab"))
-        close_slot(active_slot().id());
-      ImGui::EndDisabled();
-      ImGui::Separator();
-      if (ImGui::MenuItem("Save workspace..."))
-        save_workspace();
-      ImGui::BeginDisabled(workspace_.any_locked());
-      if (ImGui::MenuItem("Load workspace..."))
-        load_workspace();
-      ImGui::EndDisabled();
-      if (ImGui::MenuItem("Reset layout"))
-        reset_layout();
-      if (ImGui::MenuItem("Help / shortcuts", "F1"))
-        help_requested_ = true;
-      ImGui::EndPopup();
-    }
     help_popup();
     export_popup();
 #ifdef PVD_VIEWER_HAS_REPX
     repx_popup();
 #endif
-    ImGui::Separator();
-    draw_workspace_tabs(workspace_, workspace_actions());
-    load_bar();
-    if (export_status_visible_) {
-      draw_export_progress(export_job_, true);
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Export details")) {
-        export_popup_slot_ = last_export_slot_id_;
-        export_popup_requested_ = true;
-      }
-      if (!export_job_.running()) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Dismiss export"))
-          export_status_visible_ = false;
-      }
-      ImGui::Separator();
+    session_bar();
+    // Task details no longer add rows above the scene while work is running.
+    if (options_.scene_first_smoke) activity_popup_id_ = ImGui::GetID("Activity");
+    if (activity_popup_requested_) {
+      ImGui::OpenPopup("Activity");
+      activity_popup_requested_ = false;
     }
+    ImGui::SetNextWindowSizeConstraints({ui_pixels(480), 0},
+        {std::max(ui_pixels(480), main->Size.x - ui_pixels(40)), main->Size.y - ui_pixels(100)});
+    if (ui::begin_popup("Activity")) {
+      ImGui::TextUnformatted("ACTIVITY");
+      load_bar();
+      if (export_status_visible_) {
+        draw_export_progress(export_job_, true);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export details")) {
+          export_popup_slot_ = last_export_slot_id_;
+          export_popup_requested_ = true;
+        }
+        if (!export_job_.running()) {
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Dismiss export"))
+            export_status_visible_ = false;
+        }
+        ImGui::Separator();
+      }
 #ifdef PVD_VIEWER_HAS_REPX
-    if (repx_status_visible_) {
-      draw_repx_progress(repx_job_, true);
-      const auto repx_status = repx_job_.status();
-      if (repx_status.stage == RepxStage::completed && !repx_status.complete) {
+      if (repx_status_visible_) {
+        draw_repx_progress(repx_job_, true);
+        const auto repx_status = repx_job_.status();
+        if (repx_status.stage == RepxStage::completed && !repx_status.complete) {
+          ImGui::SameLine();
+          ImGui::TextColored({1, .7f, .35f, 1},
+                             "Partial collection / %zu diagnostics",
+                             repx_status.diagnostics.size());
+        }
         ImGui::SameLine();
-        ImGui::TextColored({1, .7f, .35f, 1},
-                           "Partial collection / %zu diagnostics",
-                           repx_status.diagnostics.size());
+        if (ImGui::SmallButton("RepX details"))
+          repx_popup_requested_ = true;
+        if (!repx_job_.running()) {
+          ImGui::SameLine();
+          if (ImGui::SmallButton("Dismiss RepX"))
+            repx_status_visible_ = false;
+        }
+        ImGui::Separator();
       }
-      ImGui::SameLine();
-      if (ImGui::SmallButton("RepX details"))
-        repx_popup_requested_ = true;
-      if (!repx_job_.running()) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Dismiss RepX"))
-          repx_status_visible_ = false;
-      }
-      ImGui::Separator();
-    }
 #endif
 #ifdef PVD_VIEWER_HAS_TRANSPORT
-    capture_bar();
+      capture_bar();
 #endif
-    if (!error_.empty()) {
-      ImGui::TextColored({1, .57f, .42f, 1}, "Error");
-      ImGui::SameLine();
-      ImGui::TextWrapped("%s", error_.c_str());
-      if (ImGui::SmallButton("Dismiss error"))
-        error_.clear();
-    }
-    if (!notice_.empty()) {
-      ImGui::TextWrapped("%s", notice_.c_str());
-      ImGui::SameLine();
-      if (ImGui::SmallButton("Dismiss notice"))
-        notice_.clear();
+      if (!error_.empty()) {
+        ImGui::TextColored({1, .57f, .42f, 1}, "Error");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", error_.c_str());
+        if (ImGui::SmallButton("Dismiss error"))
+          error_.clear();
+      }
+      if (!notice_.empty()) {
+        ImGui::TextWrapped("%s", notice_.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Dismiss notice"))
+          notice_.clear();
+      }
+      ui::end_popup();
     }
     const auto scope = std::to_string(active_slot().id());
     ImGui::PushID(scope.c_str());
-    if (ImGui::BeginTabBar("Workspace views")) {
-      const int requested = ui().page;
-      std::optional<int> clicked;
-      auto tab = [&](const char *name, int page) {
-        const auto flags =
-            (requested == page && requested != ui().synchronized_page)
-                ? ImGuiTabItemFlags_SetSelected
-                : ImGuiTabItemFlags_None;
-        const bool shown = ImGui::BeginTabItem(name, nullptr, flags);
-        if (ImGui::IsItemClicked())
-          clicked = page;
-        if (shown)
-          ImGui::EndTabItem();
-      };
-      tab("Scene", 0);
-#ifdef PVD_VIEWER_HAS_ANALYSIS
-      tab("Profiler", 1);
-      tab("Memory", 2);
-      tab("Errors", 3);
-      tab("Curves", 4);
-      tab("Frame diff", 5);
-      tab("Event curves", 7);
-#endif
-      tab("Deformables", 8);
-      tab("Scene queries", 9);
-      tab("Clips", 10);
-      tab("Workspace", 6);
-      ImGui::EndTabBar();
-      ui().synchronized_page = requested;
-      if (clicked)
-        ui().page = *clicked;
-    }
-    const float timeline_height = ui_pixels(130), status_height = ui_pixels(24);
+    const float body_top = ui_pixels(ui::menu_height_dp + ui::documents_height_dp);
+    ImGui::SetCursorPosY(body_top);
+    const float timeline_height = ui_pixels(96), status_height = ui_pixels(28);
     const float body_height =
         std::max(ui_pixels(100), ImGui::GetContentRegionAvail().y - timeline_height -
-                            status_height - ui_pixels(16));
+                            status_height);
     const auto table_id =
         "workspace-layout-" + std::to_string(layout_generation_) + "-" +
         std::to_string(ui_scale_->current().screen_scale);
-    if (ui().page == 0 &&
-        ImGui::BeginTable(table_id.c_str(), 3,
-                          ImGuiTableFlags_Resizable |
-                              ImGuiTableFlags_SizingStretchProp)) {
-      ImGui::TableSetupColumn("Hierarchy", ImGuiTableColumnFlags_WidthFixed,
-                              ui_pixels(246));
-      ImGui::TableSetupColumn("Viewport", ImGuiTableColumnFlags_WidthStretch);
-      ImGui::TableSetupColumn("Inspector", ImGuiTableColumnFlags_WidthFixed,
-                              ui_pixels(310));
-      ImGui::TableNextRow();
-      ImGui::TableNextColumn();
-      ImGui::BeginChild("Hierarchy", {0, body_height}, ImGuiChildFlags_Borders);
-      drawHierarchy(document(), ui().panels);
-      ImGui::EndChild();
-      ImGui::TableNextColumn();
-      ImGui::BeginChild("Scene", {0, body_height}, ImGuiChildFlags_Borders,
+    if (ui().page == 0) {
+      ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.063f, 0.094f, 0.125f, 1});
+      ImGui::BeginChild("Scene", {0, body_height}, ImGuiChildFlags_None,
                         ImGuiWindowFlags_NoScrollbar |
                             ImGuiWindowFlags_NoScrollWithMouse);
       viewport();
       ImGui::EndChild();
-      ImGui::TableNextColumn();
-      ImGui::BeginChild("Inspector", {0, body_height}, ImGuiChildFlags_Borders);
-      if (ui().diagnostics)
-        drawDiagnostics(document(), ui().panels);
-      else
-        drawInspector(document(), ui().panels);
-      ImGui::EndChild();
-      ImGui::EndTable();
+      ImGui::PopStyleColor();
     }
     if (ui().page == 8 || ui().page == 9) {
       const auto native_table=(ui().page==8?"Deformable layout-":"Query layout-")+table_id;
@@ -3128,115 +3240,352 @@ private:
       ImGui::EndChild();
     }
 #endif
-    ImGui::BeginChild("Timeline", {0, timeline_height},
-                      ImGuiChildFlags_Borders);
+    ImGui::SetCursorPosY(body_top + body_height);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ui_pixels(16), ui_pixels(8)});
+    ImGui::BeginChild("Timeline", {0, timeline_height}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar);
+    const auto timeline_pos = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddLine(timeline_pos,
+        {timeline_pos.x + ImGui::GetWindowWidth(), timeline_pos.y}, ImGui::GetColorU32(ImGuiCol_Border));
     drawTimeline(document(), ui().panels);
     ImGui::EndChild();
-    const auto frame = document().frame();
-    const auto stats = renderer_->stats();
-    if (document().loaded() && frame) {
-      if (ui().page == 0)
-        ImGui::TextDisabled("%zu shapes | %llu triangles | %zu GPU meshes",
-                            frame->draws.size(),
-                            static_cast<unsigned long long>(stats.triangles),
-                            stats.cached_meshes);
-      else
-        ImGui::TextDisabled("%zu shapes | %zu frames", frame->draws.size(),
-                            document().timeline().size());
-    } else
-      ImGui::TextDisabled("Ready / Open or drop a PhysX raw capture");
-    ImGui::SameLine(std::max(ui_pixels(500), ImGui::GetWindowWidth() - ui_pixels(310)));
-    ImGui::TextDisabled("D3D11 %s", using_warp_ ? "WARP" : "GPU");
-    ImGui::SameLine();
-    ImGui::Checkbox("Diagnostics", &ui().diagnostics);
+    ImGui::PopStyleVar();
     store_preferences(active_slot().id());
     ImGui::PopID();
+    const auto frame = document().frame();
+    const auto stats = renderer_->stats();
+    ImGui::SetCursorPosY(body_top + body_height + timeline_height);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ui_pixels(16), ui_pixels(5)});
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {ui_pixels(5), ui_pixels(2)});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    ImGui::PushStyleColor(ImGuiCol_Button, {0, 0, 0, 0});
+    ImGui::BeginChild("Status", {0, status_height}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                      ImGuiWindowFlags_NoScrollbar);
+    std::string activity = "Ready";
+    if (load_job_.running()) activity = load_stage_name(load_job_.status().stage);
+    else if (bind_slot_) activity = "Associating capture";
+    else if (export_job_.running()) activity = "Exporting capture";
+#ifdef PVD_VIEWER_HAS_REPX
+    else if (repx_job_.running()) activity = "Exporting RepX";
+#endif
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+    else if (live_.status().state != pvd::CaptureState::idle)
+      activity = std::string("Live: ") + pvd::capture_state_name(live_.status().state);
+#endif
+    bool failed = !error_.empty();
+    if (load_status_visible_ && load_job_.status().stage == LoadStage::failed) {
+      activity = "Load failed - details";
+      failed = true;
+    }
+    if (export_status_visible_ && export_job_.status().stage == ExportStage::failed) {
+      activity = "Export failed - details";
+      failed = true;
+    }
+#ifdef PVD_VIEWER_HAS_TRANSPORT
+    if (live_.status().state == pvd::CaptureState::failed ||
+        live_.status().state == pvd::CaptureState::truncated)
+      failed = true;
+#endif
+#ifdef PVD_VIEWER_HAS_REPX
+    if (repx_status_visible_) {
+      const auto status = repx_job_.status();
+      if (status.stage == RepxStage::failed) {
+        activity = "RepX failed - details";
+        failed = true;
+      } else if (status.stage == RepxStage::completed && !status.complete) {
+        activity = "Partial RepX - diagnostics";
+        failed = true;
+      } else if (!repx_job_.running()) activity = "RepX / Activity";
+    }
+#endif
+    if (!error_.empty()) activity = "Error - details";
+    else if (!notice_.empty()) activity = "Notice - details";
+    else if (load_status_visible_ || export_status_visible_)
+      activity += " / Activity";
+    const auto status_start = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddCircleFilled(
+        {status_start.x + ui_pixels(3), status_start.y + ui_pixels(7)}, ui_pixels(3),
+        ImGui::GetColorU32(failed ? ImVec4{1, .57f, .42f, 1} : ImVec4{.34f, .82f, .73f, 1}));
+    ImGui::Dummy({ui_pixels(7), ImGui::GetTextLineHeight()});
+    ImGui::SameLine(0, ui_pixels(5));
+    if (failed) ImGui::PushStyleColor(ImGuiCol_Text, {1, .57f, .42f, 1});
+    if (ImGui::SmallButton((activity + "###activity").c_str()))
+      activity_popup_requested_ = true;
+    if (options_.scene_first_smoke) {
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      activity_button_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+    }
+    if (failed) ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Tasks, live capture, notifications and errors");
+    ImGui::SameLine();
+    if (document().loaded() && frame) {
+      ImGui::TextDisabled("%zu shapes    %zu frames", frame->draws.size(), document().timeline().size());
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("%llu triangles / %zu GPU meshes",
+          static_cast<unsigned long long>(stats.triangles), stats.cached_meshes);
+    } else
+      ImGui::TextDisabled("Ready / Open or drop a PhysX raw capture");
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + ui_pixels(16),
+                           ImGui::GetWindowWidth() - ui_pixels(160)));
+    ImGui::TextDisabled("D3D11 %s", using_warp_ ? "WARP" : "GPU");
+    ImGui::EndChild();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
     ImGui::End();
   }
+  bool sidebar_button(const char *label, SlotUiState::Sidebar sidebar) {
+    const bool selected = ui().sidebar == sidebar;
+    const bool clicked = ui::icon_button(label,
+        sidebar == SlotUiState::Sidebar::objects ? ui::Icon::panel_left : ui::Icon::panel_right,
+        sidebar == SlotUiState::Sidebar::objects ? "Scene objects" : "Object properties", selected);
+    if (options_.scene_first_smoke) {
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      const ImVec2 center{(min.x + max.x) / 2, (min.y + max.y) / 2};
+      if (sidebar == SlotUiState::Sidebar::objects) objects_button_center_ = center;
+      if (sidebar == SlotUiState::Sidebar::properties) properties_button_center_ = center;
+    }
+    if (clicked) ui().sidebar = selected ? SlotUiState::Sidebar::none : sidebar;
+    return clicked;
+  }
+  bool scene_drawer_contains(ImVec2 point) const {
+    return point.x >= scene_drawer_min_.x && point.y >= scene_drawer_min_.y &&
+           point.x < scene_drawer_max_.x && point.y < scene_drawer_max_.y;
+  }
+  void position_scene_drawer() {
+    const float width = std::min(ui_pixels(ui().sidebar == SlotUiState::Sidebar::objects ? 224.f : 280.f),
+                                 std::max(ui_pixels(120), viewport_size_.x - ui_pixels(24)));
+    scene_drawer_min_ = {viewport_origin_.x + ui_pixels(12), viewport_origin_.y + ui_pixels(8)};
+    if (ui().sidebar != SlotUiState::Sidebar::objects)
+      scene_drawer_min_.x = viewport_origin_.x + viewport_size_.x - width - ui_pixels(12);
+    scene_drawer_max_ = {scene_drawer_min_.x + width,
+                         viewport_origin_.y + viewport_size_.y - ui_pixels(12)};
+  }
+  void scene_drawer() {
+    if (ui().page != 0 || ui().sidebar == SlotUiState::Sidebar::none)
+      return;
+    const auto cursor = ImGui::GetCursorScreenPos();
+    ImGui::SetCursorScreenPos(scene_drawer_min_);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, {0.090f, 0.118f, 0.149f, 1});
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, ui_pixels(5));
+    const ImVec2 size{scene_drawer_max_.x - scene_drawer_min_.x,
+                      scene_drawer_max_.y - scene_drawer_min_.y};
+    const bool objects = ui().sidebar == SlotUiState::Sidebar::objects;
+    const bool diagnostics = ui().sidebar == SlotUiState::Sidebar::diagnostics;
+    if (ImGui::BeginChild(objects ? "Objects drawer" : "Properties drawer", size,
+                          ImGuiChildFlags_Borders)) {
+      ImGui::TextUnformatted(objects ? "Scene objects" : diagnostics ? "Diagnostics" : "Object properties");
+      ImGui::SameLine(std::max(ImGui::GetCursorPosX(), size.x - ui_pixels(54)));
+      const bool close = ui::icon_button("X##close-drawer", ui::Icon::close, "Close / Escape", false, 24);
+      if (options_.scene_first_smoke) {
+        const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+        drawer_close_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+      }
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close drawer / Escape");
+      ImGui::Separator();
+      if (ImGui::BeginChild("Drawer content", {0, 0})) {
+        if (options_.scene_first_smoke && !objects && !diagnostics)
+          inspector_test_window_ = ImGui::GetCurrentWindow();
+        if (objects) drawHierarchy(document(), ui().panels);
+        else if (diagnostics) drawDiagnostics(document(), ui().panels);
+        else drawInspector(document(), ui().panels);
+        if (options_.scene_first_smoke)
+          layout_smoke_drawer_visible_ = ImGui::GetWindowDrawList()->VtxBuffer.Size > 0;
+      }
+      ImGui::EndChild();
+      if (close) ui().sidebar = SlotUiState::Sidebar::none;
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor();
+    ImGui::SetCursorScreenPos(cursor);
+  }
   void viewport() {
-    ImGui::TextUnformatted("SCENE");
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Fit  F")) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {ui_pixels(10), ui_pixels(7)});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {ui_pixels(4), 0});
+    ImGui::BeginChild("Viewport toolbar", {0, ui_pixels(ui::viewport_bar_height_dp)},
+        ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+    if (ui().page == 0) {
+      sidebar_button("Objects", SlotUiState::Sidebar::objects);
+      ImGui::SameLine();
+    }
+    {
+      std::string scene_name = "Select scene";
+      const auto label = [](const SceneInfo &scene) {
+        return scene.name.empty() ? "Scene " + std::to_string(scene.key.id) : scene.name;
+      };
+      const auto &scenes = document().scenes();
+      for (std::size_t i = 0; i < scenes.size(); ++i)
+        if (document().scene_id() == scenes[i].key.id)
+          scene_name = "Scene " + std::to_string(i) + " / Perspective";
+      ImGui::SetNextItemWidth(ui_pixels(ui().page == 0 ? 190.f : 150.f));
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, {0, 0, 0, 0});
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {ui_pixels(4), ui_pixels(7)});
+      if (ui::begin_combo("##viewport-scene", scene_name.c_str(), ImGuiComboFlags_NoArrowButton)) {
+        for (const auto &scene : document().scenes()) {
+          ImGui::PushID(std::to_string(scene.key.id).c_str());
+          if (ImGui::Selectable(label(scene).c_str(), document().scene_id() == scene.key.id))
+            try { document().set_scene(scene.key.id); }
+            catch (const std::exception &e) { error_ = e.what(); }
+          ImGui::PopID();
+        }
+        ui::end_combo();
+      }
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor();
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Recorded scene / %s", scene_name.c_str());
+      const float tools_width = ui_pixels(82 + 4 + 10) +
+          ImGui::CalcTextSize("Fit").x + ImGui::CalcTextSize("Display").x +
+          (ui().page == 0 ? ui_pixels(34) : 0.f);
+      ImGui::SameLine(std::max(ImGui::GetCursorPosX() + ui_pixels(16), ImGui::GetWindowWidth() - tools_width));
+    }
+    if (ui::labeled_button("Fit  F", ui::Icon::focus, "Fit")) {
       stopTracking(ui().scene_tools);
       set_fitted(document().fit_scene(
           camera(), viewport_size_.x / std::max(1.f, viewport_size_.y)));
     }
     ImGui::SameLine();
-    if (ImGui::SmallButton("View..."))
-      ImGui::OpenPopup("Scene view tools");
+    if (ui::labeled_button("Display", ui::Icon::sliders, "Display")) {
+      ui::anchor_popup_to_item();
+      ImGui::OpenPopup("Scene display layers");
+    }
+    if (options_.scene_first_smoke) {
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      display_menu_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+      display_menu_popup_ = ImGui::GetID("Scene display layers");
+      view_settings_popup_ = ImGui::GetID("Scene view tools");
+    }
+    if (ui::begin_popup("Scene display layers")) {
+      ImGui::TextDisabled("COMMON LAYERS");
+      ImGui::Checkbox("Grid", &ui().render_options.show_grid);
+      ImGui::Checkbox("Wireframe", &ui().render_options.show_wireframe);
+      ImGui::Checkbox("Contacts", &ui().render_options.show_contacts);
+      ImGui::Separator();
+      if (ImGui::MenuItem("Display and camera settings...", "Ctrl+Shift+S"))
+        ui().view_popup_requested = true;
+      if (ImGui::MenuItem("Diagnostics")) {
+        ui().page = 0;
+        ui().sidebar = SlotUiState::Sidebar::diagnostics;
+      }
+      ui::end_popup();
+    }
+    if (ui().page == 0) {
+      ImGui::SameLine();
+      sidebar_button("Properties", SlotUiState::Sidebar::properties);
+    }
     if(ui().view_popup_requested) {
       ImGui::OpenPopup("Scene view tools");ui().view_popup_requested=false;
     }
-    ImGui::SetNextWindowSize({ui_pixels(520), 0}, ImGuiCond_Appearing);
+    const auto *settings_viewport = ImGui::GetMainViewport();
+    const float settings_height = std::min(ui_pixels(540), settings_viewport->Size.y - ui_pixels(80));
+    ImGui::SetNextWindowPos(
+        {settings_viewport->WorkPos.x + settings_viewport->WorkSize.x - ui_pixels(16),
+         std::min(ImGui::GetWindowPos().y + ui_pixels(ui::viewport_bar_height_dp + 8),
+             settings_viewport->WorkPos.y + settings_viewport->WorkSize.y - settings_height - ui_pixels(16))},
+        ImGuiCond_Appearing, {1, 0});
+    ImGui::SetNextWindowSize({ui_pixels(600), settings_height});
     ImGui::SetNextWindowSizeConstraints(
-        {ui_pixels(380), ui_pixels(180)},
-        {ui_pixels(620), std::max(ui_pixels(250), ImGui::GetMainViewport()->Size.y - ui_pixels(80))});
-    if (ImGui::BeginPopup("Scene view tools")) {
-      if(ImGui::Button("Restore built-in preferences")) {
+        {ui_pixels(480), ui_pixels(240)},
+        {ui_pixels(680), std::max(ui_pixels(250), ImGui::GetMainViewport()->Size.y - ui_pixels(80))});
+    if (ui::begin_popup("Scene view tools", ImGuiWindowFlags_NoScrollbar)) {
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted("View settings");
+      ImGui::SameLine(ImGui::GetWindowWidth() - ui_pixels(143));
+      if (ui::labeled_button("Restore built-in preferences", ui::Icon::settings, "Defaults")) {
         try{restore_default_preferences();}
         catch(const std::exception &e){ui().display.error=e.what();}
       }
-      ImGui::TextWrapped("Changes are saved as defaults for new captures. Matching saved source views take precedence.");
+      ImGui::TextDisabled("Source-specific views take priority over saved defaults.");
       ImGui::Separator();
-      ui().scene_tools.viewport_aspect =
-          viewport_size_.x / std::max(1.f, viewport_size_.y);
-      drawSceneTools(document(), camera(), ui().scene_tools);
-      if(ui().scene_tools.recorded_follow.enabled)set_fitted(true);
-      ImGui::Separator();
-      if (drawCameraControls(document(),camera(),ui().navigation,ui().camera_panel))
-        set_fitted(true);
-      ImGui::Separator();
-      ui().display.viewport_aspect = viewport_size_.x / std::max(1.f, viewport_size_.y);
-      drawDisplaySettings(document(), camera(), ui().render_options,
-                          renderer_->stats(), ui().display);
-      ImGui::Separator();
-      ImGui::TextUnformatted("RENDER LAYERS");
-      auto &options = ui().render_options;
-      ImGui::Checkbox("Grid", &options.show_grid);
-      ImGui::SameLine();
-      ImGui::Checkbox("Axes", &options.show_axes);
-      ImGui::SameLine();
-      ImGui::Checkbox("Solid shapes", &options.show_solids);
-      ImGui::Checkbox("Wireframe", &options.show_wireframe);
-      ImGui::SameLine();
-      ImGui::Checkbox("Contacts", &options.show_contacts);
-      ImGui::Checkbox("Debug points", &options.show_debug_points);
-      ImGui::SameLine();
-      ImGui::Checkbox("Debug lines", &options.show_debug_lines);
-      ImGui::Checkbox("Debug triangles", &options.show_debug_triangles);
-      ImGui::SameLine();
-      ImGui::Checkbox("Debug text", &ui().show_debug_text);
-      const auto &overlays = renderer_->body_overlays();
-      if (!overlays.complete) {
-        ImGui::Separator();
-        ImGui::TextColored({1,.7f,.35f,1}, "Body overlay diagnostics (%zu retained)",
-                           overlays.diagnostics.size());
-        for (const auto &diagnostic : overlays.diagnostics)
-          ImGui::TextWrapped("Actor %llu:%llu / %s: %s",
-              static_cast<unsigned long long>(diagnostic.source.key.actor.id),
-              static_cast<unsigned long long>(diagnostic.source.key.actor.generation),
-              diagnostic.property.c_str(), diagnostic.message.c_str());
+      bool changed_page = false;
+      const char *pages[] = {"Scene", "Camera", "Display", "Layers"};
+      for (int page = 0; page != 4; ++page) {
+        if (page) ImGui::SameLine(0, ui_pixels(6));
+        const bool selected = ui().view_settings_page == page;
+        ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImGui::GetStyleColorVec4(ImGuiCol_Header) : ImVec4{0,0,0,0});
+        if (selected) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        if (ImGui::Button(pages[page], {ui_pixels(100), ui_pixels(30)})) {
+          ui().view_settings_page = page;
+          changed_page = true;
+        }
+        if (selected) ImGui::PopStyleColor();
+        ImGui::PopStyleColor();
       }
-      const auto &frames=renderer_->coordinate_frames();
-      if(!frames.complete) {
-        ImGui::TextColored({1,.7f,.35f,1},"Coordinate frame diagnostics (%zu retained)",frames.diagnostics.size());
-        for(const auto &diagnostic:frames.diagnostics)
-          ImGui::TextWrapped("%s: %s",diagnostic.property.c_str(),diagnostic.message.c_str());
+      ImGui::Separator();
+      if (ImGui::BeginChild("Settings content", {0, 0}, ImGuiChildFlags_None,
+                             ImGuiWindowFlags_NoBackground)) {
+        if (changed_page) ImGui::SetScrollY(0);
+        if (ui().view_settings_page == 0) {
+        ui().scene_tools.viewport_aspect =
+            viewport_size_.x / std::max(1.f, viewport_size_.y);
+        drawSceneTools(document(), camera(), ui().scene_tools);
+        if(ui().scene_tools.recorded_follow.enabled)set_fitted(true);
+        }
+        if (ui().view_settings_page == 1) {
+        if (drawCameraControls(document(),camera(),ui().navigation,ui().camera_panel))
+          set_fitted(true);
+        }
+        if (ui().view_settings_page == 2) {
+        ui().display.viewport_aspect = viewport_size_.x / std::max(1.f, viewport_size_.y);
+        drawDisplaySettings(document(), camera(), ui().render_options,
+                            renderer_->stats(), ui().display);
+        }
+        if (ui().view_settings_page == 3) {
+        ImGui::TextDisabled("Render layers");
+        auto &options = ui().render_options;
+        ImGui::Checkbox("Grid", &options.show_grid);
+        ImGui::SameLine();
+        ImGui::Checkbox("Axes", &options.show_axes);
+        ImGui::SameLine();
+        ImGui::Checkbox("Solid shapes", &options.show_solids);
+        ImGui::Checkbox("Wireframe", &options.show_wireframe);
+        ImGui::SameLine();
+        ImGui::Checkbox("Contacts", &options.show_contacts);
+        ImGui::Checkbox("Debug points", &options.show_debug_points);
+        ImGui::SameLine();
+        ImGui::Checkbox("Debug lines", &options.show_debug_lines);
+        ImGui::Checkbox("Debug triangles", &options.show_debug_triangles);
+        ImGui::SameLine();
+        ImGui::Checkbox("Debug text", &ui().show_debug_text);
+        const auto &overlays = renderer_->body_overlays();
+        if (!overlays.complete) {
+          ImGui::Separator();
+          ImGui::TextColored({1,.7f,.35f,1}, "Body overlay diagnostics (%zu retained)",
+                             overlays.diagnostics.size());
+          for (const auto &diagnostic : overlays.diagnostics)
+            ImGui::TextWrapped("Actor %llu:%llu / %s: %s",
+                static_cast<unsigned long long>(diagnostic.source.key.actor.id),
+                static_cast<unsigned long long>(diagnostic.source.key.actor.generation),
+                diagnostic.property.c_str(), diagnostic.message.c_str());
+        }
+        const auto &frames=renderer_->coordinate_frames();
+        if(!frames.complete) {
+          ImGui::TextColored({1,.7f,.35f,1},"Coordinate frame diagnostics (%zu retained)",frames.diagnostics.size());
+          for(const auto &diagnostic:frames.diagnostics)
+            ImGui::TextWrapped("%s: %s",diagnostic.property.c_str(),diagnostic.message.c_str());
+        }
+        }
       }
-      ImGui::EndPopup();
+      ImGui::EndChild();
+      ui::end_popup();
     }
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::SetCursorPosY(ui_pixels(ui::viewport_bar_height_dp));
     const auto frame = document().frame();
     if (!document().loaded() || !frame) {
+      viewport_origin_ = ImGui::GetCursorScreenPos();
+      viewport_size_ = ImGui::GetContentRegionAvail();
+      position_scene_drawer();
       ImGui::Dummy({0, ImGui::GetContentRegionAvail().y * 0.32f});
       drawEmptyState("Inspect your simulation",
                      "Open a PhysX 3.4 raw capture to explore geometry, frames "
                      "and object properties.");
       if (ImGui::Button("Open capture..."))
         choose_file();
+      scene_drawer();
       return;
     }
     viewport_size_ = ImGui::GetContentRegionAvail();
-    viewport_size_.y = std::max(1.0f, viewport_size_.y - ui_pixels(25));
+    viewport_size_.y = std::max(1.0f, viewport_size_.y - ui_pixels(24));
     viewport_size_.x = std::max(1.0f, viewport_size_.x);
     ui().displayed_scene = document().scene_id();
     if (!fitted()) {
@@ -3257,12 +3606,49 @@ private:
     renderer_->resize(static_cast<UINT>(viewport_size_.x),
                       static_cast<UINT>(viewport_size_.y));
     viewport_origin_ = ImGui::GetCursorScreenPos();
-    ImGui::InvisibleButton("Scene interaction", viewport_size_,
+    const bool drawer_open = ui().page == 0 && ui().sidebar != SlotUiState::Sidebar::none;
+    const auto &io = ImGui::GetIO();
+    position_scene_drawer();
+    // Exclude overlays before submitting the canvas item, including the first
+    // frame a drawer opens. Otherwise a click/scroll could also reach the scene.
+    const bool over_drawer = drawer_open && scene_drawer_contains(io.MousePos);
+    const bool selection_chip = ui().page == 0 && document().selected_key().has_value();
+    const auto selected_key = document().selected_key();
+    std::string selection_name;
+    if (selected_key)
+      if (const auto *actor = frame->snapshot.instance(selected_key->actor.id);
+          actor && actor->generation == selected_key->actor.generation) {
+        for (const char *field : {"Name", "name"})
+          if (const auto *value = actor->property(field))
+            if (const auto name = value->as_string(); name && !name->empty()) {
+              selection_name = *name;
+              break;
+            }
+        if (selection_name.empty()) selection_name = actor->class_name.name;
+      }
+    if (selection_name.empty()) selection_name = "Actor";
+    const float chip_limit = std::min(viewport_size_.x - ui_pixels(24), ui_pixels(300));
+    if (ImGui::CalcTextSize(selection_name.c_str()).x > chip_limit - ui_pixels(100)) {
+      const char *end = selection_name.c_str();
+      ImGui::GetFont()->CalcTextSizeA(ImGui::GetFontSize(), std::max(1.f, chip_limit - ui_pixels(120)),
+          0, selection_name.c_str(), nullptr, &end);
+      selection_name = std::string(selection_name.c_str(), end) + "...";
+    }
+    const std::string chip_label = selection_name + " / Selected";
+    const float chip_width = std::min(chip_limit, ImGui::CalcTextSize(chip_label.c_str()).x + ui_pixels(30));
+    const ImVec2 chip_min{viewport_origin_.x + ui_pixels(12),
+                          viewport_origin_.y + viewport_size_.y - ui_pixels(48)};
+    const bool over_chip = selection_chip && io.MousePos.x >= chip_min.x &&
+        io.MousePos.x <= chip_min.x + chip_width && io.MousePos.y >= chip_min.y &&
+        io.MousePos.y <= chip_min.y + ui_pixels(30);
+    if (over_drawer || over_chip)
+      ImGui::Dummy(viewport_size_);
+    else
+      ImGui::InvisibleButton("Scene interaction", viewport_size_,
                            ImGuiButtonFlags_MouseButtonLeft |
                                ImGuiButtonFlags_MouseButtonRight |
                                ImGuiButtonFlags_MouseButtonMiddle);
-    const bool hovered = ImGui::IsItemHovered();
-    const auto &io = ImGui::GetIO();
+    const bool hovered = ImGui::IsItemHovered() && !over_drawer && !over_chip;
     try {
       if(navigateCameraFromImGui(camera(),ui().navigation,hovered)) {
         notifyManualCameraInput(ui().scene_tools);set_fitted(true);
@@ -3272,7 +3658,7 @@ private:
       notifyManualCameraInput(ui().scene_tools);
       camera().zoom(io.MouseWheel);
     }
-    if (ImGui::IsItemActive()) {
+    if (ImGui::IsItemActive() && !over_drawer && !over_chip) {
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
           (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
         try {
@@ -3362,11 +3748,56 @@ private:
                                std::min<std::size_t>(text.text.size(), 4096));
       }
     draw_list->PopClipRect();
-    ImGui::TextDisabled("RMB look   MMB pan   Wheel zoom   WASD / Q E move   Shift 2x");
+    // Camera-relative orientation stays useful even when the world axes are
+    // outside the view; labels retain the recorded world-coordinate meaning.
+    const auto view = camera().view_matrix();
+    const ImVec2 axes_origin{viewport_origin_.x + viewport_size_.x - ui_pixels(40),
+                             viewport_origin_.y + viewport_size_.y - ui_pixels(38)};
+    for (int axis = 0; axis != 3; ++axis) {
+      const float mirror = camera().handedness == DisplayHandedness::left_handed ? -1.f : 1.f;
+      const ImVec2 tip{axes_origin.x + mirror * view.values[axis * 4] * ui_pixels(25),
+                       axes_origin.y - view.values[axis * 4 + 1] * ui_pixels(25)};
+      const auto color = ImGui::GetColorU32(axis == 1 ? ImGuiCol_CheckMark : ImGuiCol_TextDisabled);
+      draw_list->AddLine(axes_origin, tip, color, ui_pixels(1));
+      const char *axis_name = axis == 0 ? "X" : axis == 1 ? "Y" : "Z";
+      draw_list->AddText(ImGui::GetFont(), ui_pixels(11),
+          {tip.x + ui_pixels(3), tip.y - ui_pixels(6)}, color, axis_name);
+    }
+    if (selection_chip && document().selected_key()) {
+      const auto cursor = ImGui::GetCursorScreenPos();
+      ImGui::SetCursorScreenPos(chip_min);
+      ImGui::BeginDisabled(over_drawer);
+      ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ChildBg));
+      ImGui::PushStyleColor(ImGuiCol_Text, {0, 0, 0, 0});
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, ui_pixels(1));
+      if (ImGui::Button("Inspect selection", {chip_width, ui_pixels(28)})) ui().sidebar = SlotUiState::Sidebar::properties;
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(2);
+      draw_list->AddCircleFilled({chip_min.x + ui_pixels(10), chip_min.y + ui_pixels(14)},
+                                ui_pixels(3), ImGui::GetColorU32(ImGuiCol_CheckMark));
+      draw_list->AddText({chip_min.x + ui_pixels(20), chip_min.y + ui_pixels(7)},
+                         ImGui::GetColorU32(ImGuiCol_Text), chip_label.c_str());
+      if (options_.scene_first_smoke) {
+        const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+        selection_chip_center_ = {(min.x + max.x) / 2, (min.y + max.y) / 2};
+      }
+      ImGui::EndDisabled();
+      if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open properties for the current selection");
+      ImGui::SetCursorScreenPos(cursor);
+    }
+    const auto hint = ImGui::GetCursorScreenPos();
+    draw_list->AddText(ImGui::GetFont(), ui_pixels(12), {hint.x + ui_pixels(14), hint.y + ui_pixels(5)},
+        ImGui::GetColorU32(ImGuiCol_TextDisabled), "RMB look / MMB pan / Wheel zoom");
+    const float projection_width = ImGui::CalcTextSize("Perspective").x * 12.f / ui::font_size_dp;
+    draw_list->AddText(ImGui::GetFont(), ui_pixels(12),
+        {viewport_origin_.x + viewport_size_.x - projection_width - ui_pixels(14), hint.y + ui_pixels(5)},
+        ImGui::GetColorU32(ImGuiCol_TextDisabled), "Perspective");
+    ImGui::Dummy({0, ui_pixels(24)});
     if (!renderer_->body_overlays().complete)
       ImGui::GetWindowDrawList()->AddText(
           {viewport_origin_.x+8,viewport_origin_.y+8}, IM_COL32(255,185,85,255),
-          "Some body overlays unavailable; View... shows diagnostics.");
+          "Some body overlays unavailable; Display shows diagnostics.");
+    scene_drawer();
   }
   void screenshot() {
     ComPtr<ID3D11Texture2D> buffer;
@@ -3377,7 +3808,141 @@ private:
     saveTexturePng(device_.Get(), context_.Get(), buffer.Get(),
                    options_.screenshot);
   }
+  void layout_smoke_input() {
+    // Submit real ImGui pointer events after the native backend has polled the
+    // desktop. Coordinates come from the widgets submitted on the last frame.
+    auto &io = ImGui::GetIO();
+    io.ConfigInputTrickleEventQueue = false;
+    const auto click = [&](ImVec2 center, bool down) {
+      io.AddMousePosEvent(center.x, center.y);
+      io.AddMouseButtonEvent(ImGuiMouseButton_Left, down);
+    };
+    switch (host_frames_) {
+    case 6: click(objects_button_center_, true); break;
+    case 7: click(objects_button_center_, false); break;
+    case 8:
+      io.AddMousePosEvent((scene_drawer_min_.x + scene_drawer_max_.x) / 2,
+                          (scene_drawer_min_.y + scene_drawer_max_.y) / 2);
+      io.AddMouseWheelEvent(0, 1);
+      break;
+    case 9: click(properties_button_center_, true); break;
+    case 10: click(properties_button_center_, false); break;
+    case 11: click(drawer_close_center_, true); break;
+    case 12: click(drawer_close_center_, false); break;
+    case 13: click(objects_button_center_, true); break;
+    case 14: click(objects_button_center_, false); break;
+    case 15: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 16: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 17: click(selection_chip_center_, true); break;
+    case 18: click(selection_chip_center_, false); break;
+    case 19: click(drawer_close_center_, true); break;
+    case 20: click(drawer_close_center_, false); break;
+    case 21: click({viewport_origin_.x + viewport_size_.x - 4, viewport_origin_.y + 4}, true); break;
+    case 22: click({viewport_origin_.x + viewport_size_.x - 4, viewport_origin_.y + 4}, false); break;
+    case 24: click(file_menu_center_, true); break;
+    case 25: click(file_menu_center_, false); break;
+    case 27: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 28: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 29: click(more_menu_center_, true); break;
+    case 30: click(more_menu_center_, false); break;
+    case 32: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 33: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 34: click(activity_button_center_, true); break;
+    case 35: click(activity_button_center_, false); break;
+    case 37: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 38: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 39:
+      io.AddMousePosEvent(viewport_origin_.x + viewport_size_.x - 4, viewport_origin_.y + 4);
+      break;
+    case 40: click(display_menu_center_, true); break;
+    case 41: click(display_menu_center_, false); break;
+    case 46: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 47: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 48: click(properties_button_center_, true); break;
+    case 49: click(properties_button_center_, false); break;
+    case 53: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+    case 54: io.AddKeyEvent(ImGuiKey_Escape, false); break;
+    case 55: click(drawer_close_center_, true); break;
+    case 56: click(drawer_close_center_, false); break;
+    case 59:
+      io.AddMousePosEvent(viewport_origin_.x + viewport_size_.x - 4, viewport_origin_.y + 4);
+      break;
+    }
+  }
+  void layout_smoke_step() {
+    if (viewport_size_.x != layout_smoke_viewport_.x ||
+        viewport_size_.y != layout_smoke_viewport_.y)
+      throw std::runtime_error("Scene drawer resized the GPU viewport");
+    if (camera().distance != layout_smoke_camera_.distance ||
+        camera().yaw != layout_smoke_camera_.yaw || camera().pitch != layout_smoke_camera_.pitch)
+      throw std::runtime_error("Drawer input leaked into scene navigation");
+    if ((host_frames_ <= 21 || host_frames_ >= 24) && !document().selected_key()) {
+      if (!options_.screenshot.empty()) screenshot();
+      throw std::runtime_error("Popup / drawer interaction cleared the scene selection at frame " + std::to_string(host_frames_));
+    }
+    const auto sidebar = ui().sidebar;
+    if ((host_frames_ == 9 || host_frames_ == 15) &&
+        (sidebar != SlotUiState::Sidebar::objects || !layout_smoke_drawer_visible_)) {
+      if (!options_.screenshot.empty()) screenshot();
+      throw std::runtime_error("Objects toolbar button did not open a usable drawer: frame " +
+          std::to_string(host_frames_) + " sidebar " + std::to_string(static_cast<int>(sidebar)) +
+          " visible " + std::to_string(layout_smoke_drawer_visible_) +
+          " pointer " + std::to_string(ImGui::GetIO().MousePos.x) + "," + std::to_string(ImGui::GetIO().MousePos.y));
+    }
+    if ((host_frames_ == 11 || host_frames_ == 19 || host_frames_ == 55) && sidebar != SlotUiState::Sidebar::properties) {
+      if (!options_.screenshot.empty()) screenshot();
+      throw std::runtime_error("Properties / Inspect did not open the drawer: frame " +
+          std::to_string(host_frames_) + " sidebar " + std::to_string(static_cast<int>(sidebar)));
+    }
+    if ((host_frames_ == 13 || host_frames_ == 17) && sidebar != SlotUiState::Sidebar::none)
+      throw std::runtime_error("Close / Escape did not dismiss the scene drawer");
+    if ((host_frames_ == 9 || host_frames_ == 12) && !options_.screenshot.empty()) {
+      const auto original = options_.screenshot;
+      options_.screenshot = original.parent_path() / (original.stem().wstring() +
+          (host_frames_ == 9 ? L"-objects" : L"-properties") + original.extension().wstring());
+      screenshot();
+      options_.screenshot = original;
+    }
+    if (host_frames_ == 23) {
+      if (document().selected_key())
+        throw std::runtime_error("Clicking empty scene space did not clear selection");
+      document().select(*layout_smoke_selection_);
+    }
+    if (host_frames_ == 26 || host_frames_ == 31 || host_frames_ == 37) {
+      const auto &popups = ImGui::GetCurrentContext()->OpenPopupStack;
+      const ImGuiID expected = host_frames_ == 26 ? file_menu_popup_ :
+          host_frames_ == 31 ? more_menu_popup_ : activity_popup_id_;
+      if (popups.empty() || popups.back().PopupId != expected || !popups.back().Window)
+        throw std::runtime_error("Shell menu / Activity did not open in its owning window");
+    }
+    const auto popup_image = [&](const wchar_t *suffix) {
+      if (options_.screenshot.empty()) return;
+      const auto original = options_.screenshot;
+      options_.screenshot = original.parent_path() /
+          (original.stem().wstring() + suffix + original.extension().wstring());
+      screenshot();
+      options_.screenshot = original;
+    };
+    if (host_frames_ == 27) popup_image(L"-file-menu");
+    if (host_frames_ == 32) popup_image(L"-more-menu");
+    if (host_frames_ == 43 || host_frames_ == 46 || host_frames_ == 53) {
+      const auto &popups = ImGui::GetCurrentContext()->OpenPopupStack;
+      const ImGuiID expected = host_frames_ == 43 ? display_menu_popup_ :
+          host_frames_ == 46 ? view_settings_popup_ :
+          inspector_test_window_ ? inspector_test_window_->GetID("Inspector preferences") : 0;
+      if (popups.empty() || popups.back().PopupId != expected || !popups.back().Window)
+        throw std::runtime_error("Display / inspector popup did not open at frame " + std::to_string(host_frames_));
+      popup_image(host_frames_ == 43 ? L"-display-menu" : host_frames_ == 46 ? L"-view-settings" : L"-inspector-settings");
+      if (host_frames_ == 43)
+        ImGui::ActivateItemByID(popups.back().Window->GetID("Display and camera settings..."));
+    }
+    if (host_frames_ == 51) {
+      if (!inspector_test_window_) throw std::runtime_error("Inspector window was not displayed");
+      ImGui::ActivateItemByID(inspector_test_window_->GetID("Settings##Inspector settings"));
+    }
+  }
   void smoke_step() {
+    if (options_.scene_first_smoke && host_frames_ > 6) layout_smoke_step();
     if (!document().loaded())
       throw std::runtime_error("Smoke capture did not load");
     if (host_frames_ == 1) {
@@ -3492,19 +4057,32 @@ private:
         throw std::runtime_error(
             "Visible triangle picking or linked inspection failed");
     }
-    if (host_frames_ == 6) {
+    if (host_frames_ == 6 || (options_.scene_first_smoke && host_frames_ == 60)) {
       const auto selected =
           readTextureRgba8(device_.Get(), context_.Get(), renderer_->texture());
       if (selected.pixels.size() != unselected_.pixels.size())
         throw std::runtime_error("Viewport resized during smoke test");
+      selection_pixels_ = 0;
       for (std::size_t i = 0; i < selected.pixels.size(); i += 4)
         if (selected.pixels[i] != unselected_.pixels[i] ||
             selected.pixels[i + 1] != unselected_.pixels[i + 1] ||
             selected.pixels[i + 2] != unselected_.pixels[i + 2])
           ++selection_pixels_;
       const auto stats = renderer_->stats();
-      if (!stats.triangles || !stats.draw_calls || selection_pixels_ < 10)
-        throw std::runtime_error("GPU scene or selection highlight is empty");
+      if (!stats.triangles || !stats.draw_calls || selection_pixels_ < 10) {
+        if (!options_.screenshot.empty()) screenshot();
+        throw std::runtime_error("GPU scene or selection highlight is empty at frame " +
+            std::to_string(host_frames_) + ": " + std::to_string(stats.triangles) + " triangles, " +
+            std::to_string(selection_pixels_) + " selected pixels");
+      }
+      if (options_.scene_first_smoke && host_frames_ == 6) {
+        if (ui().sidebar != SlotUiState::Sidebar::none)
+          throw std::runtime_error("Scene-first layout did not start with a full viewport");
+        layout_smoke_viewport_ = viewport_size_;
+        layout_smoke_camera_ = camera();
+        layout_smoke_selection_ = document().selected_key();
+        return;
+      }
       if (!options_.screenshot.empty())
         screenshot();
       if (!options_.report.empty()) {
@@ -3521,6 +4099,7 @@ private:
                << ",\n  \"frame_changed_pixels\": " << motion_pixels_
                << ",\n  \"triangles\": " << stats.triangles
                << ",\n  \"draw_calls\": " << stats.draw_calls
+               << ",\n  \"scene_first_interactions\": " << (options_.scene_first_smoke ? "true" : "false")
                << ",\n  \"screenshot\": \""
                << escaped(utf8(options_.screenshot.wstring())) << "\"\n}\n";
         if (!report)

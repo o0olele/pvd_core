@@ -1,5 +1,6 @@
 #include "workspace_panel.hpp"
 #include "ui_scale.hpp"
+#include "ui_widgets.hpp"
 #include "imgui.h"
 #include <algorithm>
 #include <cstring>
@@ -60,12 +61,40 @@ void draw_workspace_tabs(Workspace &workspace,
       std::uint64_t(std::uint32_t(storage->GetInt(low_key))) |
       (std::uint64_t(std::uint32_t(storage->GetInt(high_key))) << 32);
   const bool request_selection = previous != active;
+  const float row_height = ui_pixels(42.f);
+  const float icon_size = ui_pixels(15.f), icon_gap = ui_pixels(7.f);
+  const ImVec4 clear{0, 0, 0, 0};
+  const auto panel = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+      {ui_pixels(12.f), std::max(0.f, (row_height - ImGui::GetFontSize()) * .5f)});
+  ImGui::PushStyleVar(ImGuiStyleVar_TabRounding, 0);
+  ImGui::PushStyleVar(ImGuiStyleVar_TabBorderSize, 0);
+  ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, 0);
+  ImGui::PushStyleVar(ImGuiStyleVar_TabBarOverlineSize, 0);
+  ImGui::PushStyleColor(ImGuiCol_Tab, clear);
+  ImGui::PushStyleColor(ImGuiCol_TabSelected, clear);
+  ImGui::PushStyleColor(ImGuiCol_TabDimmed, clear);
+  ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, clear);
+  ImGui::PushStyleColor(ImGuiCol_TabHovered, panel);
+  // Keep real tab items (selection, close buttons and keyboard switching),
+  // reserving a text prefix for a font-independent line icon.
+  std::string icon_space;
+  while (ImGui::CalcTextSize(icon_space.c_str()).x < icon_size + icon_gap)
+    icon_space += ' ';
+  const auto slots = workspace.slots();
+  float natural_width = 0;
+  for (const auto *slot : slots)
+    natural_width += ImGui::CalcTextSize(fit(slot->title(), ui_pixels(180)).c_str()).x +
+        icon_size + icon_gap + ui_pixels(24) +
+        (slot->lock_reason() ? 0 : ImGui::GetFontSize() + ImGui::GetStyle().ItemInnerSpacing.x);
+  ImGuiTabBarFlags bar_flags = ImGuiTabBarFlags_FittingPolicyScroll;
+  if (natural_width > ImGui::GetContentRegionAvail().x)
+    bar_flags |= ImGuiTabBarFlags_TabListPopupButton;
   if (ImGui::BeginTabBar("workspace-document-tabs",
-                         ImGuiTabBarFlags_FittingPolicyResizeDown |
-                             ImGuiTabBarFlags_TabListPopupButton)) {
-    for (const auto *slot : workspace.slots()) {
+                         bar_flags)) {
+    for (const auto *slot : slots) {
       bool open = true;
-      const auto label = fit(slot->title(), ui_pixels(180)) + "###workspace-slot-" +
+      const auto label = icon_space + fit(slot->title(), ui_pixels(180)) + "###workspace-slot-" +
                          std::to_string(slot->id());
       const auto flags =
           request_selection && workspace.active_id() == slot->id()
@@ -73,6 +102,17 @@ void draw_workspace_tabs(Workspace &workspace,
               : ImGuiTabItemFlags_None;
       const bool shown = ImGui::BeginTabItem(
           label.c_str(), slot->lock_reason() ? nullptr : &open, flags);
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      auto *draw_list = ImGui::GetWindowDrawList();
+      draw_list->PushClipRect(min, max, true);
+      const bool is_active = workspace.active_id() == slot->id();
+      ui::icon(ui::Icon::file,
+          {min.x + ui_pixels(12.f), min.y + (max.y - min.y - icon_size) * .5f},
+          icon_size, ImGui::GetColorU32(is_active ? ImGuiCol_CheckMark : ImGuiCol_TextDisabled));
+      if (is_active)
+        draw_list->AddRectFilled({min.x, max.y - ui_pixels(2.f)}, max,
+                                 ImGui::GetColorU32(ImGuiCol_CheckMark));
+      draw_list->PopClipRect();
       if (ImGui::IsItemClicked())
         selected = slot->id();
       if (ImGui::IsItemHovered())
@@ -88,6 +128,8 @@ void draw_workspace_tabs(Workspace &workspace,
     }
     ImGui::EndTabBar();
   }
+  ImGui::PopStyleColor(5);
+  ImGui::PopStyleVar(5);
   storage->SetInt(low_key,
                   static_cast<int>(static_cast<std::uint32_t>(active)));
   storage->SetInt(high_key,

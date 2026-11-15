@@ -417,7 +417,7 @@ struct Renderer::Impl {
         if(wire_items.size()>1)std::stable_sort(wire_items.begin(),wire_items.end(),far_first);
         for(const auto* item:wire_items) {
             const bool selected=selected_keys.count(item->key)!=0,trigger=triggers.count(item->key)!=0;
-            auto color=selected?std::array<float,4>{1,.81f,.29f,1}:
+            auto color=selected?std::array<float,4>{.341f,.812f,.729f,1}:
                        trigger?std::array<float,4>{.91f,.64f,.28f,.9f}:std::array<float,4>{.25f,.40f,.48f,.7f};
             color[3]*=mesh_opacity(*item,options,selected);
             indexed(upload(item->mesh),projection,display_matrix(*item),color,true,true,options.face_culling);

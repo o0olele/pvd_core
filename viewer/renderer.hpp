@@ -30,7 +30,7 @@ MultisampleStatus select_multisampling(Antialiasing, bool color4x,
                                      bool depth4x, bool color_resolve);
 
 struct RenderOptions {
-    std::array<float,4> background_color{0.043f,0.063f,0.086f,1};
+    std::array<float,4> background_color{0.063f,0.094f,0.125f,1};
     Antialiasing antialiasing = Antialiasing::off;
     bool show_grid = true, show_axes = true;
     bool show_solids = true, show_wireframe = false;

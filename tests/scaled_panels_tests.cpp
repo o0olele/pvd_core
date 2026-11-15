@@ -256,19 +256,20 @@ struct Harness {
     ImGui::GetIO().AddKeyEvent(key, false);
     frame();
   }
-  ImVec2 focus(const char *label) {
+  ImVec2 focus(ImGuiWindow *target, const char *label) {
     frame();
-    const auto id = window->GetID(label);
+    const auto id = target->GetID(label);
     for (unsigned i = 0; i < 80; ++i) {
       auto &g = *ImGui::GetCurrentContext();
-      if (g.NavWindow == window && g.NavId == id) {
-        const auto point = window->NavRectRel[ImGuiNavLayer_Main].GetCenter();
-        return {point.x + window->Pos.x, point.y + window->Pos.y};
+      if (g.NavWindow == target && g.NavId == id) {
+        return ImGui::WindowRectRelToAbs(
+            target, target->NavRectRel[ImGuiNavLayer_Main]).GetCenter();
       }
       key(ImGuiKey_Tab);
     }
     throw std::runtime_error(name + " could not focus " + label);
   }
+  ImVec2 focus(const char *label) { return focus(window, label); }
   void click(ImVec2 point) {
     frame(point, false);
     frame(point, true);
@@ -291,6 +292,94 @@ struct Harness {
     frame();
   }
 };
+void timeline_interactions(Harness &ui, Document &doc, Metrics &metrics) {
+  check(doc.timeline().size() >= 4,
+        "timeline interaction fixture has distinct exact seek targets");
+  doc.set_playing(false);
+  ui.focus("##frame");
+  const auto frame_id = ui.window->GetID("##frame");
+  const auto rect = ImGui::WindowRectRelToAbs(
+      ui.window, ui.window->NavRectRel[ImGuiNavLayer_Main]);
+  metrics.same("Timeline scrubber width", rect.GetWidth(), ui.scale);
+  metrics.same("Timeline scrubber height", rect.GetHeight(), ui.scale);
+  const auto center = rect.GetCenter();
+  const ImVec2 first{rect.Min.x + ui.scale, center.y},
+               last{rect.Max.x - ui.scale, center.y};
+  // Native Inputable sliders enter exact text mode when reached by Tab.
+  // Leave that mode before testing pointer dragging.
+  if (ImGui::TempInputIsActive(frame_id))
+    ui.key(ImGuiKey_Escape);
+
+  // These are physical pointer drags through the submitted widget rectangle,
+  // not calls to the model's seek command or a duplicate slider calculation.
+  ui.frame(center, false);
+  ui.frame(center, true);
+  ui.frame(first, true);
+  ui.frame(first, false);
+  ui.frame(first, false);
+  check(doc.frame_index() == 0,
+        "scaled thin-track drag reaches the first captured frame: index=" +
+            std::to_string(doc.frame_index()) + " editing=" +
+            std::to_string(ImGui::TempInputIsActive(frame_id)));
+  ui.frame(first, true);
+  check(ImGui::GetCurrentContext()->ActiveId == frame_id,
+        "thin-track accepts a new endpoint drag after mouse release");
+  ui.frame(last, true);
+  ui.frame(last, false);
+  ui.frame(last, false);
+  check(doc.frame_index() + 1 == doc.timeline().size(),
+        "scaled thin-track drag reaches the last captured frame: index=" +
+            std::to_string(doc.frame_index()) + " total=" +
+            std::to_string(doc.timeline().size()) + " active=" +
+            std::to_string(ImGui::GetCurrentContext()->ActiveId) + " mouse=" +
+            std::to_string(ImGui::GetIO().MousePos.x) + "," +
+            std::to_string(ImGui::GetIO().MousePos.y));
+
+  doc.set_frame(1);
+  ui.frame();
+  // A pointer-selected NavId does not yet show ImGui's keyboard cursor. Use a
+  // real Tab traversal before activating the focused slider for arrow tweaks.
+  ui.key(ImGuiKey_Tab);
+  ui.focus("##frame");
+  if (ImGui::TempInputIsActive(frame_id))
+    ui.key(ImGuiKey_Escape);
+  ui.key(ImGuiKey_Space);
+  check(ImGui::GetCurrentContext()->ActiveId == frame_id,
+        "scaled scrubber accepts keyboard activation");
+  ui.key(ImGuiKey_RightArrow);
+  check(doc.frame_index() == 2,
+        "scaled scrubber keyboard Right advances exactly one frame");
+  ui.key(ImGuiKey_LeftArrow);
+  check(doc.frame_index() == 1,
+        "scaled scrubber keyboard Left returns exactly one frame");
+  ui.key(ImGuiKey_Escape);
+
+  const auto exact_seek = [&](const char *number) {
+    auto &io = ImGui::GetIO();
+    io.AddKeyEvent(ImGuiMod_Ctrl, true);
+    ui.frame(center, false);
+    ui.frame(center, true);
+    ui.frame(center, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    ui.frame(center, false);
+    check(ImGui::TempInputIsActive(frame_id),
+          "scaled Ctrl-click opens the scrubber's native exact input");
+    io.AddInputCharactersUTF8(number);
+    ui.frame();
+    ui.key(ImGuiKey_Enter);
+    check(!ImGui::TempInputIsActive(frame_id),
+          "Enter commits and closes the exact frame input");
+  };
+  exact_seek("3");
+  check(doc.frame_index() == 2,
+        "scaled exact input maps displayed frame 3 to captured index 2");
+  exact_seek("999");
+  check(doc.frame_index() + 1 == doc.timeline().size(),
+        "exact frame input clamps to the last real captured frame");
+  exact_seek("0");
+  check(doc.frame_index() == 0,
+        "exact frame input clamps to the first real captured frame");
+}
 void run(float scale, Metrics &metrics) {
   ImGui::CreateContext();
   auto &io = ImGui::GetIO();
@@ -329,9 +418,19 @@ void run(float scale, Metrics &metrics) {
                     [&] { drawInspector(doc, panel); });
   check(doc.inspect(fixture.actor), "inspect synthetic source actor");
   inspector.stable();
+  inspector.click("All properties");
+  inspector.stable();
   check(inspector.text.find("9007199254740993") != std::string::npos,
         "scaled Inspector keeps exact 64bit source values");
-  inspector.click("Inspector settings");
+  const float settings_width = 24.f * scale;
+  const ImVec2 settings_button{
+      inspector.window->WorkRect.Max.x - settings_width * .5f,
+      inspector.window->DC.CursorStartPos.y + ImGui::GetTextLineHeight() * .5f};
+  inspector.frame(settings_button, false);
+  check(ImGui::GetCurrentContext()->HoveredId ==
+            inspector.window->GetID("Settings##Inspector settings"),
+        "scaled settings button remains mouse-accessible in the header");
+  inspector.click(settings_button);
   inspector.frame();
   auto &popups = ImGui::GetCurrentContext()->OpenPopupStack;
   check(popups.Size && popups.back().Window,
@@ -340,15 +439,22 @@ void run(float scale, Metrics &metrics) {
   inspector.key(ImGuiKey_Escape);
   Harness timeline("Scaled timeline", scale, [&] { drawTimeline(doc, panel); });
   timeline.stable();
-  timeline.click("Reverse");
+  timeline.click("...##playback-options");
+  timeline.frame();
+  auto &playback_popups = ImGui::GetCurrentContext()->OpenPopupStack;
+  check(playback_popups.Size && playback_popups.back().Window,
+        "scaled timeline playback options popup");
+  timeline.click(timeline.focus(playback_popups.back().Window, "Reverse"));
   check(doc.playback().frames_per_second < 0,
         "scaled reverse checkbox changes direction");
+  timeline.key(ImGuiKey_Escape);
   doc.set_frame(2);
   doc.set_playing(true);
   doc.advance(1. / 60);
   check(doc.frame_index() == 1,
         "scaled timeline causes actual reverse playback");
   doc.set_playing(false);
+  timeline_interactions(timeline, doc, metrics);
   doc.set_frame(0);
   Harness hierarchy("Scaled hierarchy", scale,
                     [&] { drawHierarchy(doc, panel); });

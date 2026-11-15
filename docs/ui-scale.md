@@ -63,7 +63,12 @@ Colors remain unchanged.
 
 `UiFontLoader` receives a separate empty atlas and an **actual integer pixel
 size**, rounded to the nearest pixel from the configured baseline (default 17).
-At `1.5x`, the request is 25.5 pixels and the packed font is 26 pixels. The result
+With that default, a `1.5x` request is 25.5 pixels and the packed font is
+26 pixels. The viewer host explicitly configures `base_font_pixels = 17` using
+`ui::font_size_dp`; its `1x / 1.5x / 2x / 1x` sequence is therefore
+`17 / 26 / 34 / 17` pixels. This native baseline was calibrated against actual
+screenshots; native glyph height and a browser's CSS font size are not equivalent.
+The helper's default remains 17 for other hosts and headless tests. The result
 reports both `requested_font_pixels` and `font_pixels`. This avoids ImGui's
 implicit truncation hiding the actual raster size. `FontGlobalScale` and the
 primary font's `Scale` are `1`; text is rasterized at the requested density.
@@ -106,6 +111,19 @@ ImGui's negative sentinels such as `-1` and `-FLT_MIN` unchanged. Do not rescale
 already physical-pixel values. Style values and font sizes are handled separately
 and must not pass through `ui_pixels` again.
 
+The viewer's visual dimensions are declared in `viewer/ui_widgets.hpp`: a
+46dp application bar, a 42dp recording bar, a 45dp viewport toolbar, 30dp icon
+buttons, 16dp icons and a 17dp native baseline font. The recording bar holds
+document tabs on the left and the Scene / Analysis / More controls on the right.
+These are logical sizes;
+the line icons, rounded timeline thumb and custom tick labels use the same
+current scale as the native controls.
+
+Built-in menu, button, tooltip and status labels use English; captured object
+names and recording titles retain their original text. Popup and dropdown
+surfaces use a shared style so compact application/recording/viewport toolbar
+spacing does not leak into menu entries or nested setting selectors.
+
 ## Window sizing policy
 
 `plan_ui_window` returns advisory client/outer minimum and initial sizes. Defaults
@@ -142,11 +160,13 @@ MSVC Debug `/W4` and strict Clang syntax checks passed locally. Physical monitor
 switching and mixed-DPI multi-monitor behavior have not been manually verified;
 the host's Win32/device integration requires its own validation.
 
-The host now has an actual D3D11 WARP `viewer_dpi_gpu` test that sends the same
+The host has an actual D3D11 WARP `viewer_dpi_gpu` test that sends the same
 Win32 DPI message path for 96/144/192/96, checks four font generations and real
 texture uploads, and verifies return to original style and client size. The
-current atlas sizes are 1024x1024, 1024x2048, 1024x4096 and 1024x1024; font sizes
-are 17/26/34/17 pixels. Native maximum/minimum track sizes may constrain large
+viewer host's configured font sizes for that sequence are 17/26/34/17 pixels.
+Atlas dimensions depend on the installed local fonts and glyph packing; the
+test report records the actual dimensions for each generation. Native
+maximum/minimum track sizes may constrain large
 suggested windows; the report records the actual client rect, not an assumed
 unlimited desktop. Additional 1.5x query and 2x scene GPU tests exercise picking
 and visible controls. `scaled_panels` uses real ImGui inputs for analysis,

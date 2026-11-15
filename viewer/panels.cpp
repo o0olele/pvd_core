@@ -1,14 +1,18 @@
 ﻿#include "panels.hpp"
 #include "ui_scale.hpp"
+#include "ui_widgets.hpp"
 #include "pvd/coordinates.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <imgui.h>
+#include <imgui_internal.h>
+#include <initializer_list>
 #include <limits>
 #include <set>
 #include <sstream>
+#include <utility>
 
 namespace pvd::viewer {
 namespace {
@@ -224,7 +228,7 @@ void copy_text(PanelState &state, const std::string &value) {
 void property_copy_menu(PanelState &state, const PropertyValue &value,
                         std::size_t item,
                         const PropertyDefinition *definition) {
-  if (!ImGui::BeginPopupContextItem("##property-copy"))
+  if (!ui::begin_popup_context_item("##property-copy"))
     return;
   if (ImGui::MenuItem("Copy native value"))
     command(state, [&] {
@@ -244,11 +248,14 @@ void property_copy_menu(PanelState &state, const PropertyValue &value,
                   PropertyCopy::wire_bytes, state.inspector_preferences,
                   definition));
     });
+  ImGui::Separator();
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ui_pixels(340));
   ImGui::TextWrapped("Copy uses the full selected element, not its row preview. "
       "Native coordinates include OriginShift; last wire values and bytes "
       "retain their incoming coordinate epoch. Decoded floats use float 9 / "
       "double 17 General precision.");
-  ImGui::EndPopup();
+  ImGui::PopTextWrapPos();
+  ui::end_popup();
 }
 void property_value(Document &doc, PanelState &state,
                     const PropertyValue &value, std::size_t item,
@@ -448,7 +455,7 @@ std::string scene_label(const SceneInfo &scene) {
 }
 
 void shape_menu(Document &doc, PanelState &state, const PickingKey &key) {
-  if (!ImGui::BeginPopupContextItem("##shape-actions"))
+  if (!ui::begin_popup_context_item("##shape-actions"))
     return;
   if (ImGui::MenuItem("Hide attachment"))
     command(state, [&] { doc.set_visible(key, false); });
@@ -459,13 +466,14 @@ void shape_menu(Document &doc, PanelState &state, const PickingKey &key) {
   ImGui::Separator();
   if (ImGui::MenuItem("Restore all"))
     command(state, [&] { doc.show_all(); });
-  ImGui::TextDisabled(
-      "Show removes manual hide; category filters still apply.");
-  ImGui::EndPopup();
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ui_pixels(300));
+  muted("Show removes manual hide; category filters still apply.");
+  ImGui::PopTextWrapPos();
+  ui::end_popup();
 }
 void actor_menu(Document &doc, PanelState &state, ObjectKey scene,
                 ObjectKey actor) {
-  if (!ImGui::BeginPopupContextItem("##actor-actions"))
+  if (!ui::begin_popup_context_item("##actor-actions"))
     return;
   if (ImGui::MenuItem("Hide actor"))
     command(state, [&] { doc.set_actor_visible(scene, actor, false); });
@@ -476,7 +484,7 @@ void actor_menu(Document &doc, PanelState &state, ObjectKey scene,
   ImGui::Separator();
   if (ImGui::MenuItem("Restore all"))
     command(state, [&] { doc.show_all(); });
-  ImGui::EndPopup();
+  ui::end_popup();
 }
 const std::string *category_name(const InstanceState &object) {
   for (const auto *key : {"Name", "name"})
@@ -1097,15 +1105,45 @@ void drawHierarchy(Document &doc, PanelState &state) {
 void drawInspector(Document &doc, PanelState &state) {
   try {
     state.array_visible_rows = 0;
-    if (ImGui::SmallButton("Inspector settings"))
+    auto frame = doc.frame();
+    const auto *object = doc.loaded() ? doc.inspected_instance() : nullptr;
+    const float heading_x = ImGui::GetCursorPosX();
+    const float heading_width = ImGui::GetContentRegionAvail().x;
+    const float settings_width = ui_pixels(24);
+    const float title_width = std::max(
+        1.f, heading_width - settings_width - ImGui::GetStyle().ItemSpacing.x);
+    if (object) {
+      const auto name = object_name(object);
+      auto title = name;
+      if (ImGui::CalcTextSize(title.c_str()).x > title_width) {
+        const char *end = title.c_str();
+        ImGui::GetFont()->CalcTextSizeA(
+            ImGui::GetFontSize(),
+            std::max(1.f, title_width - ImGui::CalcTextSize("...").x), 0,
+            title.c_str(), nullptr, &end);
+        title = std::string(title.c_str(), end) + "...";
+      }
+      text(title);
+      tooltip(name);
+    } else
+      ImGui::Dummy({title_width, ImGui::GetTextLineHeight()});
+    ImGui::SameLine(heading_x + heading_width - settings_width);
+    if (ui::icon_button("Settings##Inspector settings", ui::Icon::settings,
+                         "Number format and precision", false, 24)) {
+      ui::anchor_popup_to_item();
       ImGui::OpenPopup("Inspector preferences");
+    }
+    tooltip("Inspector settings: number format, precision and array groups");
     ImGui::SetNextWindowSizeConstraints(
         {ui_pixels(280), 0},
         {std::max(ui_pixels(280), std::min(ui_pixels(440), ImGui::GetIO().DisplaySize.x - ui_pixels(16))),
          std::numeric_limits<float>::max()});
-    if (ImGui::BeginPopup("Inspector preferences")) {
+    if (ui::begin_popup("Inspector preferences")) {
+      ImGui::TextUnformatted("Inspector settings");
+      ImGui::Separator();
       auto &preferences = state.inspector_preferences;
       bool changed = false;
+      ImGui::TextDisabled("Numeric display");
       int format = static_cast<int>(preferences.number_format);
       ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::Combo("Number format", &format,
@@ -1115,8 +1153,16 @@ void drawInspector(Document &doc, PanelState &state) {
       }
       if (ImGui::Checkbox("Integer hexadecimal", &preferences.integer_hex))
         changed = true;
+      ImGui::Spacing();
+      ImGui::TextDisabled("Precision");
       int fp = static_cast<int>(preferences.float_precision),
           dp = static_cast<int>(preferences.double_precision);
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                          {ui_pixels(10), ui_pixels(2)});
+      ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, ui_pixels(5));
+      ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding, ui_pixels(3));
+      ImGui::PushStyleColor(ImGuiCol_SliderGrab, {.31f, .43f, .48f, 1});
+      ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, {.36f, .64f, .58f, 1});
       ImGui::SetNextItemWidth(ui_pixels(180));
       if (ImGui::SliderInt("Float precision", &fp, 1, 17)) {
         preferences.float_precision = static_cast<unsigned>(fp);
@@ -1127,10 +1173,17 @@ void drawInspector(Document &doc, PanelState &state) {
         preferences.double_precision = static_cast<unsigned>(dp);
         changed = true;
       }
-      ImGui::TextWrapped(
+      ImGui::PopStyleColor(2);
+      ImGui::PopStyleVar(3);
+      ImGui::PushTextWrapPos(0);
+      ImGui::TextDisabled("%s",
           "General uses significant digits; scientific/fixed use decimal "
           "places. Defaults (float 9, double 17) retain round-trip precision "
           "in General. Integer values and IDs are always exact.");
+      ImGui::PopTextWrapPos();
+      ImGui::Spacing();
+      ImGui::Separator();
+      ImGui::TextDisabled("Arrays");
       const std::size_t groups[] = {32, 128, 512, 2048};
       int group = 0;
       for (int i = 0; i < 4; ++i)
@@ -1145,15 +1198,19 @@ void drawInspector(Document &doc, PanelState &state) {
         preferences.array_page_size = groups[group];
         changed = true;
       }
-      ImGui::TextWrapped("Only one array group is displayed at a time; visible "
-                         "rows are clipped even for 2048-item groups.");
+      ImGui::PushTextWrapPos(0);
+      ImGui::TextDisabled("%s", "One group is displayed at a time. Rows stay "
+                          "clipped even for 2048-item groups.");
+      ImGui::PopTextWrapPos();
+      ImGui::Spacing();
+      ImGui::Separator();
       if (ImGui::Button("Reset defaults")) {
         preferences = {};
         changed = true;
       }
       if (changed)
         state.array_pages.clear();
-      ImGui::EndPopup();
+      ui::end_popup();
     }
     if (!valid_inspector_preferences(state.inspector_preferences))
       throw std::invalid_argument(
@@ -1163,36 +1220,127 @@ void drawInspector(Document &doc, PanelState &state) {
                      "Object properties appear after a capture is opened.");
       return;
     }
-    if (auto key = doc.selected_key()) {
-      role_button(doc, state, "Shape", key->shape);
-      ImGui::SameLine();
-      role_button(doc, state, "Actor", key->actor);
-      ImGui::SameLine();
-      role_button(doc, state, "Scene", key->scene);
-      ImGui::Spacing();
-    }
-    auto frame = doc.frame();
-    const auto *object = doc.inspected_instance();
     if (!object) {
       drawEmptyState("Nothing selected", "Choose an object in the hierarchy or "
                                          "click a shape in the viewport.");
       panel_error(state);
       return;
     }
-    const auto name = object_name(object);
-    text(name);
-    muted(object->class_name.str());
-    tooltip(object->class_name.str());
-    muted(id_text(object->id));
+    const auto object_id = id_text(object->id);
+    {
+      TableScope identity("##inspector-identity", 2,
+                           ImGuiTableFlags_SizingStretchProp);
+      if (identity.open) {
+        ImGui::TableSetupColumn("Class", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn(
+            "ID", ImGuiTableColumnFlags_WidthFixed,
+            ImGui::CalcTextSize(object_id.c_str()).x +
+                ImGui::GetStyle().FramePadding.x * 2);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        muted(object->class_name.str());
+        tooltip(object->class_name.str());
+        ImGui::TableNextColumn();
+        if (ImGui::SmallButton((object_id + "##copy-object-id").c_str()))
+          command(state, [&] { copy_text(state, object_id); });
+        tooltip("Copy the full captured object ID");
+      }
+    }
+    if (auto key = doc.selected_key()) {
+      role_button(doc, state, "Actor", key->actor);
+      ImGui::SameLine();
+      role_button(doc, state, "Shape", key->shape);
+      ImGui::SameLine();
+      role_button(doc, state, "Scene", key->scene);
+    }
     ImGui::Spacing();
-    if (ImGui::SmallButton("Copy ID"))
-      command(state, [&] { copy_text(state, id_text(object->id)); });
-    tooltip("Copy the full captured object ID");
-    ImGui::SameLine();
-    muted(std::to_string(object->properties.size()) + " properties");
     ImGui::Separator();
+
+    // These are views of captured properties, not synthesized rigid-body
+    // defaults. Keep the same formatting, native-coordinate handling and exact
+    // copy commands as the raw table; unknown classes always retain that table.
+    struct SummaryField {
+      const char *name;
+      const char *alias;
+      const char *label;
+    };
+    const auto *metadata = doc.metadata();
+    const auto summary_value = [&](const SummaryField &field) {
+      const auto *value = object->property(field.name);
+      const char *property_name = field.name;
+      if (!value && field.alias) {
+        value = object->property(field.alias);
+        property_name = field.alias;
+      }
+      const auto *definition = metadata
+          ? metadata->find_property(object->class_name, property_name)
+          : nullptr;
+      if (value && (value->item_count != 1 ||
+                    (definition && definition->property_type == 2)))
+        value = nullptr;
+      return std::make_pair(property_name, value);
+    };
+    const auto summary_group = [&](const char *heading,
+                                   std::initializer_list<SummaryField> fields) {
+      const bool available = std::any_of(
+          fields.begin(), fields.end(),
+          [&](const SummaryField &field) { return summary_value(field).second; });
+      if (!available)
+        return false;
+      ImGui::Spacing();
+      ImGui::TextUnformatted(heading);
+      const std::string table_id = std::string("##inspector-summary-") + heading;
+      TableScope overview(table_id.c_str(), 2,
+                           ImGuiTableFlags_SizingStretchProp);
+      if (!overview.open)
+        return true;
+      ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthStretch,
+                              .85f);
+      ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch,
+                              1.3f);
+      for (const auto &field : fields) {
+        const auto entry = summary_value(field);
+        if (!entry.second)
+          continue;
+        const auto *definition = metadata
+            ? metadata->find_property(object->class_name, entry.first)
+            : nullptr;
+        IdScope field_id(entry.first);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        muted(field.label);
+        tooltip(entry.first);
+        ImGui::TableNextColumn();
+        ImGui::PushTextWrapPos(0);
+        property_value(doc, state, *entry.second, 0, false, definition);
+        ImGui::PopTextWrapPos();
+        property_copy_menu(state, *entry.second, 0, definition);
+      }
+      return true;
+    };
+    bool has_summary = false;
+    has_summary |= summary_group("Transform", {
+        {"GlobalPose", "globalPose", "Global pose"},
+        {"LocalPose", "localPose", "Local pose"},
+        {"CMassLocalPose", "cMassLocalPose", "Mass frame"}});
+    has_summary |= summary_group("Dynamics", {
+        {"Mass", "mass", "Mass"},
+        {"LinearVelocity", "linearVelocity", "Linear velocity"},
+        {"AngularVelocity", "angularVelocity", "Angular velocity"},
+        {"IsSleeping", "isSleeping", "Sleeping"}});
+    has_summary |= summary_group("Collision", {
+        {"ContactOffset", "contactOffset", "Contact offset"},
+        {"RestOffset", "restOffset", "Rest offset"},
+        {"Flags", "flags", "Flags"}});
+    has_summary |= summary_group("Scene", {
+        {"Gravity", "gravity", "Gravity"},
+        {"BounceThresholdVelocity", "bounceThresholdVelocity", "Bounce threshold"}});
     ImGui::Spacing();
-    properties(doc, state, *object);
+    if (!has_summary || state.property_search[0])
+      ImGui::SetNextItemOpen(true);
+    if (ImGui::CollapsingHeader("All properties")) {
+      properties(doc, state, *object);
+    }
     panel_error(state);
   } catch (const std::exception &e) {
     state.error = e.what();
@@ -1200,140 +1348,296 @@ void drawInspector(Document &doc, PanelState &state) {
   }
 }
 
+namespace {
+// The input path follows Dear ImGui's native SliderScalar: the value remains
+// U64 throughout dragging, keyboard navigation and temporary exact text input.
+// Only the track and thumb presentation are replaced here.
+bool timeline_scrubber(std::uint64_t &value, std::uint64_t high) {
+  auto *window = ImGui::GetCurrentWindow();
+  if (window->SkipItems)
+    return false;
+  auto &g = *ImGui::GetCurrentContext();
+  const auto id = window->GetID("##frame");
+  const std::uint64_t low = 1;
+  const ImVec2 origin = ImGui::GetCursorScreenPos();
+  const ImRect frame(origin, {origin.x + ImGui::CalcItemWidth(),
+                              origin.y + ui_pixels(18)});
+  ImGui::ItemSize(frame);
+  if (!ImGui::ItemAdd(frame, id, &frame, ImGuiItemFlags_Inputable))
+    return false;
+  const bool hovered = ImGui::ItemHoverable(frame, id, g.LastItemData.ItemFlags);
+  bool editing = ImGui::TempInputIsActive(id);
+  if (!editing) {
+    const bool clicked = hovered &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left, ImGuiInputFlags_None, id);
+    const bool activate = clicked || g.NavActivateId == id;
+    if (clicked)
+      ImGui::SetKeyOwner(ImGuiKey_MouseLeft, id);
+    if (activate && ((clicked && g.IO.KeyCtrl) ||
+        (g.NavActivateId == id && (g.NavActivateFlags & ImGuiActivateFlags_PreferInput))))
+      editing = true;
+    if (activate)
+      std::memcpy(&g.ActiveIdValueOnActivation, &value, sizeof(value));
+    if (activate && !editing) {
+      ImGui::SetActiveID(id, window);
+      ImGui::SetFocusID(id, window);
+      ImGui::FocusWindow(window);
+      g.ActiveIdUsingNavDirMask |= (1 << ImGuiDir_Left) | (1 << ImGuiDir_Right);
+    }
+  }
+  if (editing) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {ui_pixels(9), ui_pixels(2)});
+    const bool changed = ImGui::TempInputScalar(frame, id, "##frame", ImGuiDataType_U64,
+                                               &value, "%llu", &low, &high);
+    ImGui::PopStyleVar();
+    return changed;
+  }
+
+  const float radius = ui_pixels(6.5f);
+  const float track_min = frame.Min.x + radius;
+  const float track_max = std::max(track_min, frame.Max.x - radius);
+  const float usable = track_max - track_min;
+  // Integer sliders normally widen the grab to represent one whole item. Match
+  // that native behavior rectangle to the small circular thumb's visible range,
+  // so even a two-frame recording can seek all the way to either endpoint.
+  const float grab = high > 1
+      ? std::max(g.Style.GrabMinSize,
+          static_cast<float>(static_cast<long double>(usable) /
+                             static_cast<long double>(high - 1)))
+      : g.Style.GrabMinSize;
+  const ImRect behavior({track_min - grab * .5f - 2, frame.Min.y},
+                         {track_max + grab * .5f + 2, frame.Max.y});
+  ImRect grab_bounds;
+  const bool changed = ImGui::SliderBehavior(behavior, id, ImGuiDataType_U64,
+      &value, &low, &high, "%llu", ImGuiSliderFlags_AlwaysClamp, &grab_bounds);
+  if (changed)
+    ImGui::MarkItemEdited(id);
+  const float thumb_x = high > 1 ? (grab_bounds.Min.x + grab_bounds.Max.x) * .5f
+                                  : track_min;
+  const float cy = (frame.Min.y + frame.Max.y) * .5f;
+  const float half_track = ui_pixels(2);
+  auto *draw = ImGui::GetWindowDrawList();
+  draw->AddRectFilled({track_min, cy - half_track}, {track_max, cy + half_track},
+                       ImGui::GetColorU32(ImGuiCol_Border), half_track);
+  if (thumb_x > track_min)
+    draw->AddRectFilled({track_min, cy - half_track}, {thumb_x, cy + half_track},
+                         ImGui::GetColorU32(ImGuiCol_CheckMark), half_track);
+  draw->AddCircleFilled({thumb_x, cy}, radius,
+                         ImGui::GetColorU32(ImGuiCol_CheckMark), 24);
+  ImGui::RenderNavCursor(frame, id);
+  return changed;
+}
+} // namespace
+
 void drawTimeline(Document &doc, PanelState &state) {
   try {
     if (!doc.loaded()) {
       muted("Open a capture to inspect its recorded frames.");
       return;
     }
-    std::string current_scene = "Select scene";
-    for (const auto &scene : doc.scenes())
-      if (doc.scene_id() && scene.key.id == *doc.scene_id())
-        current_scene = scene_label(scene);
-    const auto width = ImGui::GetContentRegionAvail().x;
-    ImGui::SetNextItemWidth(width > ui_pixels(850) ? ui_pixels(180) : ui_pixels(150));
-    if (ImGui::BeginCombo("##scene", clipped(current_scene).c_str())) {
-      for (const auto &scene : doc.scenes()) {
-        IdScope id(std::to_string(scene.key.id));
-        if (ImGui::Selectable(clipped(scene_label(scene)).c_str(),
-                              doc.scene_id() &&
-                                  *doc.scene_id() == scene.key.id))
-          command(state, [&] { doc.set_scene(scene.key.id); });
+    struct TimelineSpacing {
+      TimelineSpacing() {
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {ui_pixels(4), ui_pixels(3)});
       }
-      ImGui::EndCombo();
-    }
-    tooltip("Recorded scene");
-    ImGui::SameLine();
-    const bool after = doc.sample_point() == SamplePoint::after_fetch;
-    ImGui::SetNextItemWidth(width > ui_pixels(850) ? ui_pixels(150) : ui_pixels(135));
-    if (ImGui::BeginCombo("##sample-point",
-                          after ? "After simulation" : "Frame end")) {
-      if (ImGui::Selectable("Frame end", !after))
-        command(state,
-                [&] { doc.set_sample_point(SamplePoint::native_frame); });
-      if (ImGui::Selectable("After simulation", after))
-        command(state, [&] {
-          if (!doc.set_sample_point(SamplePoint::after_fetch))
-            throw std::runtime_error(
-                "No after-simulation markers are available for this scene.");
-        });
-      ImGui::EndCombo();
-    }
-    tooltip("Frame end uses the simulation's recorded frame boundary. After "
-            "simulation uses an explicit post-step marker when available.");
-    const auto total = doc.timeline().size();
-    // Keep the fixed-height host panel to three rows at the supported window
-    // sizes.
-    if (width > ui_pixels(850))
-      ImGui::SameLine(0, ui_pixels(16));
+      ~TimelineSpacing() { ImGui::PopStyleVar(); }
+    } spacing;
+    const auto width = ImGui::GetContentRegionAvail().x;
+    const bool compact = width < ui_pixels(760);
+    const auto &style = ImGui::GetStyle();
+    const float row_right = ImGui::GetCursorPosX() + width;
+    auto sample_point = [&] {
+      const bool after = doc.sample_point() == SamplePoint::after_fetch;
+      const float combo_width = ui_pixels(172);
+      const auto origin = ImGui::GetCursorScreenPos();
+      auto *draw = ImGui::GetWindowDrawList();
+      ImGui::SetNextItemWidth(combo_width);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4{0, 0, 0, 0});
+      const bool open = ui::begin_combo("##sample-point",
+                            after ? "After simulation" : "Frame end", ImGuiComboFlags_NoArrowButton);
+      ui::icon(ui::Icon::chevron_down,
+               {origin.x + combo_width - ui_pixels(22),
+                origin.y + (ImGui::GetFrameHeight() - ui_pixels(16)) * .5f},
+               ui_pixels(16), ImGui::GetColorU32(ImGuiCol_TextDisabled), draw);
+      // Draw into the originating window: BeginCombo may have entered a popup.
+      if (open) {
+        if (ImGui::Selectable("Frame end", !after))
+          command(state,
+                  [&] { doc.set_sample_point(SamplePoint::native_frame); });
+        if (ImGui::Selectable("After simulation", after))
+          command(state, [&] {
+            if (!doc.set_sample_point(SamplePoint::after_fetch))
+              throw std::runtime_error(
+                  "No after-simulation markers are available for this scene.");
+          });
+        ui::end_combo();
+      }
+      ImGui::PopStyleColor();
+      tooltip("Frame end uses the simulation's recorded frame boundary. After "
+              "simulation uses an explicit post-step marker when available.");
+    };
+    auto total = doc.timeline().size();
     {
       DisabledScope disabled(total == 0);
-      if (ImGui::Button("First"))
+      if (ui::icon_button("First", ui::Icon::first, "First frame / Home"))
         command(state, [&] { doc.set_frame(0); });
       ImGui::SameLine();
-      if (ImGui::Button("<"))
+      if (ui::icon_button("<", ui::Icon::chevron_left, "Previous frame / Left"))
         command(state, [&] { doc.step(-1); });
       ImGui::SameLine();
-      if (ImGui::Button(doc.playback().playing ? "Pause" : "Play"))
+      if (ui::icon_button(doc.playback().playing ? "Pause" : "Play",
+                           doc.playback().playing ? ui::Icon::pause : ui::Icon::play,
+                           "Play / pause / Space", true))
         command(state, [&] { doc.set_playing(!doc.playback().playing); });
       ImGui::SameLine();
-      if (ImGui::Button(">"))
+      if (ui::icon_button(">", ui::Icon::chevron_right, "Next frame / Right"))
         command(state, [&] { doc.step(1); });
       ImGui::SameLine();
-      if (ImGui::Button("Last"))
+      if (ui::icon_button("Last", ui::Icon::last, "Last frame / End"))
         command(state, [&] { doc.set_frame(total - 1); });
+    }
+
+    const float fps_width = ui_pixels(compact ? 60.f : 75.f);
+    const float options_width = ui_pixels(30);
+    const float controls_width =
+        fps_width + ImGui::CalcTextSize("fps").x + style.ItemInnerSpacing.x +
+        options_width + style.ItemSpacing.x +
+        (compact ? 0 : ui_pixels(172) + style.ItemSpacing.x);
+    const float next_x = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x +
+                         style.ItemSpacing.x;
+    const float controls_x = std::max(next_x, row_right - controls_width);
+    {
+      const auto full =
+          std::to_string(total ? doc.frame_index() + 1 : 0) + " / " +
+          std::to_string(total) + " frames" + (compact ?
+              (doc.sample_point() == SamplePoint::after_fetch ? " · After simulation" : " · Frame end") : "");
+      auto preview = full;
+      const float available =
+          std::max(0.f, controls_x - next_x - style.ItemSpacing.x);
+      while (!preview.empty() && ImGui::CalcTextSize(
+                 (preview + (preview == full ? "" : "...")).c_str()).x > available) {
+        auto end = preview.size() - 1;
+        while (end && ((static_cast<unsigned char>(preview[end]) & 0xc0) == 0x80))
+          --end;
+        preview.resize(end);
+      }
+      if (!preview.empty() && preview != full)
+        preview += "...";
       ImGui::SameLine();
-      bool loop = doc.playback().loop;
-      if (ImGui::Checkbox("Loop", &loop))
+      ImGui::AlignTextToFramePadding();
+      ImGui::TextUnformatted(preview.c_str());
+      tooltip(full);
+    }
+    ImGui::SameLine(controls_x);
+    if (!compact) {
+      sample_point();
+      ImGui::SameLine();
+    }
+    {
+      DisabledScope disabled(doc.timeline().empty());
+      float fps =
+          static_cast<float>(std::abs(doc.playback().frames_per_second));
+      ImGui::SetNextItemWidth(fps_width);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4{0, 0, 0, 0});
+      if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
+                           ImGuiSliderFlags_AlwaysClamp))
         command(state, [&] {
           auto p = doc.playback();
-          p.loop = loop;
+          p.frames_per_second = fps * (p.frames_per_second < 0 ? -1 : 1);
           doc.set_playback(p);
         });
-      if (width > ui_pixels(500))
-        ImGui::SameLine();
-      bool reverse = doc.playback().frames_per_second < 0;
-      if (ImGui::Checkbox("Reverse", &reverse))
-        command(state, [&] {
-          auto p = doc.playback();
-          p.frames_per_second =
-              std::abs(p.frames_per_second) * (reverse ? -1 : 1);
-          doc.set_playback(p);
-        });
-      if (width > ui_pixels(900)) {
-        ImGui::SameLine();
-        float fps =
-            static_cast<float>(std::abs(doc.playback().frames_per_second));
-        ImGui::SetNextItemWidth(ui_pixels(80));
-        if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
-                             ImGuiSliderFlags_AlwaysClamp))
+      ImGui::PopStyleColor();
+    }
+    tooltip("Captured frames per second; this does not infer simulation time.");
+    ImGui::SameLine();
+    if (!state.error.empty())
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.98f, .52f, .45f, 1));
+    const bool playback_options = ui::icon_button("...##playback-options", ui::Icon::more,
+                                                   "Playback options");
+    if (!state.error.empty())
+      ImGui::PopStyleColor();
+    tooltip(state.error.empty() ? "Playback options" : state.error);
+    if (playback_options) {
+      ui::anchor_popup_to_item();
+      ImGui::OpenPopup("Playback options");
+    }
+    if (ui::begin_popup("Playback options")) {
+      ImGui::TextUnformatted("Playback");
+      ImGui::Separator();
+      if (compact) {
+        sample_point();
+        ImGui::Separator();
+      }
+      {
+        DisabledScope disabled(doc.timeline().empty());
+        bool loop = doc.playback().loop;
+        if (ImGui::Checkbox("Loop", &loop))
           command(state, [&] {
             auto p = doc.playback();
-            p.frames_per_second = fps * (p.frames_per_second < 0 ? -1 : 1);
+            p.loop = loop;
+            doc.set_playback(p);
+          });
+        bool reverse = doc.playback().frames_per_second < 0;
+        if (ImGui::Checkbox("Reverse", &reverse))
+          command(state, [&] {
+            auto p = doc.playback();
+            p.frames_per_second =
+                std::abs(p.frames_per_second) * (reverse ? -1 : 1);
             doc.set_playback(p);
           });
       }
+      if (const auto frame = doc.frame(); frame && frame->marker)
+        if (auto ms = interval_ms(doc, *frame->marker)) {
+          ImGui::Separator();
+          muted("Recorded interval: " + real(*ms) + " ms");
+          tooltip("Captured marker interval, not an inferred simulation timestep.");
+        }
+      panel_error(state);
+      ui::end_popup();
     }
+
+    // Two rows: transport and sampling controls, then an exact 64-bit scrubber.
+    // Re-query after a sampling-mode change: its timeline can have a different
+    // length (including zero) from the one used to draw the transport controls.
+    total = doc.timeline().size();
     if (total) {
       auto index = static_cast<std::uint64_t>(doc.frame_index() + 1);
-      const std::uint64_t low = 1, high = total;
       ImGui::SetNextItemWidth(-1);
-      if (ImGui::SliderScalar("##frame", ImGuiDataType_U64, &index, &low, &high,
-                              "Frame %llu", ImGuiSliderFlags_AlwaysClamp))
+      if (timeline_scrubber(index, static_cast<std::uint64_t>(total)))
         command(state,
                 [&] { doc.set_frame(static_cast<std::size_t>(index - 1)); });
-      ImGui::Text("Frame %llu / %llu",
-                  static_cast<unsigned long long>(doc.frame_index() + 1),
-                  static_cast<unsigned long long>(total));
-      ImGui::SameLine();
-      muted(after ? "After simulation" : "Frame end");
-      auto frame = doc.frame();
-      if (frame && frame->marker)
-        if (auto ms = interval_ms(doc, *frame->marker)) {
-          ImGui::SameLine();
-          muted("Interval " + real(*ms) + " ms");
-          tooltip(
-              "Captured marker interval, not an inferred simulation timestep.");
-        }
-      if (width <= ui_pixels(900)) {
-        if (width > ui_pixels(650))
-          ImGui::SameLine();
-        float fps =
-            static_cast<float>(std::abs(doc.playback().frames_per_second));
-        ImGui::SetNextItemWidth(ui_pixels(65));
-        if (ImGui::DragFloat("fps", &fps, .25f, 1, 240, "%.1f",
-                             ImGuiSliderFlags_AlwaysClamp))
-          command(state, [&] {
-            auto p = doc.playback();
-            p.frames_per_second = fps * (p.frames_per_second < 0 ? -1 : 1);
-            doc.set_playback(p);
-          });
+      tooltip(state.error.empty()
+                  ? "Drag to scrub. Ctrl-click to enter an exact frame number."
+                  : state.error);
+      const auto min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+      const auto tick_origin = ImGui::GetCursorScreenPos();
+      const float tick_font = ImGui::GetFontSize() * .86f;
+      const float tick_left = min.x + ui_pixels(6.5f),
+                  tick_right = max.x - ui_pixels(6.5f);
+      auto *draw = ImGui::GetWindowDrawList();
+      const auto last_label = std::to_string(total);
+      const float label_width = ImGui::GetFont()->CalcTextSizeA(
+          tick_font, std::numeric_limits<float>::max(), 0, last_label.c_str()).x;
+      unsigned divisions = 4;
+      if ((tick_right - tick_left) / 4 < label_width + ui_pixels(14)) divisions = 2;
+      if ((tick_right - tick_left) / 2 < label_width + ui_pixels(14)) divisions = 1;
+      if (total == 1) divisions = 0;
+      for (unsigned tick = 0; tick <= divisions; ++tick) {
+        // Divide first: no overflow for long recordings, and labels retain
+        // exact captured integer frame numbers rather than rounded floats.
+        const std::uint64_t span = static_cast<std::uint64_t>(total) - 1;
+        const std::uint64_t number = divisions ?
+            1 + (span / divisions) * tick + (span % divisions) * tick / divisions : 1;
+        const auto label = std::to_string(number);
+        const float text_width = ImGui::GetFont()->CalcTextSizeA(
+            tick_font, std::numeric_limits<float>::max(), 0, label.c_str()).x;
+        const float ratio = divisions ?
+            static_cast<float>(tick) / static_cast<float>(divisions) : 0;
+        float x = tick_left + (tick_right - tick_left) * ratio - text_width * .5f;
+        x = std::clamp(x, min.x, std::max(min.x, max.x - text_width));
+        draw->AddText(ImGui::GetFont(), tick_font, {x, tick_origin.y},
+                       ImGui::GetColorU32(ImGuiCol_TextDisabled), label.c_str());
       }
-      if (!state.error.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(.98f, .52f, .45f, 1), "Action unavailable");
-        tooltip(state.error);
-      }
+      ImGui::Dummy({0, tick_font});
     } else
       muted("No frames are available at this sample point.");
   } catch (const std::exception &e) {
