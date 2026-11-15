@@ -30,6 +30,10 @@
 
 ImGui 主机与面板支持[每显示器 DPI 和字体重建](docs/ui-scale.md)。本轮原生 3.4 工作流的功能覆盖、重现命令和已知验收限制统一记录在 [PhysX 3.4 验收说明](docs/physx34-acceptance.md)。
 
+0.8 版新增独立的[命名剪辑目录](docs/clip-ranges.md)、[原点平移后的原生坐标](docs/origin-shift.md)、[逐帧内存活动](docs/memory-window.md)、[第一人称导航](docs/camera-navigation.md)和[录制相机持续跟随](docs/recorded-camera.md)。查看器提供[选中范围图层、局部坐标轴与透明显示](docs/visualization-layers.md)，Profiler 可直接测量任意时间范围。新增的公开数据接口继续支持关闭 SDK/UI 后单独安装和调用。
+
+0.9 版补齐[配色编辑](docs/palette.md)与[显示比例、剔面、平面和关节尺寸](docs/display-settings.md)，GPU/CPU 拾取共享投影裁剪语义；工作区 v5 保存全局和各录制偏好并读取 v1–v4。显示溢出会保留已发布样本并允许恢复，实时原始接收继续。当前 3.4 验收和边界见[验收记录](docs/physx34-acceptance.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
