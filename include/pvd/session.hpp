@@ -2,7 +2,9 @@
 
 #include "pvd/protocol.hpp"
 #include <array>
+#include <algorithm>
 #include <exception>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -119,6 +121,163 @@ struct Snapshot {
   std::map<std::uint64_t, Vec3> origin_shifts;
   PVD_CORE_API const InstanceState *instance(std::uint64_t id) const noexcept;
 };
+// Immutable map facade. Iteration/find/at expose the same object references as
+// Snapshot, but no mutable alias can escape and invalidate a published view.
+class SnapshotInstances {
+public:
+  class Storage {
+    using Entry =
+        std::pair<std::uint64_t, std::shared_ptr<const InstanceState>>;
+    std::vector<Entry> entries_;
+
+  public:
+    using iterator = std::vector<Entry>::iterator;
+    using const_iterator = std::vector<Entry>::const_iterator;
+    iterator begin() noexcept { return entries_.begin(); }
+    iterator end() noexcept { return entries_.end(); }
+    const_iterator begin() const noexcept { return entries_.begin(); }
+    const_iterator end() const noexcept { return entries_.end(); }
+    iterator lower_bound(std::uint64_t id) {
+      return std::lower_bound(begin(), end(), id,
+                              [](const Entry &entry, std::uint64_t key) {
+                                return entry.first < key;
+                              });
+    }
+    const_iterator lower_bound(std::uint64_t id) const {
+      return std::lower_bound(begin(), end(), id,
+                              [](const Entry &entry, std::uint64_t key) {
+                                return entry.first < key;
+                              });
+    }
+    iterator find(std::uint64_t id) {
+      auto found = lower_bound(id);
+      return found != end() && found->first == id ? found : end();
+    }
+    const_iterator find(std::uint64_t id) const {
+      auto found = lower_bound(id);
+      return found != end() && found->first == id ? found : end();
+    }
+    std::size_t count(std::uint64_t id) const { return find(id) != end(); }
+    std::size_t size() const noexcept { return entries_.size(); }
+    bool empty() const noexcept { return entries_.empty(); }
+    void reserve(std::size_t count) { entries_.reserve(count); }
+    std::pair<iterator, bool>
+    emplace(std::uint64_t id, std::shared_ptr<const InstanceState> object) {
+      auto found = lower_bound(id);
+      if (found != end() && found->first == id)
+        return {found, false};
+      return {entries_.emplace(found, id, std::move(object)), true};
+    }
+    std::shared_ptr<const InstanceState> &operator[](std::uint64_t id) {
+      auto found = lower_bound(id);
+      if (found == end() || found->first != id)
+        found =
+            entries_.emplace(found, id, std::shared_ptr<const InstanceState>{});
+      return found->second;
+    }
+    const std::shared_ptr<const InstanceState> &at(std::uint64_t id) const {
+      auto found = find(id);
+      if (found == end())
+        throw std::out_of_range("snapshot instance not found");
+      return found->second;
+    }
+    std::size_t erase(std::uint64_t id) {
+      auto found = find(id);
+      if (found == end())
+        return 0;
+      entries_.erase(found);
+      return 1;
+    }
+  };
+  class const_iterator {
+    Storage::const_iterator iterator_;
+
+  public:
+    using iterator_category = std::bidirectional_iterator_tag;
+    using difference_type = std::ptrdiff_t;
+    using value_type = std::pair<const std::uint64_t, InstanceState>;
+    using reference = std::pair<const std::uint64_t &, const InstanceState &>;
+    struct pointer {
+      reference value;
+      const reference *operator->() const { return &value; }
+    };
+    const_iterator() = default;
+    explicit const_iterator(Storage::const_iterator value) : iterator_(value) {}
+    reference operator*() const {
+      return {iterator_->first, *iterator_->second};
+    }
+    pointer operator->() const { return {operator*()}; }
+    const_iterator &operator++() {
+      ++iterator_;
+      return *this;
+    }
+    const_iterator operator++(int) {
+      auto old = *this;
+      ++*this;
+      return old;
+    }
+    const_iterator &operator--() {
+      --iterator_;
+      return *this;
+    }
+    const_iterator operator--(int) {
+      auto old = *this;
+      --*this;
+      return old;
+    }
+    bool operator==(const const_iterator &other) const {
+      return iterator_ == other.iterator_;
+    }
+    bool operator!=(const const_iterator &other) const {
+      return !(*this == other);
+    }
+  };
+  using iterator = const_iterator;
+  PVD_CORE_API SnapshotInstances();
+  SnapshotInstances(const SnapshotInstances &) = default;
+  SnapshotInstances &operator=(const SnapshotInstances &) = default;
+  SnapshotInstances(SnapshotInstances &&other) noexcept
+      : storage_(other.storage_) {}
+  SnapshotInstances &operator=(SnapshotInstances &&other) noexcept {
+    storage_ = other.storage_;
+    return *this;
+  }
+  const_iterator begin() const { return const_iterator(storage_->begin()); }
+  const_iterator end() const { return const_iterator(storage_->end()); }
+  const_iterator cbegin() const { return begin(); }
+  const_iterator cend() const { return end(); }
+  const_iterator find(std::uint64_t id) const {
+    return const_iterator(storage_->find(id));
+  }
+  const_iterator lower_bound(std::uint64_t id) const {
+    return const_iterator(storage_->lower_bound(id));
+  }
+  std::size_t count(std::uint64_t id) const { return storage_->count(id); }
+  std::size_t size() const noexcept { return storage_->size(); }
+  bool empty() const noexcept { return storage_->empty(); }
+  const InstanceState &at(std::uint64_t id) const { return *storage_->at(id); }
+
+private:
+  explicit SnapshotInstances(std::shared_ptr<const Storage> storage)
+      : storage_(std::move(storage)) {}
+  std::shared_ptr<const Storage> storage_;
+  friend class Session;
+  friend struct SnapshotView;
+};
+struct SnapshotView {
+  std::size_t event_count = 0;
+  SnapshotInstances instances;
+  std::map<std::string, CameraState> cameras;
+  std::map<std::uint64_t, Vec3> origin_shifts;
+  SnapshotView() = default;
+  PVD_CORE_API SnapshotView(Snapshot snapshot);
+  PVD_CORE_API const InstanceState *instance(std::uint64_t id) const noexcept;
+  PVD_CORE_API Snapshot materialize() const;
+  PVD_CORE_API Snapshot select(const std::vector<std::uint64_t> &ids) const;
+  PVD_CORE_API SnapshotView
+  select_view(const std::vector<std::uint64_t> &ids) const;
+  operator Snapshot() const { return materialize(); }
+};
 struct ObjectLifetime {
   std::uint64_t id = 0, generation = 0, creating_stream = 0;
   QualifiedName class_name;
@@ -158,6 +317,10 @@ struct SessionOptions {
   // property byte buffers are shared and are not counted again. Zero disables
   // checkpoints; SIZE_MAX removes this byte bound (the count bound remains).
   std::size_t max_checkpoint_bytes = 128u * 1024u * 1024u;
+  // Owned instance maps and derived reference versions retained by read queries.
+  // Already published views own their objects independently of cache eviction.
+  // Zero disables strong retention; weak reuse of view-held objects remains.
+  std::size_t max_view_cache_bytes = 128u * 1024u * 1024u;
 };
 class SessionError : public std::runtime_error {
 public:
@@ -226,6 +389,18 @@ public:
   profile_zones() const;
   // Replays a global event prefix; querying an earlier prefix is reverse seek.
   PVD_CORE_API Snapshot snapshot_at_event(std::size_t event_count) const;
+  // Exact projection at the requested prefix. Only requested live IDs are
+  // present (references may target omitted objects). No inferred closure.
+  // Native coordinate state remains exact; origin-shift prefixes currently
+  // use full-state replay internally before projection.
+  PVD_CORE_API Snapshot snapshot_selected_at_event(
+      std::size_t event_count, const std::vector<std::uint64_t> &ids) const;
+  PVD_CORE_API std::optional<InstanceState>
+  instance_at_event(std::size_t event_count, std::uint64_t id) const;
+  // Cache-assisted read queries serialize their caches internally. Append and
+  // finish still require the same external synchronization as other queries.
+  PVD_CORE_API SnapshotView snapshot_view_at_event(std::size_t event_count) const;
+  PVD_CORE_API SnapshotView snapshot_view_at_frame(std::size_t global_frame_index) const;
   PVD_CORE_API Snapshot snapshot_at_frame(std::size_t global_frame_index) const;
   PVD_CORE_API Snapshot snapshot_at_frame(std::uint64_t stream_id,
                                           std::uint64_t scene_id,
@@ -235,6 +410,7 @@ public:
   // Estimated owned structures retained by noninitial checkpoints; excludes
   // immutable shared byte buffers and allocator-specific overhead.
   PVD_CORE_API std::size_t estimated_checkpoint_bytes() const;
+  PVD_CORE_API std::size_t estimated_view_cache_bytes() const;
 
 private:
   struct Impl;

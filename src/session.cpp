@@ -5,6 +5,8 @@
 #include <fstream>
 #include <filesystem>
 #include <limits>
+#include <list>
+#include <mutex>
 #include <set>
 #include <string_view>
 #include <type_traits>
@@ -192,6 +194,62 @@ const InstanceState *Snapshot::instance(std::uint64_t id) const noexcept {
   auto i = instances.find(id);
   return i == instances.end() ? nullptr : &i->second;
 }
+SnapshotInstances::SnapshotInstances() {
+  static const auto empty = std::make_shared<const Storage>();
+  storage_ = empty;
+}
+SnapshotView::SnapshotView(Snapshot snapshot)
+    : event_count(snapshot.event_count), cameras(std::move(snapshot.cameras)),
+      origin_shifts(std::move(snapshot.origin_shifts)) {
+  auto objects = std::make_shared<SnapshotInstances::Storage>();
+  objects->reserve(snapshot.instances.size());
+  for (auto &entry : snapshot.instances)
+    objects->emplace(entry.first, std::make_shared<const InstanceState>(
+                                      std::move(entry.second)));
+  instances = SnapshotInstances(std::move(objects));
+}
+const InstanceState *SnapshotView::instance(std::uint64_t id) const noexcept {
+  auto found = instances.find(id);
+  return found == instances.end() ? nullptr : &found->second;
+}
+Snapshot SnapshotView::materialize() const {
+  Snapshot result;
+  result.event_count = event_count;
+  result.cameras = cameras;
+  result.origin_shifts = origin_shifts;
+  for (const auto &entry : instances)
+    result.instances.emplace(entry.first, entry.second);
+  return result;
+}
+Snapshot SnapshotView::select(const std::vector<std::uint64_t> &ids) const {
+  Snapshot result;
+  result.event_count = event_count;
+  result.cameras = cameras;
+  result.origin_shifts = origin_shifts;
+  for (auto id : ids)
+    if (auto object = instance(id))
+      result.instances.emplace(id, *object);
+  return result;
+}
+SnapshotView
+SnapshotView::select_view(const std::vector<std::uint64_t> &ids) const {
+  SnapshotView result;
+  result.event_count = event_count;
+  result.cameras = cameras;
+  result.origin_shifts = origin_shifts;
+  auto objects = std::make_shared<SnapshotInstances::Storage>();
+  std::vector<std::uint64_t> ordered(ids);
+  std::sort(ordered.begin(), ordered.end());
+  ordered.erase(std::unique(ordered.begin(), ordered.end()), ordered.end());
+  objects->reserve(ordered.size());
+  for (auto id : ordered) {
+    auto object = instances.storage_->find(id);
+    if (object != instances.storage_->end())
+      objects->emplace(id, object->second);
+  }
+  result.instances = SnapshotInstances(std::move(objects));
+  return result;
+}
 SessionError::SessionError(std::string m, std::size_t i, std::uint64_t o)
     : std::runtime_error(std::move(m) + " at event " + std::to_string(i) +
                          " (byte " + std::to_string(o) + ")"),
@@ -213,7 +271,7 @@ struct Session::Impl {
     std::size_t event_count = 0;
     Kind kind = Kind::assign;
     std::uint64_t id = 0;
-    InstanceState instance;
+    std::unique_ptr<InstanceState> instance;
     std::vector<std::pair<std::string, PropertyValue>> assignments;
     bool flag = false;
     Color color;
@@ -223,6 +281,8 @@ struct Session::Impl {
     std::string reference_property;
     std::uint64_t reference = 0;
   };
+  static_assert(std::is_nothrow_move_constructible_v<Operation>,
+                "Operation history growth must move, never deep-copy assignments");
   struct Chunk {
     std::uint64_t id;
     std::string property;
@@ -244,6 +304,38 @@ struct Session::Impl {
   std::vector<ChannelPacket> channels;
   std::map<std::uint64_t, ProfileZoneInfo> zones;
   std::vector<Operation> operations;
+  std::map<std::uint64_t, std::vector<std::size_t>> object_operations;
+  struct PropertyWrite { std::size_t operation, argument; };
+  static constexpr auto reference_argument = std::numeric_limits<std::size_t>::max();
+  std::map<std::uint64_t, std::map<std::string, std::vector<PropertyWrite>>> property_operations;
+  std::map<std::uint64_t, std::vector<std::size_t>> creation_operations;
+  std::map<std::uint64_t, std::array<std::vector<std::size_t>, 3>> attribute_operations;
+  std::vector<std::size_t> camera_operations, origin_operations;
+  struct CachedInstance {
+    std::size_t version = reference_argument, bytes = 0;
+    std::uint64_t used = 0;
+    std::weak_ptr<const InstanceState> weak;
+    std::shared_ptr<const InstanceState> strong;
+    std::list<std::uint64_t>::iterator position;
+  };
+  mutable std::map<std::uint64_t, CachedInstance> instance_cache;
+  mutable std::mutex view_mutex;
+  mutable std::list<std::uint64_t> instance_lru;
+  mutable std::size_t instance_cache_bytes = 0, view_queries = 0;
+  using ReferenceVersion = std::tuple<std::uint64_t, std::size_t, std::string, std::size_t>;
+  struct CachedReference {
+    std::shared_ptr<const PropertyValue> value;
+    std::size_t bytes = 0;
+    std::uint64_t used = 0;
+    std::list<ReferenceVersion>::iterator position;
+  };
+  mutable std::map<ReferenceVersion, CachedReference> reference_cache;
+  mutable std::list<ReferenceVersion> reference_lru;
+  mutable std::size_t reference_cache_bytes = 0;
+  mutable std::uint64_t cache_clock = 0;
+  mutable std::weak_ptr<const SnapshotInstances::Storage> previous_view;
+  mutable std::size_t previous_view_event = 0;
+  mutable bool previous_view_shifted = false;
   std::map<std::size_t, Snapshot> checkpoints;
   std::map<std::size_t, std::size_t> checkpoint_weights;
   std::size_t checkpoint_bytes = 0;
@@ -338,7 +430,7 @@ struct Session::Impl {
                     const StreamHeader &header, DirtyReferences &dirty) {
     switch (o.kind) {
     case Kind::create:
-      s.instances.emplace(o.id, o.instance);
+      s.instances.emplace(o.id, *o.instance);
       break;
     case Kind::destroy:
       for (auto it = dirty.lower_bound({o.id, {}});
@@ -449,6 +541,232 @@ struct Session::Impl {
     o.event_count = index + 1;
     apply(working, o, metadata, header, working_dirty);
     operations.push_back(std::move(o));
+    const auto operation_index = operations.size() - 1;
+    const auto &committed = operations.back();
+    if (committed.kind == Kind::camera)
+      camera_operations.push_back(operation_index);
+    else if (committed.kind == Kind::origin)
+      origin_operations.push_back(operation_index);
+    else
+      object_operations[committed.id].push_back(operation_index);
+    if (committed.kind == Kind::create)
+      creation_operations[committed.id].push_back(operation_index);
+    else if (committed.kind == Kind::assign) {
+      for (std::size_t n = 0; n < committed.assignments.size(); ++n)
+        property_operations[committed.id][committed.assignments[n].first]
+            .push_back({operation_index, n});
+    } else if (committed.kind == Kind::reference_delta)
+      property_operations[committed.id][committed.reference_property].push_back(
+          {operation_index, reference_argument});
+    else if (committed.kind == Kind::pickable ||
+             committed.kind == Kind::top_level || committed.kind == Kind::color)
+      attribute_operations[committed.id]
+                          [committed.kind == Kind::pickable    ? 0
+                           : committed.kind == Kind::top_level ? 1
+                                                               : 2]
+                              .push_back(operation_index);
+  }
+  std::vector<std::size_t>::const_iterator
+  after(const std::vector<std::size_t> &indices, std::size_t count) const {
+    return std::upper_bound(indices.begin(), indices.end(), count,
+                            [&](std::size_t event, std::size_t index) {
+                              return event < operations[index].event_count;
+                            });
+  }
+  void trim_derived_cache(std::size_t incoming) const {
+    while (incoming > options.max_view_cache_bytes - instance_cache_bytes - reference_cache_bytes) {
+      const bool remove_reference = !reference_lru.empty() &&
+          (instance_lru.empty() || reference_cache.at(reference_lru.front()).used <= instance_cache.at(instance_lru.front()).used);
+      if (remove_reference) {
+        auto found = reference_cache.find(reference_lru.front());
+        reference_cache_bytes -= found->second.bytes;
+        reference_cache.erase(found);
+        reference_lru.pop_front();
+      } else if (!instance_lru.empty()) {
+        auto &old = instance_cache.at(instance_lru.front());
+        instance_cache_bytes -= old.bytes;
+        old.strong.reset();
+        instance_lru.pop_front();
+      } else break;
+    }
+  }
+  std::shared_ptr<const PropertyValue> reference_value(std::uint64_t id,
+      std::size_t creation, const std::string &property,
+      const std::vector<PropertyWrite> &writes,
+      std::vector<PropertyWrite>::const_iterator last) const {
+    const auto latest = std::prev(last)->operation;
+    const ReferenceVersion key{id, creation, property, latest};
+    auto previous = reference_cache.upper_bound(key);
+    std::shared_ptr<const PropertyValue> base;
+    std::size_t base_operation = 0;
+    if (previous != reference_cache.begin()) {
+      --previous;
+      const auto &old = previous->first;
+      if (std::get<0>(old)==id && std::get<1>(old)==creation && std::get<2>(old)==property) {
+        previous->second.used = ++cache_clock;
+        reference_lru.splice(reference_lru.end(), reference_lru, previous->second.position);
+        if (std::get<3>(old)==latest) return previous->second.value;
+        base = previous->second.value;
+        base_operation = std::get<3>(old);
+      }
+    }
+    auto first = last;
+    Snapshot reference;
+    reference.instances.emplace(id, *operations[creation].instance);
+    if (base) {
+      reference.instances.at(id).properties.emplace(property, *base);
+      first = std::upper_bound(writes.begin(), last, base_operation,
+          [](std::size_t operation, const PropertyWrite &write) { return operation < write.operation; });
+    } else {
+      while (first != writes.begin() && std::prev(first)->operation >= creation) {
+        --first;
+        if (first->argument != reference_argument) break;
+      }
+      if (first->argument != reference_argument) {
+        reference.instances.at(id).properties.emplace(property,
+            operations[first->operation].assignments[first->argument].second);
+        ++first;
+      }
+    }
+    DirtyReferences dirty;
+    for (; first != last; ++first) if (first->operation >= creation) {
+      if (first->argument == reference_argument)
+        apply(reference, operations[first->operation], metadata, header, dirty);
+      else {
+        reference.instances.at(id).properties[property] = operations[first->operation].assignments[first->argument].second;
+        dirty.erase({id, property});
+      }
+    }
+    materialize_references(reference, dirty);
+    auto value = std::make_shared<const PropertyValue>(std::move(reference.instances.at(id).properties.at(property)));
+    // Complete versions are cached only when queried, never on each wire delta.
+    const auto weight = sizeof(CachedReference) + sizeof(PropertyValue) + sizeof(Bytes) +
+        2*sizeof(ReferenceVersion) + 10*sizeof(void*) + 2*property.size() +
+        value->raw_bytes().size() + (value->reference_ids ? value->reference_ids->capacity()*sizeof(std::uint64_t) : 0);
+    if (weight <= options.max_view_cache_bytes) {
+      trim_derived_cache(weight);
+      reference_lru.push_back(key);
+      try {
+        reference_cache.emplace(key, CachedReference{value, weight, ++cache_clock, std::prev(reference_lru.end())});
+      } catch (...) { reference_lru.pop_back(); throw; }
+      reference_cache_bytes += weight;
+    }
+    return value;
+  }
+  std::shared_ptr<const InstanceState>
+  reconstruct_instance(std::size_t count, std::uint64_t id) const {
+    const auto history = object_operations.find(id);
+    if (history == object_operations.end())
+      return {};
+    auto end = after(history->second, count);
+    if (end == history->second.begin())
+      return {};
+    const auto version = *std::prev(end);
+    if (operations[version].kind == Kind::destroy)
+      return {};
+    const auto &creates = creation_operations.at(id);
+    auto created = after(creates, count);
+    if (created == creates.begin())
+      return {};
+    const auto creation = *std::prev(created);
+    auto result =
+        std::make_shared<InstanceState>(*operations[creation].instance);
+    auto fields = property_operations.find(id);
+    if (fields != property_operations.end())
+      for (const auto &field : fields->second) {
+        const auto &writes = field.second;
+        auto last = std::upper_bound(
+            writes.begin(), writes.end(), count,
+            [&](std::size_t event, const PropertyWrite &write) {
+              return event < operations[write.operation].event_count;
+            });
+        if (last == writes.begin() || std::prev(last)->operation < creation)
+          continue;
+        const auto &latest = *std::prev(last);
+        if (latest.argument != reference_argument) {
+          result->properties.emplace(
+              field.first,
+              operations[latest.operation].assignments[latest.argument].second);
+          continue;
+        }
+        result->properties.emplace(field.first, *reference_value(id, creation, field.first, writes, last));
+      }
+    auto attributes = attribute_operations.find(id);
+    if (attributes != attribute_operations.end())
+      for (unsigned n = 0; n < 3; ++n) {
+        const auto &values = attributes->second[n];
+        auto value = after(values, count);
+        if (value == values.begin() || *std::prev(value) < creation)
+          continue;
+        const auto &operation = operations[*std::prev(value)];
+        if (n == 0)
+          result->pickable = operation.flag;
+        else if (n == 1)
+          result->top_level = operation.flag;
+        else
+          result->color = operation.color;
+      }
+    return result;
+  }
+  std::shared_ptr<const InstanceState>
+  indexed_instance(std::size_t count, std::uint64_t id) const {
+    const auto history = object_operations.find(id);
+    if (history == object_operations.end())
+      return {};
+    auto end = after(history->second, count);
+    if (end == history->second.begin())
+      return {};
+    const auto version = *std::prev(end);
+    if (operations[version].kind == Kind::destroy)
+      return {};
+    auto &cached = instance_cache[id];
+    if (cached.version == version)
+      if (auto result = cached.weak.lock()) {
+        if (cached.strong)
+          instance_lru.splice(instance_lru.end(), instance_lru,
+                              cached.position);
+        cached.used = ++cache_clock;
+        return result;
+      }
+    auto result = reconstruct_instance(count, id);
+    if (cached.strong) {
+      instance_cache_bytes -= cached.bytes;
+      instance_lru.erase(cached.position);
+      cached.strong.reset();
+    }
+    cached.version = version;
+    cached.weak = result;
+    // Conservatively include the strong entry/index/list/control structures.
+    // Ref bytes may be derived buffers, so count them even when shared; other
+    // immutable payload bytes remain shared with the source operation history.
+    std::size_t weight = sizeof(InstanceState) +
+        sizeof(std::pair<const std::uint64_t, CachedInstance>) + 8*sizeof(void*) + sizeof(std::uint64_t);
+    for (const auto *text : {&result->class_name.namespace_name, &result->class_name.name})
+      if (text->size() > std::string{}.capacity()) weight += text->size()+1;
+    for (const auto &property : result->properties) {
+      weight += sizeof(property) + 4 * sizeof(void *);
+      if (property.first.size() > std::string{}.capacity())
+        weight += property.first.size() + 1;
+      const auto &value = property.second;
+      for (const auto *text :
+           {&value.incoming_type.namespace_name, &value.incoming_type.name})
+        if (text->size() > std::string{}.capacity())
+          weight += text->size() + 1;
+      if (value.text && value.text->size() > std::string{}.capacity())
+        weight += value.text->size() + 1;
+      if (value.reference_ids)
+        weight += value.reference_ids->capacity() * sizeof(std::uint64_t) + value.raw_bytes().size();
+    }
+    if (weight <= options.max_view_cache_bytes) {
+      trim_derived_cache(weight);
+      instance_lru.push_back(id);
+      cached.position = std::prev(instance_lru.end());
+      cached.bytes = weight;
+      cached.strong = result;
+      cached.used = ++cache_clock;
+      instance_cache_bytes += weight;
+    }
+    return result;
   }
   static std::size_t estimated_snapshot_bytes(const Snapshot &state) noexcept {
     std::size_t bytes = sizeof(Snapshot);
@@ -713,10 +1031,11 @@ struct Session::Impl {
             Operation op;
             op.kind = Kind::create;
             op.id = v.instance_id;
-            op.instance.id = v.instance_id;
-            op.instance.generation = gen;
-            op.instance.creating_stream = stream;
-            op.instance.class_name = std::move(t);
+            op.instance = std::make_unique<InstanceState>();
+            op.instance->id = v.instance_id;
+            op.instance->generation = gen;
+            op.instance->creating_stream = stream;
+            op.instance->class_name = std::move(t);
             commit(std::move(op));
           } else if constexpr (std::is_same_v<T, DestroyInstance>) {
             object(v.instance_id);
@@ -1082,6 +1401,142 @@ Snapshot Session::snapshot_at_frame(std::size_t frame) const {
     throw std::out_of_range("frame index exceeds capture");
   return snapshot_at_event(impl_->frames[frame].event_count);
 }
+Snapshot Session::snapshot_selected_at_event(
+    std::size_t count, const std::vector<std::uint64_t> &ids) const {
+  impl_->require_state();
+  if (count > impl_->events.size())
+    throw std::out_of_range("snapshot event count exceeds capture");
+  const std::lock_guard<std::mutex> cache_lock(impl_->view_mutex);
+  Snapshot state;
+  state.event_count = count;
+  // Coordinate shifts depend on scene membership at each shift, not only on
+  // the selected object's writes. Retain the proven full replay for this case.
+  if (!impl_->origin_operations.empty() &&
+      impl_->operations[impl_->origin_operations.front()].event_count <=
+          count) {
+    auto full = snapshot_at_event(count);
+    state.cameras = std::move(full.cameras);
+    state.origin_shifts = std::move(full.origin_shifts);
+    for (auto id : ids) {
+      auto object = full.instances.find(id);
+      if (object != full.instances.end())
+        state.instances.emplace(id, std::move(object->second));
+    }
+    return state;
+  }
+  for (auto id : std::set<std::uint64_t>(ids.begin(), ids.end())) {
+    auto object = impl_->reconstruct_instance(count, id);
+    if (object)
+      state.instances.emplace(id, *object);
+  }
+  for (auto index : impl_->camera_operations) {
+    const auto &operation = impl_->operations[index];
+    if (operation.event_count > count)
+      break;
+    state.cameras[operation.camera_name] = operation.camera;
+  }
+  return state;
+}
+std::optional<InstanceState>
+Session::instance_at_event(std::size_t count, std::uint64_t id) const {
+  auto selected = snapshot_selected_at_event(count, {id});
+  auto found = selected.instances.find(id);
+  if (found == selected.instances.end())
+    return {};
+  return std::move(found->second);
+}
+SnapshotView Session::snapshot_view_at_event(std::size_t count) const {
+  impl_->require_state();
+  if (count > impl_->events.size())
+    throw std::out_of_range("snapshot event count exceeds capture");
+  const std::lock_guard<std::mutex> cache_lock(impl_->view_mutex);
+  const bool shifted =
+      !impl_->origin_operations.empty() &&
+      impl_->operations[impl_->origin_operations.front()].event_count <= count;
+  if (shifted) {
+    SnapshotView view(snapshot_at_event(count));
+    impl_->previous_view = view.instances.storage_;
+    impl_->previous_view_event = count;
+    impl_->previous_view_shifted = true;
+    return view;
+  }
+  auto previous = !impl_->previous_view_shifted
+                      ? impl_->previous_view.lock()
+                      : std::shared_ptr<const SnapshotInstances::Storage>{};
+  std::shared_ptr<SnapshotInstances::Storage> objects;
+  if (previous) {
+    std::set<std::uint64_t> changed;
+    const auto lower = std::min(count, impl_->previous_view_event);
+    const auto upper = std::max(count, impl_->previous_view_event);
+    auto operation = std::upper_bound(
+        impl_->operations.begin(), impl_->operations.end(), lower,
+        [](std::size_t event, const Impl::Operation &value) {
+          return event < value.event_count;
+        });
+    for (; operation != impl_->operations.end() &&
+           operation->event_count <= upper;
+         ++operation)
+      if (operation->kind != Impl::Kind::camera &&
+          operation->kind != Impl::Kind::origin)
+        changed.insert(operation->id);
+    if (!changed.empty()) {
+      objects = std::make_shared<SnapshotInstances::Storage>(*previous);
+      for (auto id : changed) {
+        auto object = impl_->indexed_instance(count, id);
+        if (object)
+          (*objects)[id] = std::move(object);
+        else
+          objects->erase(id);
+      }
+    }
+  } else {
+    objects = std::make_shared<SnapshotInstances::Storage>();
+    std::vector<std::uint64_t> alive;
+    alive.reserve(impl_->lifetimes.size());
+    for (const auto &lifetime : impl_->lifetimes)
+      if (lifetime.created_event < count &&
+          (!lifetime.destroyed_event || *lifetime.destroyed_event >= count))
+        alive.push_back(lifetime.id);
+    std::sort(alive.begin(), alive.end());
+    alive.erase(std::unique(alive.begin(), alive.end()), alive.end());
+    objects->reserve(alive.size());
+    for (auto id : alive) {
+      auto object = impl_->indexed_instance(count, id);
+      if (object)
+        objects->emplace(id, std::move(object));
+    }
+  }
+  SnapshotView view;
+  view.event_count = count;
+  view.instances = SnapshotInstances(
+      objects ? std::shared_ptr<const SnapshotInstances::Storage>(
+                    std::move(objects))
+              : previous);
+  for (auto index : impl_->camera_operations) {
+    const auto &operation = impl_->operations[index];
+    if (operation.event_count > count)
+      break;
+    view.cameras[operation.camera_name] = operation.camera;
+  }
+  impl_->previous_view = view.instances.storage_;
+  impl_->previous_view_event = count;
+  impl_->previous_view_shifted = false;
+  if (++impl_->view_queries % 64 == 0) {
+    for (auto cached = impl_->instance_cache.begin();
+         cached != impl_->instance_cache.end();)
+      if (!cached->second.strong && cached->second.weak.expired())
+        cached = impl_->instance_cache.erase(cached);
+      else
+        ++cached;
+  }
+  return view;
+}
+SnapshotView Session::snapshot_view_at_frame(std::size_t frame) const {
+  impl_->require_state();
+  if (frame >= impl_->frames.size())
+    throw std::out_of_range("frame index exceeds capture");
+  return snapshot_view_at_event(impl_->frames[frame].event_count);
+}
 Snapshot Session::snapshot_at_frame(std::uint64_t stream, std::uint64_t scene,
                                     std::size_t frame) const {
   impl_->require_state();
@@ -1100,5 +1555,10 @@ std::size_t Session::checkpoint_count() const {
 std::size_t Session::estimated_checkpoint_bytes() const {
   impl_->require_state();
   return impl_->checkpoint_bytes;
+}
+std::size_t Session::estimated_view_cache_bytes() const {
+  impl_->require_state();
+  const std::lock_guard<std::mutex> cache_lock(impl_->view_mutex);
+  return impl_->instance_cache_bytes + impl_->reference_cache_bytes;
 }
 } // namespace pvd

@@ -82,6 +82,10 @@ public:
     PVD_TRANSPORT_API CaptureStatus status() const;
     PVD_TRANSPORT_API CapturePoll poll_from(std::size_t accepted_event_count,
         std::size_t max_events = 16384, std::size_t max_payload_bytes = 8u * 1024u * 1024u) const;
+    // Same coherent cursor/limits as poll_from. Returns nullopt immediately
+    // while receive/decode owns the source lock; no cursor is consumed.
+    PVD_TRANSPORT_API std::optional<CapturePoll> try_poll_from(std::size_t accepted_event_count,
+        std::size_t max_events = 16384, std::size_t max_payload_bytes = 8u * 1024u * 1024u) const;
     PVD_TRANSPORT_API std::optional<StreamHeader> header() const;
     PVD_TRANSPORT_API Metadata metadata() const;
     PVD_TRANSPORT_API std::vector<Event> events() const;

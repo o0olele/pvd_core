@@ -459,22 +459,21 @@ CaptureStatus TcpCapture::status() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->progress;
 }
-CapturePoll TcpCapture::poll_from(std::size_t cursor, std::size_t max_events, std::size_t max_payload_bytes) const {
-    if (!max_events || !max_payload_bytes)
-        throw std::invalid_argument("capture poll limits must be nonzero");
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+namespace {
+CapturePoll copy_poll(const Session* session, const CaptureStatus& progress, std::size_t cursor,
+                      std::size_t max_events, std::size_t max_payload_bytes) {
     CapturePoll out;
-    out.status = impl_->progress;
+    out.status = progress;
     out.begin_event_count = out.end_event_count = cursor;
     if (cursor > out.status.recoverable_event_count)
         throw std::out_of_range("capture poll cursor exceeds recoverable event prefix");
-    if (!impl_->session) {
+    if (!session) {
         if (cursor)
             throw std::out_of_range("capture has no event source");
         return out;
     }
-    out.header = impl_->session->header();
-    const auto &events = impl_->session->events();
+    out.header = session->header();
+    const auto &events = session->events();
     if (out.status.recoverable_event_count > events.size())
         throw std::logic_error("recoverable event prefix exceeds accepted source");
     const auto available = out.status.recoverable_event_count - cursor;
@@ -495,6 +494,21 @@ CapturePoll TcpCapture::poll_from(std::size_t cursor, std::size_t max_events, st
     out.events.assign(events.begin() + static_cast<std::ptrdiff_t>(cursor),
                       events.begin() + static_cast<std::ptrdiff_t>(out.end_event_count));
     return out;
+}
+} // namespace
+CapturePoll TcpCapture::poll_from(std::size_t cursor, std::size_t max_events, std::size_t max_payload_bytes) const {
+    if (!max_events || !max_payload_bytes)
+        throw std::invalid_argument("capture poll limits must be nonzero");
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return copy_poll(impl_->session.get(), impl_->progress, cursor, max_events, max_payload_bytes);
+}
+std::optional<CapturePoll> TcpCapture::try_poll_from(std::size_t cursor, std::size_t max_events,
+                                                  std::size_t max_payload_bytes) const {
+    if (!max_events || !max_payload_bytes)
+        throw std::invalid_argument("capture poll limits must be nonzero");
+    std::unique_lock<std::mutex> lock(impl_->mutex, std::try_to_lock);
+    if (!lock.owns_lock()) return {};
+    return copy_poll(impl_->session.get(), impl_->progress, cursor, max_events, max_payload_bytes);
 }
 std::optional<StreamHeader> TcpCapture::header() const {
     std::lock_guard<std::mutex> lock(impl_->mutex);

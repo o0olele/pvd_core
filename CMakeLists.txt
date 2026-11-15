@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(pvd_core VERSION 0.10.0 LANGUAGES CXX)
+project(pvd_core VERSION 0.11.0 LANGUAGES CXX)
 
 option(BUILD_SHARED_LIBS "Build pvd_core as a shared library" OFF)
 option(PVD_BUILD_TOOLS "Build the headless capture inspection tool" ON)
@@ -17,9 +17,11 @@ option(PVD_BUILD_PHYSX34_VALIDATION "Build tests using an external PhysX 3.4 SDK
 include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
+find_package(Threads REQUIRED)
 
 add_library(pvd_core src/protocol.cpp src/session.cpp src/writer.cpp src/coordinates.cpp src/clips.cpp)
 add_library(pvd::core ALIAS pvd_core)
+target_link_libraries(pvd_core PRIVATE Threads::Threads)
 set_target_properties(pvd_core PROPERTIES EXPORT_NAME core VERSION ${PROJECT_VERSION}
     SOVERSION ${PROJECT_VERSION_MAJOR} CXX_EXTENSIONS OFF)
 target_compile_features(pvd_core PUBLIC cxx_std_17)
@@ -38,7 +40,6 @@ endif()
 
 set(PVD_INSTALL_TARGETS pvd_core)
 if(PVD_BUILD_TRANSPORT)
-    find_package(Threads REQUIRED)
     add_library(pvd_transport src/capture.cpp)
     add_library(pvd::transport ALIAS pvd_transport)
     set_target_properties(pvd_transport PROPERTIES EXPORT_NAME transport VERSION ${PROJECT_VERSION}
@@ -110,6 +111,13 @@ if(PVD_BUILD_TOOLS)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(pvd_session_view_tests tests/session_view_tests.cpp)
+    target_link_libraries(pvd_session_view_tests PRIVATE pvd::core Threads::Threads)
+    if(MSVC)
+        target_compile_options(pvd_session_view_tests PRIVATE /W4 /permissive- /utf-8)
+    endif()
+    add_test(NAME session_view COMMAND pvd_session_view_tests)
+    set_tests_properties(session_view PROPERTIES TIMEOUT 30)
     add_executable(pvd_session_refs_tests tests/session_refs_tests.cpp)
     target_link_libraries(pvd_session_refs_tests PRIVATE pvd::core)
     if(MSVC)
