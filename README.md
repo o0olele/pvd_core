@@ -36,6 +36,8 @@ ImGui 主机与面板支持[每显示器 DPI 和字体重建](docs/ui-scale.md)�
 
 0.10 版修复大量对象引用追加时的平方级内存增长，检查点增加默认 128 MiB 的结构预算，并缓存暂停状态的场景对象树。复杂初始化录制的复测与内存指标见[性能记录](docs/performance.md)。`SessionOptions` 新增字段，DLL 与调用方需要一同重新编译。
 
+0.11 版针对实际场景的播放与相机卡顿增加完整只读 `SnapshotView`、选定对象查询和直接读取视图的渲染提取入口，复用静态对象及当前场景网格；实时增量读取支持不等待后台解析锁。新增 `pvd_viewer_benchmark` 可分别测量播放、相机、GPU 完成和面板耗时，见[性能记录](docs/performance.md)。升级时需同步更新 DLL 与调用方。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

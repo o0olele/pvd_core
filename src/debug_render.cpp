@@ -107,7 +107,8 @@ std::size_t primitive_count(const DebugResult &out) {
   return out.points.size() + out.lines.size() + out.triangles.size() +
          out.texts.size() + out.constraints.size();
 }
-std::optional<bool> belongs(const Snapshot &snapshot, const Metadata &meta,
+template <class SnapshotLike>
+std::optional<bool> belongs(const SnapshotLike &snapshot, const Metadata &meta,
                             std::uint64_t id, std::uint64_t scene,
                             std::set<std::uint64_t> &seen) {
   if (id == scene)
@@ -136,7 +137,8 @@ std::optional<bool> belongs(const Snapshot &snapshot, const Metadata &meta,
   }
   return known ? std::optional<bool>(false) : std::nullopt;
 }
-bool selected_scene(const Snapshot &snapshot, const Metadata &meta,
+template <class SnapshotLike>
+bool selected_scene(const SnapshotLike &snapshot, const Metadata &meta,
                     const DebugRange &range, const DebugSource &source) {
   if (!range.scene_id)
     return true;
@@ -213,7 +215,9 @@ void axes(DebugResult &out, DebugSource source, const Transform &t,
 }
 } // namespace
 
-DebugResult extract_contacts(const Snapshot &snapshot, const Metadata &metadata,
+namespace {
+template <class SnapshotLike>
+DebugResult extract_contacts_impl(const SnapshotLike &snapshot, const Metadata &metadata,
                              std::uint64_t scene_id, DebugOptions options) {
   DebugResult out;
   const auto *scene = snapshot.instance(scene_id);
@@ -280,7 +284,8 @@ DebugResult extract_contacts(const Snapshot &snapshot, const Metadata &metadata,
   return out;
 }
 
-DebugResult extract_debug(const Snapshot &snapshot, const Metadata &metadata,
+template <class SnapshotLike>
+DebugResult extract_debug_impl(const SnapshotLike &snapshot, const Metadata &metadata,
                           const std::vector<ChannelPacket> &packets,
                           DebugRange range, DebugOptions options) {
   DebugResult out;
@@ -292,7 +297,7 @@ DebugResult extract_debug(const Snapshot &snapshot, const Metadata &metadata,
     return out;
   }
   if (range.scene_id)
-    out = extract_contacts(snapshot, metadata, *range.scene_id, options);
+    out = extract_contacts_impl(snapshot, metadata, *range.scene_id, options);
   std::map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t> instance_ids;
   std::size_t previous = 0;
   bool have_previous = false;
@@ -484,10 +489,29 @@ DebugResult extract_debug(const Snapshot &snapshot, const Metadata &metadata,
   return out;
 }
 
+} // namespace
+DebugResult extract_contacts(const Snapshot &snapshot, const Metadata &metadata,
+                             std::uint64_t scene_id, DebugOptions options) {
+  return extract_contacts_impl(snapshot, metadata, scene_id, options);
+}
+DebugResult extract_contacts(const SnapshotView &snapshot, const Metadata &metadata,
+                             std::uint64_t scene_id, DebugOptions options) {
+  return extract_contacts_impl(snapshot, metadata, scene_id, options);
+}
+DebugResult extract_debug(const Snapshot &snapshot, const Metadata &metadata,
+                          const std::vector<ChannelPacket> &packets,
+                          DebugRange range, DebugOptions options) {
+  return extract_debug_impl(snapshot, metadata, packets, std::move(range), options);
+}
+DebugResult extract_debug(const SnapshotView &snapshot, const Metadata &metadata,
+                          const std::vector<ChannelPacket> &packets,
+                          DebugRange range, DebugOptions options) {
+  return extract_debug_impl(snapshot, metadata, packets, std::move(range), options);
+}
 DebugResult extract_debug(const Session &session, const FrameMarker &frame,
                           DebugOptions options,
                           std::vector<std::uint64_t> scene_renderer_ids) {
-  const auto snapshot = session.snapshot_at_event(frame.event_count);
+  const auto snapshot = session.snapshot_view_at_event(frame.event_count);
   return extract_debug(snapshot, session.metadata(), session.channels(),
                        {frame.begin_event_count, frame.event_count,
                         frame.scene_id, std::move(scene_renderer_ids)},

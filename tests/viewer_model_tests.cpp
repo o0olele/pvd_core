@@ -432,6 +432,43 @@ void document_navigation() {
   check(failed && doc.frame() == old && doc.scene_id() == 2,
         "failed open preserves current document");
 }
+void active_mesh_reuse() {
+  Fixture f;
+  for (unsigned i = 0; i < 4; ++i) {
+    f.instance("PxBoxGeometry", 1000 + i);
+    f.value(1000 + i, "HalfExtents", "PxVec3", bytes({float(i + 1), 2, 3}));
+    f.instance("PxShape", 2000 + i);
+    f.ref(2000 + i, "Geometry", {1000 + i});
+    f.pose(2000 + i, "LocalPose", {});
+    f.value(2000 + i, "Flags", "PvdU8", Bytes{11});
+    f.actor(3000 + i, 1, {float(i * 10), 0, 0}, 2000 + i);
+    f.actor(4000 + i, 1, {float(i * 10), 0, 10}, 2000 + i);
+  }
+  f.begin(1); f.end(1);
+  f.pose(10, "GlobalPose", {9, 0, 0}); f.begin(1); f.end(1);
+  ModelOptions options; options.max_tessellation_cache_entries = 1;
+  Document doc(options); doc.adopt(f.session()); doc.set_frame(3);
+  const auto first = doc.frame();
+  std::map<std::uint64_t, std::shared_ptr<const render::TriangleBuffer>> meshes;
+  for (const auto &draw : first->draws) meshes[draw.key.actor.id] = draw.mesh;
+  for (unsigned i = 0; i < 4; ++i)
+    check(meshes.at(3000 + i) == meshes.at(4000 + i),
+          "attachments share tessellation with working set larger than LRU");
+  check(doc.set_frame(4), "pose-only next sample");
+  for (const auto &draw : doc.frame()->draws)
+    check(draw.mesh == meshes.at(draw.key.actor.id),
+          "pose-only playback preserves all active buffer identities beyond LRU");
+  check(doc.tessellation_cache_entries() == 1, "weak reuse does not enlarge strong cache");
+  check(doc.set_frame(0) && doc.set_frame(3), "reverse then restore active working set");
+  for (const auto &draw : doc.frame()->draws)
+    check(draw.mesh == meshes.at(draw.key.actor.id), "retained historical buffers remain reusable");
+  options.max_tessellation_cache_entries = 0;
+  Document uncached(options); uncached.adopt(f.session()); uncached.set_frame(3);
+  const auto unfirst = uncached.frame(); uncached.set_frame(4);
+  check(uncached.tessellation_cache_entries() == 0 &&
+            unfirst->draws[0].mesh != uncached.frame()->draws[0].mesh,
+        "zero tessellation cache keeps its existing disable semantics");
+}
 void query_geometry_publication_lifetime() {
   for (const auto order : {ByteOrder::little, ByteOrder::big}) {
     scene_query_test::Fixture f(order);
@@ -528,6 +565,7 @@ int main(int argc, char **argv) {
     camera_and_picking();
     tight_fit_and_zoom_clipping();
     document_navigation();
+    active_mesh_reuse();
     query_geometry_publication_lifetime();
     if (argc > 1)
       real_capture(argv[1]);

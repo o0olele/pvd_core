@@ -11,6 +11,14 @@
 namespace {
 using namespace pvd;
 namespace r = pvd::render;
+bool testing_view = false;
+r::CoordinateFrames checked_coordinate_frames(
+    const r::Frame &frame, const Snapshot &snapshot,
+    const r::CoordinateFrameOptions &options) {
+  if (testing_view)
+    return r::build_coordinate_frames(frame, SnapshotView(snapshot), options);
+  return r::build_coordinate_frames(frame, snapshot, options);
+}
 void check(bool v, const char *message) {
   if (!v)
     throw std::runtime_error(message);
@@ -150,7 +158,7 @@ void run(ByteOrder order, std::uint8_t width) {
   r::CoordinateFrameOptions options;
   options.actor = options.shape = options.mass = true;
   options.axis_length = 2;
-  auto lines = r::build_coordinate_frames(frame, snapshot, options);
+  auto lines = checked_coordinate_frames(frame, snapshot, options);
   check(lines.complete && lines.actor_count == 3 && lines.shape_count == 4 &&
             lines.mass_count == 2 && lines.actor.size() == 9 &&
             lines.shape.size() == 12 && lines.mass.size() == 6,
@@ -173,24 +181,24 @@ void run(ByteOrder order, std::uint8_t width) {
         "frame building preserves captured bytes");
   options.attachments =
       std::vector<r::PickingKey>{frame.instances[1].picking_key()};
-  auto only = r::build_coordinate_frames(frame, snapshot, options);
+  auto only = checked_coordinate_frames(frame, snapshot, options);
   check(only.complete && only.actor_count == 1 && only.shape_count == 1 &&
             only.mass_count == 1 && only.mass[0].source.key.shape.id == 101,
         "exact attachment filter chooses legitimate shared actor source");
   options.attachments = std::vector<r::PickingKey>{};
-  auto none = r::build_coordinate_frames(frame, snapshot, options);
+  auto none = checked_coordinate_frames(frame, snapshot, options);
   check(none.complete && none.diagnostics.empty() &&
             none.processed_attachments == 0,
         "hidden empty mask performs no source inspection");
   options.attachments.reset();
   options.max_lines = 2;
-  auto budget = r::build_coordinate_frames(frame, snapshot, options);
+  auto budget = checked_coordinate_frames(frame, snapshot, options);
   check(!budget.complete && budget.actor.empty() && budget.shape.empty() &&
             budget.mass.empty(),
         "triad budget is atomic across all families");
   options.max_lines = 6;
   options.max_diagnostics = 1;
-  auto bounded = r::build_coordinate_frames(frame, snapshot, options);
+  auto bounded = checked_coordinate_frames(frame, snapshot, options);
   check(!bounded.complete &&
             bounded.shape.size() + bounded.actor.size() + bounded.mass.size() ==
                 6 &&
@@ -199,23 +207,23 @@ void run(ByteOrder order, std::uint8_t width) {
   options.max_lines = 100;
   options.max_diagnostics = 256;
   options.max_attachments = 1;
-  auto work = r::build_coordinate_frames(frame, snapshot, options);
+  auto work = checked_coordinate_frames(frame, snapshot, options);
   check(!work.complete && work.processed_attachments == 1,
         "attachment work budget");
   options.max_attachments = 100;
   auto latest = session.latest();
-  auto stale = r::build_coordinate_frames(frame, latest, options);
+  auto stale = checked_coordinate_frames(frame, latest, options);
   check(!stale.complete && stale.diagnostics[0].code ==
                                r::CoordinateFrameCode::snapshot_mismatch,
         "mismatched prefixes rejected");
   frame.event_count = latest.event_count;
-  stale = r::build_coordinate_frames(frame, latest, options);
+  stale = checked_coordinate_frames(frame, latest, options);
   check(!stale.complete &&
             stale.diagnostics[0].code == r::CoordinateFrameCode::stale_source,
         "reused actor generation cannot inherit old triad");
   auto current = f.frame(latest);
   options.shape = options.actor = false;
-  auto missing = r::build_coordinate_frames(current, latest, options);
+  auto missing = checked_coordinate_frames(current, latest, options);
   check(
       !missing.complete && missing.mass_count == 1 &&
           missing.diagnostics[0].property == "CMassLocalPose",
@@ -224,7 +232,7 @@ void run(ByteOrder order, std::uint8_t width) {
   auto *p = &damaged.instances.at(10).properties.at("CMassLocalPose");
   p->bytes = std::make_shared<const Bytes>(std::size_t(1), std::uint8_t(0));
   frame = f.frame(snapshot);
-  auto invalid = r::build_coordinate_frames(frame, damaged, options);
+  auto invalid = checked_coordinate_frames(frame, damaged, options);
   check(!invalid.complete && invalid.mass_count == 1 &&
             invalid.diagnostics[0].code ==
                 r::CoordinateFrameCode::invalid_property,
@@ -235,27 +243,27 @@ void run(ByteOrder order, std::uint8_t width) {
   scene_reference.reference_ids = std::vector<std::uint64_t>{2};
   options.attachments =
       std::vector<r::PickingKey>{frame.instances[0].picking_key()};
-  const auto wrong_scene = r::build_coordinate_frames(frame, foreign, options);
+  const auto wrong_scene = checked_coordinate_frames(frame, foreign, options);
   check(!wrong_scene.complete && wrong_scene.mass.empty() &&
             wrong_scene.diagnostics[0].property == "Scene",
         "foreign-scene actor cannot borrow the supplied source scene");
   auto unknown = frame;
   unknown.instances[0].actor.kind = static_cast<r::ActorKind>(99);
   const auto wrong_kind =
-      r::build_coordinate_frames(unknown, snapshot, options);
+      checked_coordinate_frames(unknown, snapshot, options);
   check(!wrong_kind.complete && wrong_kind.mass.empty() &&
             wrong_kind.diagnostics[0].property == "actor.kind",
         "unknown actor kind is explicit rather than treated as articulation");
   options.attachments.reset();
   options.axis_length = 0;
-  auto zero = r::build_coordinate_frames(frame, damaged, options);
+  auto zero = checked_coordinate_frames(frame, damaged, options);
   check(zero.complete && zero.diagnostics.empty(),
         "zero scale disables querying");
   auto before = session.snapshot_at_event(f.before);
   options.axis_length = 2;
   options.actor = true;
   options.mass = false;
-  auto reverse = r::build_coordinate_frames(f.frame(before), before, options);
+  auto reverse = checked_coordinate_frames(f.frame(before), before, options);
   near(reverse.actor[0].position0, {10, 20, 30},
        "reverse seek restores original native frame without mutating source");
 }
@@ -320,7 +328,7 @@ void real(const char *capture, const char *csv_path) {
       r::CoordinateFrameOptions options;
       options.actor = options.shape = options.mass = true;
       options.axis_length = 2;
-      auto result = r::build_coordinate_frames(frame, snapshot, options);
+      auto result = checked_coordinate_frames(frame, snapshot, options);
       check(result.complete && result.actor_count == 9 &&
                 result.shape_count == 9 && result.mass_count == 8,
             "real SDK native classes and captured COM fields");
@@ -373,15 +381,18 @@ void real(const char *capture, const char *csv_path) {
 } // namespace
 int main(int argc, char **argv) {
   try {
-    for (auto order : {ByteOrder::little, ByteOrder::big})
-      for (auto width : {std::uint8_t(4), std::uint8_t(8)})
-        run(order, width);
-    if (argc == 3)
-      real(argv[1], argv[2]);
-    else
-      check(argc == 1, "usage: coordinate_frames_tests "
-                       "[articulation_capture.pxd2 expected.csv]");
-    std::cout << "Coordinate frames native/COM/attachment/generation/budgets "
+    for (bool view : {false, true}) {
+      testing_view = view;
+      for (auto order : {ByteOrder::little, ByteOrder::big})
+        for (auto width : {std::uint8_t(4), std::uint8_t(8)})
+          run(order, width);
+      if (argc == 3)
+        real(argv[1], argv[2]);
+      else
+        check(argc == 1, "usage: coordinate_frames_tests "
+                         "[articulation_capture.pxd2 expected.csv]");
+    }
+    std::cout << "Coordinate frames Snapshot/SnapshotView native/COM/attachment/generation/budgets "
                  "LE/BE 32/64 passed\n";
     return 0;
   } catch (const std::exception &e) {

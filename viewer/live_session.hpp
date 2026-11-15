@@ -7,7 +7,8 @@ struct LivePollLimits {
   std::size_t max_events = 16384, max_payload_bytes = 8u * 1024u * 1024u;
 };
 // UI-independent coordinator. Socket IO, decoding and recording run on the
-// transport worker. The host calls poll(Document&) about every 100ms; it copies
+// transport worker. The host can call poll(Document&) once per display frame;
+// a busy decoder is skipped without waiting or consuming the event cursor. It copies
 // only a bounded new event delta and incrementally advances the existing model.
 // Document/command/poll access is serialized by the host, never concurrently.
 class LiveSession {

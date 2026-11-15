@@ -44,6 +44,9 @@ int main(int argc, char** argv) {
         capture.wait();
         if (capture.status().state != pvd::CaptureState::cancelled)
             throw std::runtime_error("installed TCP module cancellation failed");
+        const auto polled = capture.try_poll_from(0);
+        if (!polled || !polled->events.empty() || !polled->caught_up())
+            throw std::runtime_error("installed nonblocking capture poll failed");
 #endif
         std::ifstream input(std::filesystem::u8path(argv[1]), std::ios::binary);
         if (!input) throw std::runtime_error("cannot open input");
@@ -55,6 +58,35 @@ int main(int argc, char** argv) {
         decoder.finish();
         pvd::Session session(*decoder.header(), decoder.events());
         auto state = session.frames().empty() ? session.latest() : session.snapshot_at_frame(0);
+        const auto view = session.snapshot_view_at_event(state.event_count);
+        if (view.event_count != state.event_count || view.instances.size() != state.instances.size())
+            throw std::runtime_error("installed immutable snapshot view differs from full state");
+        if (session.estimated_view_cache_bytes() > pvd::SessionOptions{}.max_view_cache_bytes)
+            throw std::runtime_error("installed derived cache exceeds its estimated budget");
+        if (!state.instances.empty()) {
+            const auto &entry = *state.instances.begin();
+            const auto selected = session.snapshot_selected_at_event(state.event_count, {entry.first});
+            const auto single = session.instance_at_event(state.event_count, entry.first);
+            const auto *shared = view.instance(entry.first);
+            if (!shared || !single || selected.instances.size() != 1 ||
+                shared->class_name != entry.second.class_name ||
+                shared->generation != entry.second.generation ||
+                shared->properties.size() != entry.second.properties.size() ||
+                single->properties.size() != shared->properties.size())
+                throw std::runtime_error("installed selected/view instance query failed");
+            for (const auto &property : entry.second.properties) {
+                const auto *value = shared->property(property.first);
+                if (!value || value->raw_bytes() != property.second.raw_bytes() ||
+                    value->reference_ids != property.second.reference_ids)
+                    throw std::runtime_error("installed immutable view property differs");
+            }
+            if (view.select({entry.first}).instances.size() != 1 ||
+                view.materialize().instances.size() != state.instances.size())
+                throw std::runtime_error("installed view materialization failed");
+            const auto shared_subset = view.select_view({entry.first, entry.first});
+            if (shared_subset.instances.size() != 1 || shared_subset.instance(entry.first) != shared)
+                throw std::runtime_error("installed view projection must share immutable instances");
+        }
         // These are installed core APIs even with the viewer/SDK disabled.
         if (!session.frames().empty()) {
             const auto &marker = session.frames().front();
@@ -83,7 +115,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("installed raw writer roundtrip failed");
 #ifdef PVD_CONSUMER_RENDER
         pvd::render::Extractor extractor;
-        const auto frame = extractor.extract(session.metadata(), state);
+        const auto frame = extractor.extract(session.metadata(), view);
         for (const auto& shape : frame.instances) {
             const auto triangles = pvd::render::tessellate(shape.geometry);
             if (triangles.positions.empty() || triangles.indices.empty())
@@ -92,16 +124,16 @@ int main(int argc, char** argv) {
         std::cout << "render_instances=" << frame.instances.size() << '\n';
         pvd::render::BodyOverlayOptions overlay_options;
         overlay_options.show_linear_velocity = true;
-        const auto overlays = pvd::render::build_body_overlays(frame, state, overlay_options);
+        const auto overlays = pvd::render::build_body_overlays(frame, view, overlay_options);
         pvd::render::CoordinateFrameOptions coordinate_options;
         coordinate_options.actor = true;
-        const auto axes = pvd::render::build_coordinate_frames(frame, state, coordinate_options);
+        const auto axes = pvd::render::build_coordinate_frames(frame, view, coordinate_options);
         if (!axes.complete) throw std::runtime_error("installed coordinate-frame extraction failed");
         std::cout << "linear_velocity_vectors=" << overlays.linear_vectors
                   << " overlay_diagnostics=" << overlays.diagnostics.size() << '\n';
         if (!frame.instances.empty()) {
             const auto &shape = frame.instances.front();
-            const auto geometry = extractor.extract_geometry(session.metadata(), state,
+            const auto geometry = extractor.extract_geometry(session.metadata(), view,
                 {shape.geometry_id, shape.geometry_generation});
             if (!geometry.geometry) throw std::runtime_error("installed standalone geometry extraction failed");
         }
@@ -117,7 +149,7 @@ int main(int argc, char** argv) {
                       << " query_collections=" << queries.collections.size()
                       << " constraint_lines=" << constraints.lines.size() << '\n';
         }
-        auto deformable = pvd::deformables::extract(session.metadata(), state);
+        auto deformable = pvd::deformables::extract(session.metadata(), view);
         std::cout << "cloths=" << deformable.cloths.size()
                   << " particle_clouds=" << deformable.particle_clouds.size() << '\n';
 #endif

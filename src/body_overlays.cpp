@@ -39,9 +39,9 @@ bool convert(DVec v, Vec3 &out) {
          static_cast<float>(v.z)};
   return finite(out);
 }
-struct Builder {
+template <class SnapshotType> struct Builder {
   const Frame &frame;
-  const Snapshot &snapshot;
+  const SnapshotType &snapshot;
   const BodyOverlayOptions &options;
   BodyOverlays output;
   std::size_t total_lines = 0;
@@ -306,15 +306,24 @@ struct Builder {
     return std::move(output);
   }
 };
-} // namespace
-BodyOverlays build_body_overlays(const Frame &frame, const Snapshot &snapshot,
-                                 const BodyOverlayOptions &options) {
+template <class SnapshotType>
+BodyOverlays build(const Frame &frame, const SnapshotType &snapshot,
+                   const BodyOverlayOptions &options) {
   if (!std::isfinite(options.velocity_scale) || options.velocity_scale < 0 ||
       !options.max_diagnostics)
     throw std::invalid_argument(
         "body overlay scale must be finite and nonnegative; diagnostic limit "
         "must be nonzero");
-  Builder builder{frame, snapshot, options, {}, {}, false, {}, {}, {}};
+  Builder<SnapshotType> builder{frame, snapshot, options, {}, {}, false, {}, {}, {}};
   return builder.run();
+}
+} // namespace
+BodyOverlays build_body_overlays(const Frame &frame, const Snapshot &snapshot,
+                                 const BodyOverlayOptions &options) {
+  return build(frame, snapshot, options);
+}
+BodyOverlays build_body_overlays(const Frame &frame, const SnapshotView &snapshot,
+                                 const BodyOverlayOptions &options) {
+  return build(frame, snapshot, options);
 }
 } // namespace pvd::render

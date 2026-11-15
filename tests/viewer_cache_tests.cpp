@@ -46,12 +46,14 @@ struct Fixture {
   void frame(std::uint64_t scene) { auto n = text("frame"); emit(BeginSection{scene, n, 1}); emit(EndSection{scene, n, 2}); }
   Fixture() {
     header.stream_flags = 1;
-    for (const auto *c : {"PxScene", "PxRigidStatic", "DeferredActor"}) emit(CreateClass{type(c)});
+    for (const auto *c : {"PxScene", "PxRigidStatic", "DeferredActor", "PxMaterial"}) emit(CreateClass{type(c)});
+    property("PxMaterial", "Name", "StringHandle");
     for (const auto *c : {"PxRigidStatic", "DeferredActor"}) {
       property(c, "Scene", "ObjectRef"); property(c, "Shapes", "ObjectRef", true);
       property(c, "GlobalPose", "PxTransform"); property(c, "Name", "StringHandle");
     }
     emit(CreateInstance{type("PxScene"), 1}); emit(CreateInstance{type("PxScene"), 2});
+    emit(CreateInstance{type("PxMaterial"), 500}); name(500, "retained material");
     actor("PxRigidStatic", 10, 1, "first name"); actor("PxRigidStatic", 20, 2, "other scene");
     actor("DeferredActor", 900, 1, "deferred name"); frame(1); frame(2);
     name(10, "updated name"); frame(1); emit(DestroyInstance{10});
@@ -115,8 +117,49 @@ void invalidation() {
     }
   doc.adopt(fixture.session()); check(find(doc.actor_tree(), 10).name == "replacement source", "new Session must never reuse an old source's tree cache");
 }
+void complete_readonly_frame() {
+  Fixture fixture; Document doc; doc.adopt(fixture.session());
+  const auto first = doc.frame();
+  const auto *material = first->snapshot.instance(500);
+  check(material && material->property("Name")->as_string() == "retained material",
+        "full frame state retains material inspection outside spatial projection");
+  check(first->spatial_snapshot && !first->spatial_snapshot->instance(500) &&
+            first->spatial_snapshot->instance(10),
+        "spatial CPU input excludes only unrelated material payloads");
+  doc.set_frame(1); const auto second = doc.frame();
+  check(second->snapshot.instance(500) == material &&
+            first->snapshot.instance(10)->property("Name")->as_string() == "first name" &&
+            second->snapshot.instance(10)->property("Name")->as_string() == "updated name",
+        "unchanged instances share immutable versions while changed objects preserve history");
+  const Snapshot legacy = second->snapshot;
+  check(legacy.instances.size() == second->snapshot.instances.size() && legacy.instance(500),
+        "explicit legacy materialization remains complete");
+  const auto source = second->spatial_snapshot;
+  doc.inspect(500);
+  check(doc.inspected_instance() && doc.inspected_instance()->id == 500 &&
+            doc.frame()->spatial_snapshot == source,
+        "inspecting a material keeps full source availability and shares spatial state");
+}
+void spatial_candidate_lifetimes() {
+  Fixture fixture;
+  fixture.emit(DestroyInstance{500}); fixture.actor("DeferredActor",500,1,"future nonmaterial"); fixture.frame(1);
+  fixture.emit(DestroyInstance{500}); fixture.emit(CreateInstance{fixture.type("PxMaterial"),500}); fixture.name(500,"material again"); fixture.frame(1);
+  Document doc; doc.adopt(fixture.session());
+  check(doc.frame()->snapshot.instance(500) && !doc.frame()->spatial_snapshot->instance(500),
+        "future nonmaterial lifetime cannot project an earlier material generation");
+  doc.set_frame(3);
+  check(doc.frame()->spatial_snapshot->instance(500) && doc.frame()->spatial_snapshot->instance(500)->generation==1,
+        "future candidate is projected only when its current lifetime exists");
+  doc.set_frame(4);
+  check(doc.frame()->snapshot.instance(500)->generation==2 && !doc.frame()->spatial_snapshot->instance(500),
+        "nonmaterial ID reused as material remains outside spatial projection");
+  doc.set_frame(0);check(!doc.frame()->spatial_snapshot->instance(500),"reverse seek restores material role");
+  Document live;live.begin_live(fixture.header);live.append_live(fixture.events);live.set_follow_live(false);live.set_frame(3);
+  check(live.frame()->spatial_snapshot->instance(500)->generation==1,
+        "accepted live lifetimes incrementally update spatial candidates");
+}
 } // namespace
 int main() {
-  try { noop(); invalidation(); std::cout << "Viewer cache: exact no-op/IEEE values, prefix/name/lifetime/scene/metadata/source invalidation passed\n"; return 0; }
+  try { noop(); invalidation(); complete_readonly_frame(); spatial_candidate_lifetimes(); std::cout << "Viewer cache: exact no-op/IEEE values, prefix/name/lifetime/scene/metadata/source invalidation and complete readonly frames passed\n"; return 0; }
   catch (const std::exception &e) { std::cerr << e.what() << '\n'; return 1; }
 }

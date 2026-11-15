@@ -140,3 +140,127 @@ The SDK/UI-off core-only Release build also passed 6/6 tests.
 `viewer_cache` covers exact no-op publication identity, signed-zero settings,
 forward/reverse names, reused IDs, scene changes at the same EOF prefix, paused
 live metadata changes and source replacement.
+
+## Interactive scene replay (0.11)
+
+A second private recording contains 25,853,397 bytes, 283,917 events and 2,177
+native frames. Its EOF state contains 44,870 objects, including 41,454 materials,
+225 rigid actors, 1,462 shapes and 256 triangle-mesh resources. It exercises real
+playback and camera interaction, beyond the initialization-only recording above.
+Neither recording, screenshots nor generated roundtrip copies are tracked.
+
+Three independent costs were measured in the original viewer:
+
+- Each playback update spent roughly 1.8–2.1 seconds reconstructing full states,
+  including repeated full snapshots for scene-query publications. A single full
+  snapshot copied approximately 400,000 property nodes and cost about 100 ms.
+- The paused first scene used 410 CPU triangle buffers against a 256-entry GPU
+  LRU. Orbiting uploaded roughly 406 meshes again on every frame. Hardware render
+  completion p50/p95 was 30.90/33.33 ms, even though the geometry itself was small.
+- An expanded class browser rebuilt over 40,000 static material labels whenever
+  a few temporary query objects appeared or disappeared. Its per-playback-frame
+  panel time was approximately 45–50 ms.
+
+The viewer now publishes complete immutable instance views with flat shared
+indexes, reconstructs changed properties by version, and uses exact selected
+object queries for scene-query publications. A bounded derived cache also
+reuses complete reference-property versions without recording every intermediate
+array. Materials remain accessible in the full view and inspector. Spatial
+readers consume a shared subset directly, and legacy mutable Snapshot APIs
+remain available for explicit materialization. Origin-shift prefixes retain
+their exact full-state fallback.
+
+CPU mesh caches can reuse resources still owned by a returned frame without
+increasing their bounded strong LRU. GPU eviction preserves the current visible
+working set, evicting inactive resources first. Class browsing updates affected
+groups without rebuilding unrelated material labels, matches or pages. The
+viewer uses indexed views instead of legacy full-state checkpoints and imports
+live deltas at display cadence through nonblocking source polling.
+
+A separate MSVC-specific spike came from replay-history growth. Each old
+Operation embedded an InstanceState containing a std::map; its move constructor
+could allocate, so vector growth copied existing assignments. A 4,096-operation
+relocation test made 8,193 allocations / 11.24 MB of allocations. Creation
+prototypes are now separately owned only by create operations, and Operation is
+move-only with a compile-time noexcept-move check. The same relocation requires
+one allocation / 1.64 MB for the new contiguous buffer, preserving existing
+operation indices and source events.
+
+Reproduce the complete viewer pipeline without a window:
+
+```powershell
+./install-shared/bin/pvd_viewer_benchmark.exe capture.pxd2 --samples 32
+./install-shared/bin/pvd_viewer_benchmark.exe capture.pxd2 --samples 32 --browse
+./install-shared/bin/pvd_viewer_benchmark.exe capture.pxd2 --samples 16 --warp
+```
+
+The Windows-only tool loads a normal Document and renders through the production
+D3D11 renderer. It drives orbit, pan, zoom, forward/reverse playback and random
+seeks, and paints the actual ImGui hierarchy, inspector and timeline. `--browse`
+opens the standard PhysX classes. Output contains counts, memory and p50/p95/max
+stage times, not object names or property values. Render-submit time is CPU
+submission; render-complete time waits for an actual GPU completion query.
+These figures exclude native input dispatch, presentation/vsync and the OS
+compositor, so they are not a claim about measured end-to-end input latency.
+
+Final local Release measurements used an idle system, the same original file,
+64 samples for the default hardware path, 32 for expanded browsing and 16 for
+WARP. The 960×640 viewport used normal layers; no geometry or analysis data was
+discarded to obtain these times:
+
+| Stage | p50 | p95 |
+| --- | ---: | ---: |
+| Hardware camera render, GPU complete | 0.831 ms | 1.011 ms |
+| Hardware forward model update | 14.013 ms | 16.905 ms |
+| Hardware reverse model update | 16.912 ms | 20.255 ms |
+| Hardware random seek model update | 14.607 ms | 17.117 ms |
+| Default forward panels | 3.487 ms | 5.595 ms |
+| Expanded class-browser forward panels | 7.059 ms | 8.337 ms |
+| WARP camera render, GPU complete | 8.679 ms | 11.326 ms |
+
+The hardware benchmark loaded in 1.575 seconds, peaked at 755,253,248 bytes of
+process commit, and recorded zero mesh uploads during camera movement. The
+installed full Win32 viewer's normal asynchronous loading path produced its
+loaded screenshot in 2.137 seconds with 829,874,176-byte peak commit. This latter
+test observed four further seconds and then stopped only its own hidden process.
+
+Live validation sent the original bytes over loopback TCP, with initialization
+sent first and all remaining native-frame groups paced at 60 Hz. The normal
+LiveSession used 16 ms polling, 2,048-event / 2 MiB limits and no legacy
+checkpoints. While receiving and recording, the same thread continuously drove
+orbit/pan/zoom and actual 1280×720 hardware rendering. The 2 GiB-bounded run
+accepted all 283,917 events / 2,177 frames and recorded all 25,853,397 bytes.
+The output was byte-for-byte identical and the temporary recording was removed.
+
+| Live stage | p50 | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Initial import poll | 10.239 ms | 28.530 ms | 32.374 ms |
+| Steady import poll | 16.946 ms | 20.520 ms | 34.388 ms |
+| Camera render, GPU complete | 1.499 ms | 2.011 ms | 36.137 ms |
+| Whole-run loop interval | 17.508 ms | 23.523 ms | 228.567 ms |
+
+The earlier steady import spike of 170.778 ms disappeared after noexcept history
+relocation; no final poll exceeded 40 ms. Peak commit dropped from 1,723,142,144
+to 1,404,579,840 bytes. The run published 1,794 display updates, approximately
+49 per second during paced simulation. It does not establish stable 60 FPS.
+The loop statistic includes initialization, scheduling and diagnostic work
+outside the measured poll/render scopes; its maximum is retained rather than
+attributed to a component without evidence. This live probe does not paint ImGui
+panels; their costs are measured separately above. The probe requested a 1 ms
+Windows timer interval and TCP_NODELAY for reproducible pacing.
+
+Regression coverage includes immutable-view/full-state equivalence, exact
+selected queries, reverse/ID reuse, 32/64-bit little/big-endian encodings,
+reference resets/removal, native origin shifts, concurrent const queries,
+allocation failures, cache budgets and long class names. A static allocation
+guard verifies that a 4,099-object view update copies a flat index instead of
+allocating one map node per object. Actual WARP pixel tests cover more than 256
+visible meshes, opacity, wireframe, picking, invalidation and cache clearing.
+Derived-data truth checks run through both Snapshot and SnapshotView readers.
+
+Final validation passed 161/161 Debug tests with the real PhysX 3.4 SDK, 57/57
+Release shared tests, and 7/7 SDK/UI-off core-only tests. Installed external
+consumers linked and ran both the full shared package and the core-only static
+package, exercising the new view/projection, selected-object, nonblocking poll
+and direct-view rendering entry points. The private source recording's size and
+last-write time were unchanged.

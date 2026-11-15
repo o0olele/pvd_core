@@ -50,4 +50,7 @@ struct CoordinateFrames {
 PVD_RENDER_API CoordinateFrames
 build_coordinate_frames(const Frame &, const Snapshot &,
                         const CoordinateFrameOptions &options = {});
+PVD_RENDER_API CoordinateFrames
+build_coordinate_frames(const Frame &, const SnapshotView &,
+                        const CoordinateFrameOptions &options = {});
 } // namespace pvd::render

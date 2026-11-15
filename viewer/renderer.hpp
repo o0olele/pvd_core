@@ -84,6 +84,9 @@ struct RgbaImage {
 // State is set explicitly by each pass; the host's ImGui backend then sets its own.
 class Renderer {
 public:
+    // LRU target for retained GPU meshes. The current visible working set stays
+    // resident even if it exceeds this count; only inactive meshes are evicted.
+    // This prevents repeated uploads when orbiting a scene with >256 resources.
     Renderer(ID3D11Device* device, ID3D11DeviceContext* context,
              std::size_t max_cached_meshes = 256);
     ~Renderer();

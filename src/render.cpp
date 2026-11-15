@@ -5,6 +5,7 @@
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 
 namespace pvd::render {
@@ -159,17 +160,14 @@ std::uint64_t reference(const InstanceState &o, const std::string &name) {
          "expected one object reference");
   return ids[0];
 }
-const InstanceState &resolve(const Snapshot &s, const InstanceState &o,
+template <class SnapshotLike>
+const InstanceState &resolve(const SnapshotLike &s, const InstanceState &o,
                              const std::string &p, std::uint64_t id) {
   auto ptr = s.instance(id);
   if (!ptr)
     fail(DiagnosticCode::dangling_reference, o, p,
          "referenced instance is absent: " + std::to_string(id));
   return *ptr;
-}
-bool is_a(const Metadata &m, const InstanceState &o, const char *name) {
-  QualifiedName n{"physx3", name};
-  return o.class_name == n || m.is_a(o.class_name, n);
 }
 MeshScale scale(const InstanceState &o, bool convex) {
   MeshScale s{vector(o, "Scale.Scale"), quaternion(o, "Scale.Rotation")};
@@ -287,11 +285,76 @@ struct Extractor::Impl {
     std::shared_ptr<const MeshData> mesh;
     std::uint64_t used = 0;
   };
+  struct WeakEntry {
+    struct Input {
+      std::string property;
+      std::weak_ptr<const Bytes> bytes;
+      QualifiedName incoming_type;
+      std::uint64_t item_count;
+      ByteOrder byte_order;
+      std::uint8_t pointer_width;
+    };
+    std::vector<Input> inputs;
+    std::weak_ptr<const MeshData> mesh;
+    bool matches(const Signature &signature) const {
+      if (inputs.size() != signature.values.size()) return false;
+      for (std::size_t i = 0; i < inputs.size(); ++i) {
+        const auto &a = inputs[i];
+        const auto &b = signature.values[i];
+        if (a.property != b.first || a.bytes.lock() != b.second.bytes ||
+            a.incoming_type != b.second.incoming_type || a.item_count != b.second.item_count ||
+            a.byte_order != b.second.byte_order || a.pointer_width != b.second.pointer_width)
+          return false;
+      }
+      return true;
+    }
+  };
   using Key = std::tuple<std::uint64_t, std::uint64_t, GeometryKind>;
   ExtractorOptions options;
   std::map<Key, Entry> cache;
+  // Returned Frames already own these resources. Remember their signatures
+  // without extending mesh lifetimes beyond the bounded strong LRU.
+  std::map<Key, WeakEntry> live_meshes;
   std::uint64_t clock = 0;
   std::size_t hits = 0, misses = 0;
+  std::map<QualifiedName, std::map<std::string_view, bool>> class_checks;
+  // This memo is cleared at every public extraction call: Metadata is a
+  // caller-owned mutable value, so its address cannot be a version token.
+  bool is_a(const Metadata &metadata, const InstanceState &object, const char *name) {
+    if (object.class_name.namespace_name == "physx3" && object.class_name.name == name)
+      return true;
+    auto &checks = class_checks[object.class_name];
+    const auto found = checks.find(name);
+    if (found != checks.end()) return found->second;
+    const auto result = metadata.is_a(object.class_name, {"physx3", name});
+    checks.emplace(name, result);
+    return result;
+  }
+  void prune_live_meshes() {
+    for (auto it = live_meshes.begin(); it != live_meshes.end();) {
+      if (it->second.mesh.expired())
+        it = live_meshes.erase(it);
+      else
+        ++it;
+    }
+  }
+  void retain(const Key &key, const Signature &signature,
+              const std::shared_ptr<const MeshData> &data) {
+    if (!options.max_cache_entries) return;
+    WeakEntry weak;
+    weak.mesh = data;
+    weak.inputs.reserve(signature.values.size());
+    for (const auto &value : signature.values)
+      weak.inputs.push_back({value.first, value.second.bytes, value.second.incoming_type,
+          value.second.item_count, value.second.byte_order, value.second.pointer_width});
+    live_meshes[key] = std::move(weak);
+    cache[key] = {signature, data, ++clock};
+    while (cache.size() > options.max_cache_entries) {
+      auto oldest = std::min_element(cache.begin(), cache.end(),
+          [](const auto &a, const auto &b) { return a.second.used < b.second.used; });
+      cache.erase(oldest);
+    }
+  }
   explicit Impl(ExtractorOptions o) : options(o) {
     if (!o.max_vertices || !o.max_triangles || !o.max_heightfield_cells)
       throw std::invalid_argument("render resource limits must be nonzero");
@@ -354,6 +417,13 @@ struct Extractor::Impl {
       found->second.used = ++clock;
       return found->second.mesh;
     }
+    const auto live = live_meshes.find(key);
+    if (live != live_meshes.end() && live->second.matches(sig))
+      if (auto data = live->second.mesh.lock()) {
+        ++hits;
+        retain(key, sig, data);
+        return data;
+      }
     ++misses;
     auto data = std::make_shared<MeshData>();
     data->resource = {o.id, o.generation};
@@ -367,16 +437,7 @@ struct Extractor::Impl {
       else
         decode_convex(o, *data);
     }
-    if (options.max_cache_entries) {
-      cache[key] = {std::move(sig), data, ++clock};
-      while (cache.size() > options.max_cache_entries) {
-        auto oldest = std::min_element(cache.begin(), cache.end(),
-                                       [](const auto &a, const auto &b) {
-                                         return a.second.used < b.second.used;
-                                       });
-        cache.erase(oldest);
-      }
-    }
+    retain(key, sig, data);
     return data;
   }
   void decode_triangles(const InstanceState &o, MeshData &d) {
@@ -504,7 +565,8 @@ struct Extractor::Impl {
       }
   }
 
-  Geometry geometry(const Metadata &m, const Snapshot &s,
+  template <class SnapshotLike>
+  Geometry geometry(const Metadata &m, const SnapshotLike &s,
                     const InstanceState &o) {
     if (is_a(m, o, "PxBoxGeometry")) {
       auto e = vector(o, "HalfExtents");
@@ -587,7 +649,8 @@ struct Extractor::Impl {
     fail(DiagnosticCode::unsupported_geometry, o, "Geometry",
          "unsupported geometry class " + o.class_name.str());
   }
-  const InstanceState &scene_for_actor(const Metadata &m, const Snapshot &s,
+  template <class SnapshotLike>
+  const InstanceState &scene_for_actor(const Metadata &m, const SnapshotLike &s,
                                        const InstanceState &actor,
                                        const InstanceState *&articulation) {
     const auto *current = &actor;
@@ -614,7 +677,9 @@ struct Extractor::Impl {
       current = &resolve(s, *current, "Parent", reference(*current, "Parent"));
     }
   }
-  Frame extract(const Metadata &m, const Snapshot &s, const ExtractOptions &o) {
+  template <class SnapshotLike>
+  Frame extract(const Metadata &m, const SnapshotLike &s, const ExtractOptions &o) {
+    class_checks.clear();
     Frame result;
     result.event_count = s.event_count;
     if (o.scene_id) {
@@ -640,6 +705,7 @@ struct Extractor::Impl {
     // Cache ownership never outlives a resource lifetime unless a returned
     // Frame still owns the immutable MeshData. Historical seek will decode
     // again.
+    prune_live_meshes();
     for (auto it = cache.begin(); it != cache.end();) {
       auto resource = s.instance(std::get<0>(it->first));
       if (!resource || resource->generation != std::get<1>(it->first))
@@ -762,6 +828,27 @@ struct Extractor::Impl {
            "Class", "snapshot contains no supported rigid actors"});
     return result;
   }
+  template <class SnapshotLike>
+  GeometryExtraction standalone_geometry(const Metadata &metadata,
+      const SnapshotLike &snapshot, ObjectKey requested) {
+    class_checks.clear();
+    GeometryExtraction result;
+    prune_live_meshes();
+    result.source = requested;
+    const auto *object = snapshot.instance(requested.id);
+    if (!object || object->generation != requested.generation) {
+      result.diagnostics.push_back({Severity::error, DiagnosticCode::dangling_reference,
+          requested.id, 0, 0, "Geometry", "recorded geometry is absent or its generation is stale"});
+      return result;
+    }
+    try {
+      result.geometry = geometry(metadata, snapshot, *object);
+    } catch (const Failure &failure) {
+      result.diagnostics.push_back({Severity::error, failure.code, failure.id,
+          0, 0, failure.property, failure.message});
+    }
+    return result;
+  }
 };
 Extractor::Extractor(ExtractorOptions o) : impl_(std::make_unique<Impl>(o)) {}
 Extractor::~Extractor() = default;
@@ -771,27 +858,23 @@ Frame Extractor::extract(const Metadata &m, const Snapshot &s,
                          ExtractOptions o) {
   return impl_->extract(m, s, o);
 }
+Frame Extractor::extract(const Metadata &m, const SnapshotView &s,
+                         ExtractOptions o) {
+  return impl_->extract(m, s, o);
+}
 GeometryExtraction Extractor::extract_geometry(const Metadata &metadata,
                                                const Snapshot &snapshot,
                                                ObjectKey requested) {
-  GeometryExtraction result;
-  result.source = requested;
-  const auto *object = snapshot.instance(requested.id);
-  if (!object || object->generation != requested.generation) {
-    result.diagnostics.push_back({Severity::error, DiagnosticCode::dangling_reference,
-        requested.id, 0, 0, "Geometry", "recorded geometry is absent or its generation is stale"});
-    return result;
-  }
-  try {
-    result.geometry = impl_->geometry(metadata, snapshot, *object);
-  } catch (const Failure &failure) {
-    result.diagnostics.push_back({Severity::error, failure.code, failure.id,
-        0, 0, failure.property, failure.message});
-  }
-  return result;
+  return impl_->standalone_geometry(metadata, snapshot, requested);
+}
+GeometryExtraction Extractor::extract_geometry(const Metadata &metadata,
+                                               const SnapshotView &snapshot,
+                                               ObjectKey requested) {
+  return impl_->standalone_geometry(metadata, snapshot, requested);
 }
 void Extractor::clear_cache() noexcept {
   impl_->cache.clear();
+  impl_->live_meshes.clear();
   impl_->clock = 0;
   impl_->hits = impl_->misses = 0;
 }

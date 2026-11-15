@@ -1,8 +1,10 @@
 # 实时采集与录制
 
-0.2 版将实时功能拆成两层：`pvd::core` 提供可追加的 Session 和通信解码，`pvd::transport` 提供独立 TCP 接收器、后台任务与原始录制。两层都没有 UI 或 PhysX 运行依赖；系统 socket 和线程依赖只进入 transport 目标。
+0.2 版将实时功能拆成两层：`pvd::core` 提供可追加的 Session 和通信解码，`pvd::transport` 提供独立 TCP 接收器、后台任务与原始录制。两层都没有 UI 或 PhysX 运行依赖；只有 transport 创建接收线程并使用系统 socket，core 的共享视图缓存仅使用标准库互斥锁。
 
 0.5 版提供 ImGui 查看器的实时入口，设置、跟随和录制操作见 [查看器说明](viewer.md#实时采集)。`TcpCapture::poll_from(cursor,max_events,max_payload_bytes)` 在同一个锁内返回 header、status 和安全 recoverable 前缀的新事件，支持有界增量消费者；不会复制 cursor 之前的历史。单个事件超过字节软预算时仍返回它，并设置 `oversized_event`，以免消费者停滞；绝对大小由解码限制约束。
+
+0.11 提供相同预算与事务语义的 `try_poll_from(...)`：后台解析持锁时立即返回 `nullopt`，不推进游标，调用方可继续渲染并在下一次轮询重试。查看器使用此入口，以约 16 ms 的主循环间隔导入，每次最多 2,048 个事件和 2 MiB 的软载荷预算。跟随显示可以合并多个已接收帧，但全部事件与录制原始字节仍被保留。查看器以属性版本视图查询历史，关闭接收端和模型端不再需要的旧全状态检查点，避免周期性复制全部静态材质；独立库的默认检查点配置保持不变。
 
 ## 直接采集 PhysX 3.4
 

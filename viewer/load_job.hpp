@@ -20,7 +20,11 @@ struct LoadRequest {
   std::uint64_t max_file_bytes = 4ull * 1024ull * 1024ull * 1024ull;
   std::size_t read_buffer_bytes = 64u * 1024u;
   std::size_t events_per_step = 256;
-  SessionOptions session_options;
+  SessionOptions session_options = [] {
+    SessionOptions value;
+    value.max_checkpoints = 0; // SnapshotView supplies indexed random access.
+    return value;
+  }();
   ModelOptions model_options;
   // Optional external cancellation, called on the worker at checkpoints. Any
   // captures must outlive the job; it must not call ImGui or block the UI.

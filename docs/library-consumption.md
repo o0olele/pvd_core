@@ -23,7 +23,8 @@ installed `bin` directory must be available for DLL lookup. A static install
 uses the same consumer project without that DLL requirement. Module options
 must match libraries enabled in the installed package; RepX requires render.
 
-The example requires version 0.8 or newer. It verifies core streaming input,
+The example requires version 0.11 or newer. It verifies complete immutable views,
+shared view projections, exact selected-instance queries, nonblocking capture polling, core streaming input,
 source-sealed clip restoration, native coordinate reads and an in-memory raw save/replay,
 optional TCP cancellation, geometry tessellation, native-object extraction,
 publication-based scene queries, standalone geometry extraction, captured rigid

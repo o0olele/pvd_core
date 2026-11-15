@@ -228,6 +228,13 @@ void idle_controller_and_poll() {
   auto empty = capture.poll_from(0, 1, 1);
   need(!empty.header && empty.events.empty() && empty.caught_up(),
        "idle atomic poll");
+  auto immediate = capture.try_poll_from(0, 1, 1);
+  need(immediate && !immediate->header && immediate->events.empty() && immediate->caught_up(),
+       "idle nonblocking poll has the same coherent empty prefix");
+  bool invalid_limit = false;
+  try { capture.try_poll_from(0, 0, 1); }
+  catch (const std::invalid_argument &) { invalid_limit = true; }
+  need(invalid_limit, "nonblocking poll validates its limits");
   bool rejected = false;
   try {
     capture.poll_from(1);
@@ -235,6 +242,10 @@ void idle_controller_and_poll() {
     rejected = true;
   }
   need(rejected, "future cursor rejected");
+  rejected = false;
+  try { capture.try_poll_from(1); }
+  catch (const std::out_of_range &) { rejected = true; }
+  need(rejected, "nonblocking future cursor rejected");
   Document doc;
   LiveSession controller;
   CaptureOptions options;
@@ -403,7 +414,16 @@ void bounded_transport(const std::string &exe,
   bool deadline_expired = false;
   while (true) {
     auto call_begin = std::chrono::steady_clock::now();
-    auto delta = capture.poll_from(cursor, 3, 256);
+    auto available = capture.try_poll_from(cursor, 3, 256);
+    if (!available) {
+      if (std::chrono::steady_clock::now() > receive_deadline) {
+        deadline_expired = true;
+        break;
+      }
+      std::this_thread::sleep_for(1ms);
+      continue;
+    }
+    auto delta = std::move(*available);
     poll_seconds += std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - call_begin)
                         .count();

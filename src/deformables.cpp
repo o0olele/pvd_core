@@ -52,9 +52,9 @@ void bounds(std::optional<Bounds> &box, Vec3 v) {
   box->maximum = {std::max(box->maximum.x, v.x), std::max(box->maximum.y, v.y),
                   std::max(box->maximum.z, v.z)};
 }
-struct Build {
+template <class State> struct Build {
   const Metadata &metadata;
-  const Snapshot &state;
+  const State &state;
   const Options &options;
   Frame result;
   std::size_t used_cloth = 0, used_constraints = 0, used_particles = 0,
@@ -716,16 +716,25 @@ struct Build {
     return std::move(result);
   }
 };
-} // namespace
-Frame extract(const Metadata &metadata, const Snapshot &state,
-              const Options &options) {
+template <class State>
+Frame extract_state(const Metadata &metadata, const State &state,
+                    const Options &options) {
   if (!options.max_owners || !options.max_cloth_vertices ||
       !options.max_constraints || !options.max_particles ||
       !options.max_valid_range || !options.max_bitmap_words ||
       !options.max_property_bytes || !options.max_diagnostics)
     throw std::invalid_argument(
         "deformable extraction limits must be positive");
-  Build build{metadata, state, options, {}};
+  Build<State> build{metadata, state, options, {}};
   return build.run();
+}
+} // namespace
+Frame extract(const Metadata &metadata, const Snapshot &state,
+              const Options &options) {
+  return extract_state(metadata, state, options);
+}
+Frame extract(const Metadata &metadata, const SnapshotView &state,
+              const Options &options) {
+  return extract_state(metadata, state, options);
 }
 } // namespace pvd::deformables

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <imgui.h>
 #include <limits>
+#include <set>
 #include <sstream>
 
 namespace pvd::viewer {
@@ -477,31 +478,131 @@ void actor_menu(Document &doc, PanelState &state, ObjectKey scene,
     command(state, [&] { doc.show_all(); });
   ImGui::EndPopup();
 }
+const std::string *category_name(const InstanceState &object) {
+  for (const auto *key : {"Name", "name"})
+    if (const auto *value = object.property(key);
+        value && value->text && !value->text->empty())
+      return &*value->text;
+  return nullptr;
+}
+struct CategoryChange {
+  std::uint64_t id;
+  const InstanceState *previous, *current;
+};
+std::vector<CategoryChange> category_changes(const SnapshotView &before,
+                                            const SnapshotView &after) {
+  std::vector<CategoryChange> result;
+  auto old = before.instances.begin(), now = after.instances.begin();
+  while (old != before.instances.end() || now != after.instances.end()) {
+    if (now == after.instances.end() ||
+        (old != before.instances.end() && old->first < now->first)) {
+      result.push_back({old->first, &old->second, nullptr}); ++old;
+    } else if (old == before.instances.end() || now->first < old->first) {
+      result.push_back({now->first, nullptr, &now->second}); ++now;
+    } else {
+      if (&old->second != &now->second) {
+        const auto *a = category_name(old->second), *b = category_name(now->second);
+        if (old->second.generation != now->second.generation ||
+            old->second.class_name != now->second.class_name ||
+            bool(a) != bool(b) || (a && *a != *b))
+          result.push_back({now->first, &old->second, &now->second});
+      }
+      ++old; ++now;
+    }
+  }
+  return result;
+}
+std::set<QualifiedName> update_category_groups(PanelState &state,
+                                              const std::vector<CategoryChange> &changes) {
+  std::map<QualifiedName, std::vector<ObjectNode>> replacements;
+  for (const auto &change : changes) {
+    if (change.previous) replacements.try_emplace(change.previous->class_name);
+    if (change.current) replacements.try_emplace(change.current->class_name);
+  }
+  const auto locate = [&](const QualifiedName &name) {
+    return std::lower_bound(state.categories.begin(), state.categories.end(), name,
+        [](const auto &group, const auto &key) { return group.class_name < key; });
+  };
+  for (auto &[cls, objects] : replacements) {
+    const auto found = locate(cls);
+    if (found != state.categories.end() && found->class_name == cls) {
+      objects.reserve(found->objects.size());
+      for (const auto &object : found->objects) {
+        const auto changed = std::lower_bound(changes.begin(), changes.end(), object.key.id,
+            [](const auto &change, auto id) { return change.id < id; });
+        if (changed == changes.end() || changed->id != object.key.id)
+          objects.push_back(object);
+      }
+    }
+    for (const auto &change : changes)
+      if (change.current && change.current->class_name == cls) {
+        const auto &object = *change.current;
+        const auto *label = category_name(object);
+        objects.push_back({{object.id, object.generation},
+            label ? *label : object.class_name.name + " " + std::to_string(object.id),
+            object.class_name.str()});
+      }
+    std::sort(objects.begin(), objects.end(),
+        [](const auto &a, const auto &b) { return a.key.id < b.key.id; });
+  }
+  state.categories.reserve(state.categories.size() + replacements.size());
+  state.category_matches.reserve(state.categories.size() + replacements.size());
+  std::set<QualifiedName> dirty;
+  for (auto &[cls, objects] : replacements) {
+    dirty.insert(cls);
+    auto found = locate(cls);
+    const auto index = static_cast<std::size_t>(found - state.categories.begin());
+    const bool exists = found != state.categories.end() && found->class_name == cls;
+    if (objects.empty()) {
+      if (exists) {
+        state.categories.erase(found);
+        state.category_matches.erase(state.category_matches.begin() + index);
+      }
+    } else if (exists) {
+      found->objects = std::move(objects);
+      state.category_matches[index].clear();
+    } else {
+      state.categories.insert(found, ObjectGroup{cls, std::move(objects)});
+      state.category_matches.insert(state.category_matches.begin() + index, std::vector<std::size_t>{});
+    }
+    state.category_object_pages.erase(cls.str());
+  }
+  return dirty;
+}
 void object_categories(Document &doc, PanelState &state,
                        const std::string &query) {
   if (state.reveal_object || !query.empty())
     ImGui::SetNextItemOpen(true);
   if (!ImGui::CollapsingHeader("All objects by class (all scenes)"))
     return;
-  const auto prefix = doc.frame()->snapshot.event_count;
-  bool refresh =
-      state.category_source != doc.session() || state.category_prefix != prefix;
+  const auto frame = doc.frame();
+  const auto prefix = frame->snapshot.event_count;
+  const bool refresh = state.category_source != doc.session() || !state.category_snapshot;
+  std::set<QualifiedName> dirty;
+  try {
+  if (!refresh && (state.category_prefix != prefix || state.category_frame.lock() != frame))
+    dirty = update_category_groups(state, category_changes(*state.category_snapshot, frame->snapshot));
   if (refresh) {
     state.categories = doc.object_groups();
     state.category_source = doc.session();
-    state.category_prefix = prefix;
     state.category_page = 0;
     state.category_object_pages.clear();
   }
-  if (refresh || state.category_query != query) {
+  state.category_prefix = prefix;
+  state.category_snapshot = frame->snapshot;
+  state.category_frame = frame;
+  const bool rematch_all = refresh || state.category_query != query;
+  if (rematch_all || !dirty.empty()) {
     state.category_query = query;
     state.matching_categories.clear();
-    state.category_matches.clear();
+    if (rematch_all) state.category_matches.clear();
     state.category_matches.resize(state.categories.size());
     state.object_count = 0;
     for (std::size_t gi = 0; gi < state.categories.size(); ++gi) {
       const auto &group = state.categories[gi];
       auto &list = state.category_matches[gi];
+      if (rematch_all || dirty.count(group.class_name)) {
+      list.clear();
       const bool class_match = matches(group.class_name.str(), query);
       for (std::size_t oi = 0; oi < group.objects.size(); ++oi) {
         const auto &object = group.objects[oi];
@@ -510,11 +611,17 @@ void object_categories(Document &doc, PanelState &state,
                                    query))
           list.push_back(oi);
       }
+      }
       if (!list.empty()) {
         state.matching_categories.push_back(gi);
         state.object_count += list.size();
       }
     }
+  }
+  } catch (...) {
+    state.category_source = nullptr;
+    state.category_snapshot.reset();
+    throw;
   }
   constexpr std::size_t group_page_size = 32, object_page_size = 128;
   if (state.reveal_object)

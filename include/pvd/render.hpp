@@ -188,11 +188,15 @@ public:
   Extractor &operator=(const Extractor &) = delete;
   PVD_RENDER_API Frame extract(const Metadata &, const Snapshot &,
                                ExtractOptions options = {});
+  PVD_RENDER_API Frame extract(const Metadata &, const SnapshotView &,
+                               ExtractOptions options = {});
   // Decode an actual recorded geometry object without actor/shape ownership.
   // Useful for scene-query volumes. Reuses this extractor's validated resource
   // cache and budgets; stale generations fail without inventing scene objects.
   PVD_RENDER_API GeometryExtraction extract_geometry(const Metadata &,
       const Snapshot &, ObjectKey);
+  PVD_RENDER_API GeometryExtraction extract_geometry(const Metadata &,
+      const SnapshotView &, ObjectKey);
   PVD_RENDER_API void clear_cache() noexcept;
   PVD_RENDER_API CacheStats cache_stats() const noexcept;
 

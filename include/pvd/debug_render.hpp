@@ -118,11 +118,18 @@ struct DebugResult {
 PVD_RENDER_API DebugResult extract_contacts(const Snapshot &, const Metadata &,
                                             std::uint64_t scene_id,
                                             DebugOptions options = {});
+PVD_RENDER_API DebugResult extract_contacts(const SnapshotView &, const Metadata &,
+                                            std::uint64_t scene_id,
+                                            DebugOptions options = {});
 // The packet sequence must be ordered by event_index. Earlier packets seed only
 // SetInstanceId state per (stream, renderer); their old primitives are not
 // emitted. Unknown tags stop their packet with a diagnostic; they cannot be
 // length-skipped.
 PVD_RENDER_API DebugResult extract_debug(const Snapshot &, const Metadata &,
+                                         const std::vector<ChannelPacket> &,
+                                         DebugRange range,
+                                         DebugOptions options = {});
+PVD_RENDER_API DebugResult extract_debug(const SnapshotView &, const Metadata &,
                                          const std::vector<ChannelPacket> &,
                                          DebugRange range,
                                          DebugOptions options = {});

@@ -57,8 +57,9 @@ std::shared_ptr<const r::TriangleBuffer> square() {
 }
 struct Fixture {
   FrameState frame;
+  Snapshot source;
   Fixture() {
-    frame.snapshot.event_count = frame.render.event_count = 44;
+    source.event_count = frame.render.event_count = 44;
     object(1, "PxScene", 4);
     object(10, "PxRigidDynamic", 2);
     object(20, "PxRigidDynamic", 3);
@@ -67,26 +68,28 @@ struct Fixture {
     object(70, "PxAggregate", 7);
     for (auto id : {100u, 101u, 102u})
       object(id, "PxShape", 8);
-    frame.snapshot.instances.at(60).properties["Links"] = references({30});
-    frame.snapshot.instances.at(30).properties["Parent"] = references({60});
-    frame.snapshot.instances.at(70).properties["Actors"] = references({10});
-    frame.snapshot.instances.at(70).properties["Articulations"] =
+    source.instances.at(60).properties["Links"] = references({30});
+    source.instances.at(30).properties["Parent"] = references({60});
+    source.instances.at(70).properties["Actors"] = references({10});
+    source.instances.at(70).properties["Articulations"] =
         references({60});
     add(10, 100, {-1, 0, 0}, {220, 70, 50, 255});
     add(10, 102, {-1, 1, 0}, {220, 70, 50, 255});
     add(20, 100, {1, 0, -1}, {60, 90, 220, 255});
     add(30, 101, {0, 1, -2}, {60, 220, 90, 255});
+    publish();
   }
+  void publish() { frame.snapshot = source; }
   void object(std::uint64_t id, const char *cls, std::uint64_t generation) {
     InstanceState value;
     value.id = id;
     value.generation = generation;
     value.class_name = {"physx3", cls};
-    frame.snapshot.instances[id] = std::move(value);
+    source.instances[id] = std::move(value);
   }
   void add(std::uint64_t actor, std::uint64_t shape, Vec3 position,
            Color color) {
-    auto &a = frame.snapshot.instances.at(actor);
+    auto &a = source.instances.at(actor);
     a.properties["Scene"] = references({1});
     a.properties["GlobalPose"] =
         floats("PxTransform", {0, 0, 0, 1, position.x, position.y, position.z});
@@ -199,7 +202,8 @@ void scopes(Renderer &renderer, OrbitCamera &camera) {
             renderer.coordinate_frames().diagnostics.empty(),
         "hidden selected actor emits neither axes nor diagnostics");
   frame.draws[0].visible = frame.draws[1].visible = true;
-  frame.snapshot.instances.at(10).properties.erase("CMassLocalPose");
+  f.source.instances.at(10).properties.erase("CMassLocalPose");
+  f.publish();
   renderer.render(frame, camera, options, selection);
   check(renderer.stats().mass_frames == 0 &&
             !renderer.stats().coordinate_frames_complete &&

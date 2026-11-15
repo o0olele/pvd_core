@@ -249,6 +249,11 @@ void primitive_transform_shared_scene_state() {
   near(s.world_bounds->maximum, {13, 3, 2}, "box world maximum");
   check(frame.origin_shifts.at(1).x == 100,
         "origin offset must remain explicit");
+  const auto viewed = e.extract(f.metadata, SnapshotView(f.state));
+  check(only(viewed).picking_key() == s.picking_key() && viewed.origin_shifts.at(1).x == 100,
+        "readonly geometry view preserves exact attachment identity and origin semantics");
+  near(only(viewed).world_bounds->minimum, s.world_bounds->minimum,
+       "readonly geometry view preserves transformed tight bounds");
   check(s.flags.simulation && s.flags.scene_query && !s.flags.trigger &&
             s.flags.visualization,
         "shape flags");
@@ -369,6 +374,67 @@ void mesh_scale_cache_and_lifetime() {
       std::get<TriangleMesh>(all.instances[0].geometry).mesh->indices.size() ==
           6,
       "eviction preserves frame-owned resources");
+  const auto misses = bounded.cache_stats().misses;
+  const auto again = bounded.extract(many.metadata, many.state);
+  check(bounded.cache_stats().entries == 1 &&
+            bounded.cache_stats().misses == misses &&
+            std::get<TriangleMesh>(again.instances[0].geometry).mesh ==
+                std::get<TriangleMesh>(all.instances[0].geometry).mesh &&
+            std::get<TriangleMesh>(again.instances[1].geometry).mesh ==
+                std::get<TriangleMesh>(all.instances[1].geometry).mesh,
+        "active frame resources reuse beyond strong LRU without increasing its budget");
+  const auto readonly = bounded.extract(many.metadata, SnapshotView(many.state));
+  check(std::get<TriangleMesh>(readonly.instances[0].geometry).mesh ==
+            std::get<TriangleMesh>(all.instances[0].geometry).mesh &&
+            std::get<TriangleMesh>(readonly.instances[1].geometry).mesh ==
+                std::get<TriangleMesh>(all.instances[1].geometry).mesh,
+        "Snapshot and readonly View share the same validated immutable resource cache");
+  many.state.instances.at(300).properties["Points"] =
+      value("PxVec3", floats({0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 1}), 4);
+  const auto updated = bounded.extract(many.metadata, many.state);
+  check(std::get<TriangleMesh>(updated.instances[0].geometry).mesh !=
+            std::get<TriangleMesh>(all.instances[0].geometry).mesh &&
+            std::get<TriangleMesh>(updated.instances[0].geometry).mesh->vertices[1].x == 3 &&
+            std::get<TriangleMesh>(all.instances[0].geometry).mesh->vertices[1].x == 1,
+        "weak frame reuse validates resource bytes and never mutates retained history");
+  bounded.clear_cache();
+  const auto cleared = bounded.extract(many.metadata, many.state);
+  check(std::get<TriangleMesh>(cleared.instances[1].geometry).mesh !=
+            std::get<TriangleMesh>(again.instances[1].geometry).mesh,
+        "clear_cache clears weak reuse too");
+  budget.max_cache_entries = 0;
+  Extractor uncached(budget);
+  const auto uncached_first = uncached.extract(many.metadata, many.state);
+  const auto uncached_second = uncached.extract(many.metadata, many.state);
+  check(uncached.cache_stats().entries == 0 &&
+            std::get<TriangleMesh>(uncached_first.instances[0].geometry).mesh !=
+                std::get<TriangleMesh>(uncached_second.instances[0].geometry).mesh,
+        "zero cache option still disables all reuse");
+}
+void metadata_role_memo_scope() {
+  Fixture f;
+  const QualifiedName actor{"custom", "MutableActor"};
+  const QualifiedName geometry{"custom", "MutableGeometry"};
+  f.metadata.classes.emplace(actor,
+      ClassDefinition{actor, QualifiedName{"physx3", "PxRigidStatic"}, {}});
+  f.metadata.classes.emplace(geometry,
+      ClassDefinition{geometry, QualifiedName{"physx3", "PxBoxGeometry"}, {}});
+  f.state.instances.at(10).class_name = actor;
+  f.state.instances.at(200).class_name = geometry;
+  const SnapshotView source(f.state);
+  Extractor extractor;
+  check(extractor.extract(f.metadata, source).instances.size() == 1,
+        "derived roles classified from current caller metadata");
+  f.metadata.classes.at(actor).parent.reset();
+  check(extractor.extract(f.metadata, source).instances.empty(),
+        "role memo cannot survive external metadata edits between calls");
+  f.metadata.classes.at(actor).parent = QualifiedName{"physx3", "PxRigidStatic"};
+  f.metadata.classes.at(geometry).parent = QualifiedName{"physx3", "PxSphereGeometry"};
+  check(!extractor.extract_geometry(f.metadata, source, {200, 0}).geometry,
+        "standalone geometry cannot retain stale class classification");
+  f.metadata.classes.at(geometry).parent = QualifiedName{"physx3", "PxBoxGeometry"};
+  check(extractor.extract_geometry(f.metadata, source, {200, 0}).geometry.has_value(),
+        "new metadata is observed after classification failure");
 }
 void heightfield_endian_and_diagnostics() {
   Fixture f(ByteOrder::big, 4);
@@ -515,6 +581,7 @@ int main() {
   try {
     primitive_transform_shared_scene_state();
     mesh_scale_cache_and_lifetime();
+    metadata_role_memo_scope();
     heightfield_endian_and_diagnostics();
     geometry_without_actor_ownership();
     std::cout << "render tests passed\n";

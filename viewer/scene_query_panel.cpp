@@ -121,7 +121,7 @@ void collections(const SceneQueries &queries) {
 void inspect_button(Document &doc, SceneQueryPanelState &state,
                     const char *label, std::uint64_t raw,
                     const std::optional<ObjectKey> &key,
-                    const Snapshot &snapshot) {
+                    const SnapshotView &snapshot) {
   const auto *instance = raw ? snapshot.instance(raw) : nullptr;
   const bool valid = key && instance && key->id == raw &&
                      instance->generation == key->generation;
@@ -142,7 +142,7 @@ void inspect_button(Document &doc, SceneQueryPanelState &state,
   }
 }
 void hit_details(Document &doc, SceneQueryPanelState &s, const SceneQueryHit &h,
-                 const Snapshot &snapshot) {
+                 const SnapshotView &snapshot) {
   value("Actor source ID", hex(h.actor_id));
   if (h.actor)
     ImGui::TextDisabled("Actor generation %llu",

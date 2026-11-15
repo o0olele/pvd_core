@@ -28,9 +28,9 @@ Transform mass_pose(Transform actor, Transform local) {
                      a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
   return result;
 }
-class Builder {
+template <class SnapshotType> class Builder {
   const Frame &frame;
-  const Snapshot &snapshot;
+  const SnapshotType &snapshot;
   const CoordinateFrameOptions &options;
   CoordinateFrames result;
   std::set<PickingKey> mask, seen_shapes;
@@ -159,7 +159,7 @@ class Builder {
   }
 
 public:
-  Builder(const Frame &f, const Snapshot &s, const CoordinateFrameOptions &o)
+  Builder(const Frame &f, const SnapshotType &s, const CoordinateFrameOptions &o)
       : frame(f), snapshot(s), options(o) {}
   CoordinateFrames run() {
     if ((!options.actor && !options.shape && !options.mass) ||
@@ -217,14 +217,25 @@ public:
     return std::move(result);
   }
 };
-} // namespace
+template <class SnapshotType>
 CoordinateFrames
-build_coordinate_frames(const Frame &frame, const Snapshot &snapshot,
-                        const CoordinateFrameOptions &options) {
+build(const Frame &frame, const SnapshotType &snapshot,
+      const CoordinateFrameOptions &options) {
   if (!std::isfinite(options.axis_length) || options.axis_length < 0 ||
       options.axis_length > 1e6f)
     throw std::invalid_argument(
         "coordinate frame axis length must be finite in [0,1000000]");
-  return Builder(frame, snapshot, options).run();
+  return Builder<SnapshotType>(frame, snapshot, options).run();
+}
+} // namespace
+CoordinateFrames
+build_coordinate_frames(const Frame &frame, const Snapshot &snapshot,
+                        const CoordinateFrameOptions &options) {
+  return build(frame, snapshot, options);
+}
+CoordinateFrames
+build_coordinate_frames(const Frame &frame, const SnapshotView &snapshot,
+                        const CoordinateFrameOptions &options) {
+  return build(frame, snapshot, options);
 }
 } // namespace pvd::render

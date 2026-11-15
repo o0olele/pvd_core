@@ -283,10 +283,12 @@ deformable_bounds(const FrameState &frame,
   return result;
 }
 
-bool live_key(const Snapshot& snapshot,render::ObjectKey key) {
+template <class SnapshotLike>
+bool live_key(const SnapshotLike& snapshot,render::ObjectKey key) {
     const auto* object=snapshot.instance(key.id);return object&&object->generation==key.generation;
 }
-std::optional<render::ObjectKey> articulation_owner(const Snapshot& snapshot,render::ObjectKey actor) {
+template <class SnapshotLike>
+std::optional<render::ObjectKey> articulation_owner(const SnapshotLike& snapshot,render::ObjectKey actor) {
     std::set<std::uint64_t> seen;
     auto* current=snapshot.instance(actor.id);
     for(unsigned depth=0;current&&depth<65;++depth) {
@@ -714,6 +716,11 @@ struct Document::Impl {
     std::shared_ptr<const render::TriangleBuffer> mesh;
     std::uint64_t used = 0;
   };
+  struct WeakCacheEntry {
+    std::weak_ptr<const render::TriangleBuffer> mesh;
+    std::weak_ptr<const render::MeshData> resource;
+    bool has_resource = false;
+  };
   ModelOptions options;
   ViewOptions view;
   std::set<PickingKey> hidden_shapes;
@@ -737,6 +744,7 @@ struct Document::Impl {
   std::map<std::uint64_t, std::vector<TimelineEntry>> native_timelines,
       after_timelines;
   std::set<std::uint64_t> named_scenes;
+  std::set<std::uint64_t> spatial_candidates;
   Playback playback;
   double remainder = 0;
   std::shared_ptr<FrameState> frame = std::make_shared<FrameState>();
@@ -745,12 +753,14 @@ struct Document::Impl {
   std::optional<render::SceneQuerySource> selected_query;
   std::optional<ObjectKey> inspected;
   std::map<std::vector<std::uint64_t>, CacheEntry> cache;
+  std::map<std::vector<std::uint64_t>, WeakCacheEntry> live_meshes;
   std::uint64_t clock = 0;
   struct ActorTreeCache {
     bool valid = false;
     std::size_t prefix = 0, metadata_prefix = 0;
     std::optional<std::uint64_t> scene;
     std::vector<ActorNode> nodes;
+    std::map<QualifiedName, bool> class_roles;
   };
   mutable ActorTreeCache actor_tree_cache;
   explicit Impl(ModelOptions o) : options(o), extractor(o.extractor), query_index(o.scene_queries) {
@@ -861,9 +871,24 @@ struct Document::Impl {
       it->second.used = ++clock;
       return it->second.mesh;
     }
-    auto data = std::make_shared<const render::TriangleBuffer>(
-        render::tessellate(g, options.mesh));
+    std::shared_ptr<const render::MeshData> resource;
+    std::visit([&](const auto &value) {
+      using T = std::decay_t<decltype(value)>;
+      if constexpr (std::is_same_v<T, render::ConvexMesh> ||
+                    std::is_same_v<T, render::TriangleMesh> ||
+                    std::is_same_v<T, render::HeightField>)
+        resource = value.mesh;
+    }, g);
+    auto live = live_meshes.find(key);
+    std::shared_ptr<const render::TriangleBuffer> data;
+    if (live != live_meshes.end() &&
+        (!live->second.has_resource || live->second.resource.lock() == resource))
+      data = live->second.mesh.lock();
+    if (!data)
+      data = std::make_shared<const render::TriangleBuffer>(
+          render::tessellate(g, options.mesh));
     if (options.max_tessellation_cache_entries) {
+      live_meshes[key] = {data, resource, bool(resource)};
       cache.emplace(std::move(key), CacheEntry{g, data, ++clock});
       while (cache.size() > options.max_tessellation_cache_entries) {
         auto oldest = std::min_element(cache.begin(), cache.end(),
@@ -890,6 +915,8 @@ struct Document::Impl {
     const auto &lives = session->lifetimes();
     for (; indexed_lifetimes < lives.size(); ++indexed_lifetimes) {
       const auto &life = lives[indexed_lifetimes];
+      if (!(life.class_name == QualifiedName{"physx3", "PxMaterial"}))
+        spatial_candidates.insert(life.id);
       if (life.class_name == QualifiedName{"physx3", "PxScene"} ||
           session->metadata().is_a(life.class_name, {"physx3", "PxScene"}))
         ensure_scene(life.id, life.generation);
@@ -912,8 +939,7 @@ struct Document::Impl {
       if (scene == f.scene_id && sample == SamplePoint::native_frame)
         timeline.push_back(entry);
       if (!named_scenes.count(f.scene_id)) {
-        auto snapshot = session->snapshot_at_event(f.event_count);
-        if (auto object = snapshot.instance(f.scene_id))
+        if (auto object = session->instance_at_event(f.event_count, f.scene_id))
           info.name = name(*object);
         named_scenes.insert(f.scene_id);
       }
@@ -1148,6 +1174,13 @@ struct Document::Impl {
     if (live_ingestion && session && timeline.empty() &&
         !session->at_transaction_boundary())
       return;
+    for (auto it = live_meshes.begin(); it != live_meshes.end();) {
+      if (it->second.mesh.expired() ||
+          (it->second.has_resource && it->second.resource.expired()))
+        it = live_meshes.erase(it);
+      else
+        ++it;
+    }
     auto next = std::make_shared<FrameState>();
     if (!session) {
       next->label = "No recording";
@@ -1159,21 +1192,29 @@ struct Document::Impl {
     if (!timeline.empty()) {
       next->marker = timeline.at(index);
       next->label = timeline[index].label;
-      next->snapshot = session->snapshot_at_event(timeline[index].event_count);
+      next->snapshot = session->snapshot_view_at_event(timeline[index].event_count);
     } else {
       next->label = live_ingestion ? "Live capture: waiting for a completed "
                                      "frame (safe current state)"
                     : sample == SamplePoint::after_fetch
                         ? "No explicit after-fetch markers; showing capture EOF"
                         : "No completed frames; showing capture EOF";
-      next->snapshot = session->latest();
+      next->snapshot = session->snapshot_view_at_event(session->event_count());
     }
+    std::vector<std::uint64_t> spatial_ids;
+    spatial_ids.reserve(std::min(spatial_candidates.size(), next->snapshot.instances.size()));
+    for (const auto id : spatial_candidates)
+      if (const auto *object = next->snapshot.instance(id);
+          object && !(object->class_name == QualifiedName{"physx3", "PxMaterial"}))
+        spatial_ids.push_back(id);
+    next->spatial_snapshot = std::make_shared<const SnapshotView>(
+        next->snapshot.select_view(spatial_ids));
     render::ExtractOptions selection;
     selection.scene_id = scene;
     if (selected)
       selection.selected.push_back(*selected);
     next->render =
-        extractor.extract(session->metadata(), next->snapshot, selection);
+        extractor.extract(session->metadata(), *next->spatial_snapshot, selection);
     auto deformable_options = options.deformables;
     // A scene may not yet exist at this historical sample. Match the live
     // generation from the snapshot, never a cached later lifetime.
@@ -1183,12 +1224,12 @@ struct Document::Impl {
         deformable_options.scene =
             deformables::ObjectKey{object->id, object->generation};
         next->deformables = deformables::extract(
-            session->metadata(), next->snapshot, deformable_options);
+            session->metadata(), *next->spatial_snapshot, deformable_options);
       } else
         next->deformables.event_count = next->snapshot.event_count;
     } else
       next->deformables = deformables::extract(
-          session->metadata(), next->snapshot, deformable_options);
+          session->metadata(), *next->spatial_snapshot, deformable_options);
     render::DebugRange range;
     if (next->marker) {
       range.begin_event_count = next->marker->begin_event_count;
@@ -1207,17 +1248,28 @@ struct Document::Impl {
       };
       for (const auto &query : next->scene_queries.queries) {
         if (query.coordinates_ambiguous) continue;
+        if (query.geometries.empty()) continue;
         if (volume_limit) break;
-        auto source_snapshot = query_snapshots.find(query.source.snapshot_event_count);
-        if (source_snapshot == query_snapshots.end())
-          source_snapshot = query_snapshots.emplace(query.source.snapshot_event_count,
-              session->snapshot_at_event(query.source.snapshot_event_count)).first;
+        auto &source_snapshot = query_snapshots[query.source.snapshot_event_count];
+        source_snapshot.event_count = query.source.snapshot_event_count;
         for (std::size_t i = 0; i < query.geometries.size(); ++i) {
           std::optional<Transform> pose;
           if (i < query.poses.size()) pose = query.poses[i];
           else if (!i && query.overlap_pose) pose = query.overlap_pose;
           if (!pose) { volume_error("recorded geometry has no matching recorded pose"); continue; }
-          auto geometry = extractor.extract_geometry(session->metadata(), source_snapshot->second, query.geometries[i].key);
+          const auto geometry_id = query.geometries[i].key.id;
+          if (!source_snapshot.instance(geometry_id)) {
+            auto object = session->instance_at_event(source_snapshot.event_count, geometry_id);
+            if (object) source_snapshot.instances.emplace(geometry_id, std::move(*object));
+          }
+          if (const auto *object = source_snapshot.instance(geometry_id))
+            for (const auto *property : {"ConvexMesh", "TriangleMesh", "HeightField"})
+              if (const auto *value = object->property(property))
+                if (auto id = value->as_object_ref(); id && *id && !source_snapshot.instance(*id)) {
+                  auto resource = session->instance_at_event(source_snapshot.event_count, *id);
+                  if (resource) source_snapshot.instances.emplace(*id, std::move(*resource));
+                }
+          auto geometry = extractor.extract_geometry(session->metadata(), source_snapshot, query.geometries[i].key);
           if (!geometry.geometry) {
             for (const auto &diagnostic : geometry.diagnostics)
               volume_error("geometry " + std::to_string(query.geometries[i].key.id) + ": " + diagnostic.message);
@@ -1251,7 +1303,7 @@ struct Document::Impl {
     auto debug_options = options.debug;
     debug_options.joint_axis_length = 0;
     next->debug =
-        render::extract_debug(next->snapshot, session->metadata(),
+        render::extract_debug(*next->spatial_snapshot, session->metadata(),
                               session->channels(), range, debug_options);
     build_joint_display(*next);
     for (const auto &s : next->render.instances) {
@@ -1301,7 +1353,9 @@ void Document::open_file(const std::string &path) {
   decoder.finish();
   if (!decoder.header())
     throw std::invalid_argument("capture has no stream header");
-  adopt(std::make_unique<Session>(*decoder.header(), decoder.take_events()),
+  SessionOptions session_options;
+  session_options.max_checkpoints = 0;
+  adopt(std::make_unique<Session>(*decoder.header(), decoder.take_events(), session_options),
         path);
 }
 void Document::adopt(std::unique_ptr<Session> s, std::string label) {
@@ -1693,12 +1747,27 @@ std::vector<ActorNode> Document::actor_tree() const {
   if (cache.valid && cache.prefix == prefix &&
       cache.metadata_prefix == metadata_prefix && cache.scene == impl_->scene)
     return cache.nodes;
+  if (cache.metadata_prefix != metadata_prefix) cache.class_roles.clear();
   const auto &snapshot = impl_->frame->snapshot;
   const auto &m = impl_->session->metadata();
-  for (const auto &[id, object] : snapshot.instances) {
-    if (!is_a(m, object, "PxRigidActor") && !is_a(m, object, "PxRigidStatic") &&
-        !is_a(m, object, "PxRigidDynamic") &&
-        !is_a(m, object, "PxArticulationLink"))
+  std::vector<const InstanceState *> candidates;
+  const auto gather = [&](const auto &objects) {
+    candidates.reserve(objects.size());
+    for (const auto &[id, object] : objects) candidates.push_back(&object);
+  };
+  if (impl_->frame->spatial_snapshot)
+    gather(impl_->frame->spatial_snapshot->instances);
+  else
+    gather(snapshot.instances);
+  for (const auto *candidate : candidates) {
+    const auto &object = *candidate;
+    const auto id = object.id;
+    auto role = cache.class_roles.find(object.class_name);
+    if (role == cache.class_roles.end())
+      role = cache.class_roles.emplace(object.class_name,
+          is_a(m, object, "PxRigidActor") || is_a(m, object, "PxRigidStatic") ||
+          is_a(m, object, "PxRigidDynamic") || is_a(m, object, "PxArticulationLink")).first;
+    if (!role->second)
       continue;
     auto scenes = refs(object, "Scene");
     bool visible =

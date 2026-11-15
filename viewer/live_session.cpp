@@ -69,9 +69,10 @@ bool LiveSession::poll(Document &document) {
     return false;
   }
   try {
-    auto delta =
-        impl_->capture->poll_from(impl_->cursor, impl_->limits.max_events,
-                                  impl_->limits.max_payload_bytes);
+    auto available = impl_->capture->try_poll_from(
+        impl_->cursor, impl_->limits.max_events, impl_->limits.max_payload_bytes);
+    if (!available) return false;
+    auto delta = std::move(*available);
     impl_->status = std::move(delta.status);
     if (!impl_->import_failed) {
       if (delta.header && !impl_->initialized) {

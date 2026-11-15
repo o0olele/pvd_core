@@ -33,7 +33,7 @@ cmake --install build-core --config Debug --prefix "E:/Code/pvd/install-core"
 其他 CMake 项目使用：
 
 ```cmake
-find_package(pvd_core 0.8 CONFIG REQUIRED)
+find_package(pvd_core 0.11 CONFIG REQUIRED)
 target_link_libraries(my_backend PRIVATE pvd::core)
 ```
 
@@ -67,6 +67,23 @@ if (!frames.empty()) {
 `sections()` 还提供所有已闭合的命名 section，包含流、section ID、时间戳和事件前缀位置，便于上层实现自定义时间区段分析。
 
 `SessionOptions` 默认每 4,096 个事件在安全事务边界建立检查点，最多保留 64 个，并以 `max_checkpoint_bytes` 限制检查点拥有的节点、字符串和引用数组的估算总量（默认 128 MiB）。预算不足时先淘汰旧检查点；单个状态超过预算则跳过。`checkpoint_count()` 和 `estimated_checkpoint_bytes()` 可用于诊断。数量或字节预算为 0 都会禁用检查点；字节预算设为 `std::numeric_limits<std::size_t>::max()` 可仅保留数量限制。共享的不可变属性载荷不重复计入，因此该值不是进程内存硬上限。关闭检查点仍保持查询结果一致，只增加重放开销。
+
+0.11 增加完整的只读实例视图，用于连续播放时复用未变化对象：
+
+```cpp
+auto view = session.snapshot_view_at_frame(0);
+for (const auto& [id, object] : view.instances) {
+    // object 是 const InstanceState&；所有材质、几何和自定义对象仍在视图中。
+}
+auto subset = view.select_view({object_id}); // 共享不可变实例，不推断引用闭包。
+auto selected = session.snapshot_selected_at_event(view.event_count, {object_id});
+auto object = session.instance_at_event(view.event_count, object_id); // 不存在则 nullopt。
+auto mutable_copy = view.materialize(); // 显式取得原有可修改 Snapshot。
+```
+
+`SnapshotView` 可复制、逆向查询，并在会话继续追加、缓存淘汰或会话析构后保留其对象。实例索引有序，支持 `find/lower_bound/at` 与范围遍历；实例和属性不暴露可修改别名。`select()` 返回原有 `Snapshot` 子集，`select_view()` 返回共享实例的子视图，重复 ID 只出现一次。旧 `Snapshot` API 及其可修改值语义保持不变。
+
+视图使用对象/属性版本索引，不依赖全状态检查点。`max_view_cache_bytes` 默认 128 MiB，限制会话以强引用保留的派生实例和引用属性的估算总量，`estimated_view_cache_bytes()` 返回共同计重。设为 0 关闭强保留，已发布视图持有的实例仍可弱引用复用。源历史、查询索引、弱引用查找结构和调用方已保留的视图不是该预算的进程内存硬上限。新查询的派生缓存在内部同步，可并发只读查询；`append/finish` 仍须由调用方与所有查询互斥。OriginShift 前缀目前保留完整重放路径以保证逐次 float 运算精确。仅使用视图的查看器默认关闭旧全状态检查点，独立内核仍保留原默认值。
 
 引用数组历史记录增删操作，在检查点或返回快照时一次生成完整的原始字节，保留顺序、重复 ID 和删除首个匹配项的语义。已返回快照仍然独立且不可变。0.10 新增的预算字段位于原有 `decode_limits` 之后，保留原先三参数聚合初始化的含义；C++ 结构布局发生变化，升级 DLL 时必须同步重编所有调用方。
 

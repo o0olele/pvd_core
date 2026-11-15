@@ -153,8 +153,14 @@ Vec3 vector(const InstanceState &object, const char *name) {
        "geometry vector missing, wrongly typed or nonfinite");
   return *v;
 }
-SceneQueryGeometry geometry(const Snapshot &snapshot, const Metadata &meta,
-                            std::uint64_t id) {
+void ensure_object(Snapshot &snapshot, const Session &session, std::uint64_t id) {
+  if (!id || snapshot.instance(id)) return;
+  auto object = session.instance_at_event(snapshot.event_count, id);
+  if (object) snapshot.instances.emplace(id, std::move(*object));
+}
+SceneQueryGeometry geometry(Snapshot &snapshot, const Session &session,
+                            const Metadata &meta, std::uint64_t id) {
+  ensure_object(snapshot, session, id);
   const auto *p = snapshot.instance(id);
   need(p, SceneQueryCode::dangling_reference,
        "query geometry instance is missing at its publication");
@@ -185,6 +191,7 @@ SceneQueryGeometry geometry(const Snapshot &snapshot, const Metadata &meta,
     need(bool(id_value), SceneQueryCode::invalid_type,
          "query convex mesh reference has the wrong type");
     c.resource_id = *id_value;
+    ensure_object(snapshot, session, *id_value);
     c.resource = resolve(snapshot, *id_value, meta, "PxConvexMesh");
     need(c.resource.has_value(), SceneQueryCode::dangling_reference,
          "query convex mesh resource is null");
@@ -421,7 +428,8 @@ struct SceneQueryIndex::Impl {
     const auto &p = required(scene, properties[property]);
     bounds(range, properties[property], p.item_count);
   }
-  void attach(SceneQuery &q, const Snapshot &snapshot, const Metadata &meta,
+  void attach(SceneQuery &q, Snapshot &snapshot, const Session &session,
+              const Metadata &meta,
               const InstanceState &scene, std::size_t begin,
               std::size_t &total_hits, std::size_t &total_aux,
               SceneQueries &output) const {
@@ -502,6 +510,7 @@ struct SceneQueryIndex::Impl {
            SceneQueryCode::malformed, "available hit UV is nonfinite", start);
       auto object = [&](std::uint64_t id, const char *type) {
         try {
+          ensure_object(snapshot, session, id);
           return resolve(snapshot, id, meta, type);
         } catch (const Problem &problem) {
           q.complete = false;
@@ -546,7 +555,7 @@ struct SceneQueryIndex::Impl {
          "query geometry range is empty");
     for (std::uint32_t i = 0; i < q.geometry_range.count; ++i) {
       auto g = geometry(
-          snapshot, meta,
+          snapshot, session, meta,
           gp.reference_ids->at(std::size_t(q.geometry_range.base_index) + i));
       const auto variant = g.value.index();
       bool matches = true;
@@ -667,8 +676,9 @@ struct SceneQueryIndex::Impl {
                  "query publication index exceeds entry budget");
       return out;
     }
-    const auto ending = session.snapshot_at_event(window.end_event_count);
-    const auto *scene = ending.instance(window.scene_id);
+    const auto ending_scene =
+        session.instance_at_event(window.end_event_count, window.scene_id);
+    const auto *scene = ending_scene ? &*ending_scene : nullptr;
     if (!scene ||
         !session.metadata().is_a(scene->class_name, {"physx3", "PxScene"})) {
       diagnostic(out, SceneQueryCode::missing_scene, fallback, "",
@@ -706,7 +716,7 @@ struct SceneQueryIndex::Impl {
                    "window contains multiple publications of this family; only "
                    "the latest is returned");
       }
-      const auto snapshot = session.snapshot_at_event(u.prefix);
+      auto snapshot = session.snapshot_selected_at_event(u.prefix, {window.scene_id});
       const auto *owner = snapshot.instance(window.scene_id);
       const auto hits_before = total_hits, aux_before = total_aux;
       try {
@@ -728,7 +738,7 @@ struct SceneQueryIndex::Impl {
           q.coordinates_ambiguous = u.coordinates_ambiguous ||
                                      u.origin_epoch != scene->coordinate_epoch;
           try {
-            attach(q, snapshot, session.metadata(), *owner,
+            attach(q, snapshot, session, session.metadata(), *owner,
                    window.begin_event_count, total_hits, total_aux, out);
           } catch (const Problem &problem) {
             q.complete = false;

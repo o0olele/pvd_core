@@ -8,6 +8,13 @@
 namespace {
 using namespace pvd;
 using namespace pvd::render;
+bool testing_view = false;
+BodyOverlays checked_body_overlays(const Frame &frame, const Snapshot &snapshot,
+                                  const BodyOverlayOptions &options) {
+  if (testing_view)
+    return build_body_overlays(frame, SnapshotView(snapshot), options);
+  return build_body_overlays(frame, snapshot, options);
+}
 void check(bool ok, const char *text) {
   if (!ok)
     throw std::runtime_error(text);
@@ -124,7 +131,7 @@ struct Fixture {
 void basic(ByteOrder order, std::uint8_t width) {
   Fixture f(order, width);
   const auto before = f.snapshot.instances.at(f.a).properties;
-  const auto result = build_body_overlays(f.frame, f.snapshot, f.all());
+  const auto result = checked_body_overlays(f.frame, f.snapshot, f.all());
   check(
       result.complete && result.diagnostics.empty() &&
           result.bounds_count == 3 && result.bounds.size() == 36 &&
@@ -190,7 +197,7 @@ void visibility() {
   options.visible_attachments =
       std::vector<PickingKey>{f.frame.instances[1].picking_key()};
   f.snapshot.instances.at(f.b).properties.erase("GlobalPose");
-  auto result = build_body_overlays(f.frame, f.snapshot, options);
+  auto result = checked_body_overlays(f.frame, f.snapshot, options);
   check(result.complete && result.bounds_count == 1 &&
             result.linear_vectors == 1 && result.angular_vectors == 1 &&
             result.linear_velocity[0].source.key ==
@@ -199,14 +206,14 @@ void visibility() {
         "diagnostics");
   options.visible_attachments = std::vector<PickingKey>{};
   f.snapshot.event_count = 999;
-  result = build_body_overlays(f.frame, f.snapshot, options);
+  result = checked_body_overlays(f.frame, f.snapshot, options);
   check(
       result.complete && result.bounds.empty() &&
           result.linear_velocity.empty() && result.processed_attachments == 0,
       "present empty visibility mask means NONE even with hidden invalid data");
   f.snapshot.event_count = 123;
   options.visible_attachments.reset();
-  result = build_body_overlays(f.frame, f.snapshot, options);
+  result = checked_body_overlays(f.frame, f.snapshot, options);
   check(!result.complete && has(result, BodyOverlayCode::missing_property),
         "null visibility means all attachments");
 }
@@ -216,7 +223,7 @@ void static_links_zero_scale() {
   f.object(30, 0, "PxRigidStatic");
   f.object(102, 0, "PxShape");
   f.attachment(30, 0, 102, 0, {{0, 0, 0}, {1, 1, 1}}, ActorKind::rigid_static);
-  auto result = build_body_overlays(f.frame, f.snapshot, f.all());
+  auto result = checked_body_overlays(f.frame, f.snapshot, f.all());
   check(result.complete && result.bounds_count == 1 &&
             result.linear_vectors == 0 && result.angular_vectors == 0,
         "static bodies never guess or require velocities");
@@ -227,7 +234,7 @@ void static_links_zero_scale() {
   f.vector(40, "AngularVelocity", {0, 0, 3});
   f.attachment(40, 1, 103, 2, {{0, 0, 0}, {1, 1, 1}},
                ActorKind::articulation_link);
-  result = build_body_overlays(f.frame, f.snapshot, f.all());
+  result = checked_body_overlays(f.frame, f.snapshot, f.all());
   check(result.complete && result.angular_vectors == 1 &&
             result.linear_vectors == 0,
         "captured articulation-link fields are supported; zero vectors draw "
@@ -237,7 +244,7 @@ void static_links_zero_scale() {
   auto options = f.all();
   options.velocity_scale = 0;
   f.snapshot.instances.at(40).properties.clear();
-  result = build_body_overlays(f.frame, f.snapshot, options);
+  result = checked_body_overlays(f.frame, f.snapshot, options);
   check(result.complete && result.bounds_count == 2 &&
             result.linear_velocity.empty() && result.angular_velocity.empty(),
         "scale zero disables vector work without disabling bounds");
@@ -246,7 +253,7 @@ void invalid() {
   {
     Fixture f;
     f.snapshot.event_count = 124;
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::snapshot_mismatch) &&
               r.bounds.empty(),
           "different source prefixes never mix");
@@ -254,7 +261,7 @@ void invalid() {
   {
     Fixture f;
     ++f.snapshot.instances.at(f.a).generation;
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::stale_source) &&
               r.bounds_count == 1 && r.linear_vectors == 1,
           "stale actor generation cannot draw bounds or vectors");
@@ -263,7 +270,7 @@ void invalid() {
     Fixture f;
     f.object(2, 0, "PxScene");
     f.reference(f.a, "Scene", 2);
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::stale_source) &&
               r.bounds_count == 1,
           "known foreign-scene attachment is omitted");
@@ -271,7 +278,7 @@ void invalid() {
   {
     Fixture f;
     f.frame.instances[0].world_bounds.reset();
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::missing_bounds) &&
               r.bounds_count == 2 && r.linear_vectors == 2,
           "missing finite bounds are diagnostic, not invented");
@@ -283,7 +290,7 @@ void invalid() {
     else
       f.frame.instances[0].world_bounds->maximum.y =
           std::numeric_limits<float>::infinity();
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::invalid_bounds) &&
               r.bounds_count == 2,
           "invalid AABB cannot partially emit edges");
@@ -291,7 +298,7 @@ void invalid() {
   {
     Fixture f;
     f.snapshot.instances.at(f.a).properties.erase("LinearVelocity");
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::missing_property) &&
               r.linear_vectors == 1 && r.angular_vectors == 1 &&
               r.bounds_count == 3,
@@ -311,7 +318,7 @@ void invalid() {
     if (mode == 4)
       f.snapshot.instances.at(f.a).properties.at("LinearVelocity").byte_order =
           static_cast<ByteOrder>(99);
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && has(r, BodyOverlayCode::invalid_property) &&
               r.linear_vectors == 1 && r.angular_vectors == 1,
           "invalid typed velocity is isolated and does not throw");
@@ -324,7 +331,7 @@ void invalid() {
       f.put(f.a, "GlobalPose", "PxTransform", Bytes(27));
     if (mode == 2)
       f.floats(f.a, "GlobalPose", "PxTransform", {0, 0, 0, 2, 10, 20, 30});
-    auto r = build_body_overlays(f.frame, f.snapshot, f.all());
+    auto r = checked_body_overlays(f.frame, f.snapshot, f.all());
     check(!r.complete && r.bounds_count == 3 && r.linear_vectors == 1 &&
               r.angular_vectors == 0,
           "invalid/missing actor pose never substitutes shape pose as vector "
@@ -337,7 +344,7 @@ void invalid() {
     f.vector(f.a, "LinearVelocity", {max, 0, 0});
     auto options = f.all();
     options.velocity_scale = 2;
-    auto r = build_body_overlays(f.frame, f.snapshot, options);
+    auto r = checked_body_overlays(f.frame, f.snapshot, options);
     check(!r.complete && has(r, BodyOverlayCode::invalid_property) &&
               r.linear_vectors == 1 && r.linear_velocity.size() == 3,
           "finite-input endpoint overflow rejects a whole arrow");
@@ -352,7 +359,7 @@ void budgets() {
   Fixture f;
   BodyOverlayOptions disabled;
   disabled.max_attachments = 0;
-  auto off = build_body_overlays(f.frame, f.snapshot, disabled);
+  auto off = checked_body_overlays(f.frame, f.snapshot, disabled);
   check(off.complete && off.processed_attachments == 0 && off.bounds.empty() &&
             off.diagnostics.empty(),
         "disabled layers have no traversal even with zero work budget");
@@ -361,38 +368,38 @@ void budgets() {
       flat_frame.instances[0].world_bounds->minimum.z;
   BodyOverlayOptions flat_options;
   flat_options.show_bounds = true;
-  auto flat = build_body_overlays(flat_frame, f.snapshot, flat_options);
+  auto flat = checked_body_overlays(flat_frame, f.snapshot, flat_options);
   check(flat.complete && flat.bounds_count == 3 &&
             flat.bounds[0].position0.z == 3 && flat.bounds[0].position1.z == 3,
         "zero extent AABB remains tight without invented inflation");
   auto o = f.all();
   o.max_lines = 15;
-  auto r = build_body_overlays(f.frame, f.snapshot, o);
+  auto r = checked_body_overlays(f.frame, f.snapshot, o);
   check(!r.complete && has(r, BodyOverlayCode::limit_exceeded) &&
             r.bounds.size() == 12 && r.linear_velocity.size() == 3 &&
             r.angular_velocity.empty(),
         "shared line budget commits only complete AABB/arrow primitives");
   o = f.all();
   o.max_lines = 11;
-  r = build_body_overlays(f.frame, f.snapshot, o);
+  r = checked_body_overlays(f.frame, f.snapshot, o);
   check(!r.complete && r.bounds.empty() && r.linear_velocity.empty(),
         "no partial AABB on budget failure");
   o = {};
   o.show_linear_velocity = true;
   o.max_lines = 2;
-  r = build_body_overlays(f.frame, f.snapshot, o);
+  r = checked_body_overlays(f.frame, f.snapshot, o);
   check(!r.complete && r.linear_velocity.empty(),
         "no partial arrow shaft on budget failure");
   o = f.all();
   o.max_attachments = 1;
-  r = build_body_overlays(f.frame, f.snapshot, o);
+  r = checked_body_overlays(f.frame, f.snapshot, o);
   check(!r.complete && r.processed_attachments == 1 && r.bounds_count == 1,
         "work budget bounds examined attachments");
   o = f.all();
   o.max_diagnostics = 1;
   for (auto &shape : f.frame.instances)
     shape.world_bounds.reset();
-  r = build_body_overlays(f.frame, f.snapshot, o);
+  r = checked_body_overlays(f.frame, f.snapshot, o);
   check(!r.complete && r.diagnostics.size() == 1,
         "diagnostic retention remains bounded");
   for (int bad = 0; bad < 3; ++bad) {
@@ -405,7 +412,7 @@ void budgets() {
       o.max_diagnostics = 0;
     bool threw = false;
     try {
-      build_body_overlays(f.frame, f.snapshot, o);
+      checked_body_overlays(f.frame, f.snapshot, o);
     } catch (const std::invalid_argument &) {
       threw = true;
     }
@@ -428,7 +435,7 @@ void sdk(const std::string &path) {
     for (const auto &shape : frame.instances)
       if (shape.actor.kind != ActorKind::rigid_static)
         options.visible_attachments->push_back(shape.picking_key());
-    auto result = build_body_overlays(frame, snapshot, options);
+    auto result = checked_body_overlays(frame, snapshot, options);
     if (!result.complete)
       for (const auto &d : result.diagnostics)
         std::cerr << d.property << ": " << d.message << '\n';
@@ -463,16 +470,19 @@ void sdk(const std::string &path) {
 } // namespace
 int main(int argc, char **argv) {
   try {
-    for (auto order : {ByteOrder::little, ByteOrder::big})
-      for (auto width : {std::uint8_t{4}, std::uint8_t{8}})
-        basic(order, width);
-    visibility();
-    static_links_zero_scale();
-    invalid();
-    budgets();
-    if (argc > 1)
-      sdk(argv[1]);
-    std::cout << "body overlay tests passed\n";
+    for (bool view : {false, true}) {
+      testing_view = view;
+      for (auto order : {ByteOrder::little, ByteOrder::big})
+        for (auto width : {std::uint8_t{4}, std::uint8_t{8}})
+          basic(order, width);
+      visibility();
+      static_links_zero_scale();
+      invalid();
+      budgets();
+      if (argc > 1)
+        sdk(argv[1]);
+    }
+    std::cout << "body overlay Snapshot/SnapshotView tests passed\n";
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << '\n';

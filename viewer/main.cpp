@@ -590,7 +590,7 @@ private:
   int native_smoke_phase_ = 0;
   std::size_t motion_pixels_ = 0;
 #ifdef PVD_VIEWER_HAS_TRANSPORT
-  LiveSession live_;
+  LiveSession live_{LivePollLimits{2048, 2u * 1024u * 1024u}};
   std::optional<SlotId> live_slot_id_;
   std::string live_recording_path_;
   bool live_bound_ = false;
@@ -1680,6 +1680,9 @@ private:
       if (live_.active())
         throw std::runtime_error("A live receiver is already active.");
       pvd::CaptureOptions options;
+      // Display uses immutable indexed views; legacy full-state checkpoints
+      // would periodically stall reception and the UI without helping it.
+      options.session_options.max_checkpoints = 0;
       options.address = capture_address_.data();
       if (capture_port_ < 0 || capture_port_ > 65535)
         throw std::runtime_error(
@@ -1740,7 +1743,7 @@ private:
     const auto now = std::chrono::steady_clock::now();
     if (now < next_live_poll_)
       return;
-    next_live_poll_ = now + std::chrono::milliseconds(100);
+      next_live_poll_ = now + std::chrono::milliseconds(16);
     try {
       const auto *previous = slot->document().session();
       const bool changed = live_.poll(slot->document());

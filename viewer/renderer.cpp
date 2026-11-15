@@ -19,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace pvd::viewer {
 namespace {
@@ -156,6 +157,18 @@ struct Renderer::Impl {
         std::uint64_t last_use=0;
     };
     std::unordered_map<const render::TriangleBuffer*,Mesh> meshes;
+    std::unordered_set<const render::TriangleBuffer*> active_meshes;
+
+    void trim_meshes(std::size_t target_count) {
+        while(meshes.size()>target_count) {
+            auto oldest=meshes.end();
+            for(auto it=meshes.begin();it!=meshes.end();++it)
+                if(!active_meshes.count(it->first)&&
+                   (oldest==meshes.end()||it->second.last_use<oldest->second.last_use))oldest=it;
+            if(oldest==meshes.end())break;
+            meshes.erase(oldest);
+        }
+    }
 
     Impl(ID3D11Device* d,ID3D11DeviceContext* c,std::size_t cache):device(d),context(c),max_cache(cache) {
         need(d&&c,"Renderer requires a D3D11 device and immediate context");
@@ -260,10 +273,11 @@ struct Renderer::Impl {
         hr(device->CreateBuffer(&desc,&initial,&result.vertices),"CreateBuffer cached mesh vertices");
         desc.BindFlags=D3D11_BIND_INDEX_BUFFER;desc.ByteWidth=static_cast<UINT>(source->indices.size()*sizeof(std::uint32_t));initial.pSysMem=source->indices.data();
         hr(device->CreateBuffer(&desc,&initial,&result.indices),"CreateBuffer cached mesh indices");
-        while(meshes.size()>=max_cache) {
-            const auto oldest=std::min_element(meshes.begin(),meshes.end(),[](const auto& a,const auto& b){return a.second.last_use<b.second.last_use;});
-            meshes.erase(oldest);
-        }
+        // A visible working set larger than the LRU target must remain resident:
+        // evicting its first mesh while uploading its last repeats every camera
+        // frame. Only inactive resources are candidates, including old retained
+        // FrameStates whose CPU meshes have not expired yet.
+        trim_meshes(std::max(max_cache,active_meshes.size())-1);
         ++misses;return meshes.emplace(source.get(),std::move(result)).first->second;
     }
     void update(const Mat4& projection,const Mat4& world,std::array<float,4> tint,bool lit,float depth_bias=0) {
@@ -320,7 +334,18 @@ struct Renderer::Impl {
         need(valid_color_palette(frame.palette),"viewer palette RGBA must be finite in [0,1]");
         for(const auto scope:{options.bounds_scope,options.velocity_scope,options.scene_query_scope,options.coordinate_frame_scope,options.transparent_scope})need(scope_valid(scope),"unknown visualization scope");
         const auto selected_keys=visualization_selected_attachments(frame,selection);
+        const auto spatial_state=[&]() -> const SnapshotView& {
+            if(frame.spatial_snapshot)return *frame.spatial_snapshot;
+            return frame.snapshot;
+        };
+        active_meshes.clear();
+        if(options.show_solids||options.show_wireframe)
+            for(const auto& draw:frame.draws)
+                if(draw.visible&&draw.mesh&&!draw.mesh->indices.empty()&&
+                   mesh_opacity(draw,options,selected_keys.count(draw.key)!=0)>0)
+                    active_meshes.insert(draw.mesh.get());
         for(auto it=meshes.begin();it!=meshes.end();)if(it->second.owner.expired())it=meshes.erase(it);else ++it;
+        trim_meshes(std::max(max_cache,active_meshes.size()));
         ID3D11ShaderResourceView* unbound=nullptr;context->PSSetShaderResources(0,1,&unbound);
         auto* output=rtv.Get();context->OMSetRenderTargets(1,&output,dsv.Get());
         context->ClearRenderTargetView(rtv.Get(),options.background_color.data());
@@ -437,7 +462,7 @@ struct Renderer::Impl {
                 request.max_diagnostics=256-overlays.diagnostics.size();request.visible_attachments.emplace();
                 const auto scope=bounds_pass?options.bounds_scope:options.velocity_scope;
                 for(const auto& draw:frame.draws)if(draw.visible&&visualization_scope_matches(scope,selected_keys.count(draw.key)!=0))request.visible_attachments->push_back(draw.key);
-                auto part=render::build_body_overlays(bounds_pass?displayed_geometry:frame.render,frame.snapshot,request);
+                auto part=render::build_body_overlays(bounds_pass?displayed_geometry:frame.render,spatial_state(),request);
                 remaining-=part.bounds.size()+part.linear_velocity.size()+part.angular_velocity.size();
                 overlays.bounds.insert(overlays.bounds.end(),part.bounds.begin(),part.bounds.end());
                 overlays.linear_velocity.insert(overlays.linear_velocity.end(),part.linear_velocity.begin(),part.linear_velocity.end());
@@ -457,7 +482,7 @@ struct Renderer::Impl {
             request.actor=options.show_actor_frames;request.shape=options.show_shape_frames;request.mass=options.show_mass_frames;
             request.axis_length=options.coordinate_frame_scale;request.attachments.emplace();
             for(const auto& draw:frame.draws)if(draw.visible&&visualization_scope_matches(options.coordinate_frame_scope,selected_keys.count(draw.key)!=0))request.attachments->push_back(draw.key);
-            coordinate_frames=render::build_coordinate_frames(frame.render,frame.snapshot,request);
+            coordinate_frames=render::build_coordinate_frames(frame.render,spatial_state(),request);
             for(const auto* family:{&coordinate_frames.actor,&coordinate_frames.shape,&coordinate_frames.mass})
                 for(const auto& value:*family)line(lines,value.position0,value.position1,argb(value.color),argb(value.color));
             stats.actor_frames=coordinate_frames.actor_count;stats.shape_frames=coordinate_frames.shape_count;stats.mass_frames=coordinate_frames.mass_count;

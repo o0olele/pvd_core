@@ -64,9 +64,15 @@ ShapeInstance 保留 scene、actor、shape、geometry 的 ID 和 generation，�
 
 `PickingKey` 使用 scene/actor/shape 及各自生命周期代次区分实例；它是给后续 UI/GPU 使用的身份，不是已实现的屏幕拾取器。调用者可以在 `ExtractOptions::selected` 指定这些键，得到对应 selected 标记。`scene_id` 可以过滤场景。
 
-Extractor 的缓存以资源 ID、代次、几何种类和相关不可变属性载荷签名识别资源。顶点或索引载荷更新会使缓存失效，倒放与 ID 复用也不会误用新资源。每个网格有顶点/三角上限，height field 有单独 cell 上限，缓存条目数受 `max_cache_entries` 约束；这不是整个进程的统一字节上限。
+Extractor 的缓存以资源 ID、代次、几何种类和相关不可变属性载荷签名识别资源。顶点或索引载荷更新会使缓存失效，倒放与 ID 复用也不会误用新资源。每个网格有顶点/三角上限，height field 有单独 cell 上限。强引用 LRU 条目数受 `max_cache_entries` 约束；这不是整个进程的统一字节上限。
+
+当调用者保留的帧包含多于 LRU 容量的资源时，额外的弱索引可以复用这些仍存活的 `MeshData`。它不额外保活网格或原始载荷，仍逐项校验源属性签名、ID 和代次；失效条目会在下一次提取时清理。`clear_cache()` 同时清除两种索引，`max_cache_entries=0` 仍禁用资源复用。Viewer 的细分缓存使用同样的弱复用方式，避免画面中的活跃资源因超过 LRU 容量而每帧重建。
 
 返回帧通过 shared_ptr 持有不可变 MeshData，因此缓存清除、淘汰或之后的提取不会破坏旧帧。一个 Extractor 的可变缓存需要调用方同步；可以为各 UI 工作任务建立独立 Extractor。
+
+`Extractor::extract`、`extract_geometry`、`extract_debug` 和 `extract_contacts` 同时接受完整 `Snapshot` 与只读 `SnapshotView`，两条入口共享同一套解码和诊断实现。只读入口无需将全部对象属性复制成可变快照。类型判断只在单次提取内部复用；调用者在两次调用之间修改 `Metadata` 时，新分类会立即生效。
+
+Viewer 的 `FrameState::snapshot` 保留完整只读状态，包括未参与空间绘制的材质，供 Inspector、对象树和引用导航使用。独立 `spatial_snapshot` 是共享实例的非材质子索引，供几何、cloth/particles、调试图元和空间叠加使用；它不会改变源数据或导出范围。显示选项变化共享这两份只读状态。
 
 损坏、缺失、未知几何及资源限制通过逐对象的 structured diagnostics 返回，其他合法实例继续提取。调用方应检查诊断，再决定展示部分场景还是停止。Cloth、particles 和未建立关系的对象不会被伪造成刚体几何。
 

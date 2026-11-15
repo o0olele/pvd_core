@@ -149,4 +149,7 @@ struct Frame {
 };
 PVD_RENDER_API Frame extract(const Metadata &, const Snapshot &,
                              const Options & = {});
+// Reads immutable shared instances directly; does not materialize a Snapshot.
+PVD_RENDER_API Frame extract(const Metadata &, const SnapshotView &,
+                             const Options & = {});
 } // namespace pvd::deformables

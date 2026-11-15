@@ -59,4 +59,6 @@ struct BodyOverlays {
 // share max_lines, with complete AABBs/arrows committed atomically.
 PVD_RENDER_API BodyOverlays build_body_overlays(
     const Frame &, const Snapshot &, const BodyOverlayOptions &options = {});
+PVD_RENDER_API BodyOverlays build_body_overlays(
+    const Frame &, const SnapshotView &, const BodyOverlayOptions &options = {});
 } // namespace pvd::render

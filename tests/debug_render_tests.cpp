@@ -161,6 +161,15 @@ void debug_formats() {
       p.value.pointer_width = width;
       auto result = extract_debug(snapshot(), metadata(), {p}, {10, 11, 1, {}});
       check(result.complete, "all debug tags decode");
+      const auto viewed = extract_debug(SnapshotView(snapshot()), metadata(), {p}, {10, 11, 1, {}});
+      check(viewed.complete == result.complete && viewed.points.size() == result.points.size() &&
+                viewed.lines.size() == result.lines.size() && viewed.triangles.size() == result.triangles.size() &&
+                viewed.texts.size() == result.texts.size() && viewed.constraints.size() == result.constraints.size() &&
+                !viewed.points.empty() &&
+                viewed.points[0].source.instance_id == result.points[0].source.instance_id &&
+                viewed.points[0].color == result.points[0].color &&
+                viewed.points[0].position.y == result.points[0].position.y,
+            "readonly view preserves debug native ABI and scene attribution");
       check(result.points.size() == 2 && result.lines.size() == 2 &&
                 result.triangles.size() == 2 && result.texts.size() == 1 &&
                 result.constraints.size() == 5,
@@ -384,6 +393,12 @@ void contacts() {
                 result.contacts.size() == 1,
             "source ABI contact decoded");
       const auto &c = result.contacts[0];
+      const auto viewed = extract_contacts(SnapshotView(snap), metadata(), 1);
+      check(viewed.complete && viewed.contacts_available && viewed.contacts.size() == 1 &&
+                viewed.contacts[0].shape0 == c.shape0 && viewed.contacts[0].shape1 == c.shape1 &&
+                viewed.contacts[0].normal_force == c.normal_force && viewed.contacts[0].separation == c.separation &&
+                viewed.contacts[0].position.z == c.position.z,
+            "readonly contact view retains 32/64-bit and LE/BE values");
       check(c.position.z == 3 && c.normal.y == 1 && c.separation == -.125f &&
                 c.normal_force == std::optional<float>(42.5f) &&
                 c.internal_face_index0 == 0xffffffffu &&

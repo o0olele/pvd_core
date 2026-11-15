@@ -12,6 +12,7 @@
 namespace {
 using namespace pvd;
 namespace d = pvd::deformables;
+bool shared_input = false;
 void check(bool b, const std::string &m) {
   if (!b)
     throw std::runtime_error(m);
@@ -146,6 +147,8 @@ struct Fixture {
     f(id, "RestOffsets", "PvdF32", {0, .01f, .02f, .03f}, 4);
   }
   d::Frame extract(const d::Options &o = {}) const {
+    if (shared_input)
+      return d::extract(metadata, SnapshotView(state), o);
     return d::extract(metadata, state, o);
   }
 };
@@ -478,7 +481,8 @@ void sdk(const std::string &path, const std::string &oracle_path) {
   auto session = Session::load_file(path);
   std::size_t checked_particles = 0, checked_vertices = 0, checked_edges = 0;
   auto compare = [&](unsigned step, const Snapshot &state) {
-    auto frame = d::extract(session.metadata(), state);
+    auto frame = shared_input ? d::extract(session.metadata(), SnapshotView(state))
+                              : d::extract(session.metadata(), state);
     const auto &expected = samples.at(step);
     check(frame.particle_clouds.size() == expected.particles.size() &&
               frame.cloths.size() == expected.cloths.size(),
@@ -628,15 +632,17 @@ void sdk(const std::string &path, const std::string &oracle_path) {
 } // namespace
 int main(int argc, char **argv) {
   try {
-    for (auto order : {ByteOrder::little, ByteOrder::big})
-      for (std::uint8_t width : std::array<std::uint8_t, 2>{4, 8})
-        valid(order, width);
-    malformed();
-    if (argc == 3)
-      sdk(argv[1], argv[2]);
-    else
-      check(argc == 1,
-            "usage: pvd_deformables_tests [capture.pxd2 expected.csv]");
+    check(argc == 1 || argc == 3,
+          "usage: pvd_deformables_tests [capture.pxd2 expected.csv]");
+    for (const bool shared : {false, true}) {
+      shared_input = shared;
+      for (auto order : {ByteOrder::little, ByteOrder::big})
+        for (std::uint8_t width : std::array<std::uint8_t, 2>{4, 8})
+          valid(order, width);
+      malformed();
+      if (argc == 3)
+        sdk(argv[1], argv[2]);
+    }
     std::cout << "Deformables tests passed\n";
     return 0;
   } catch (const std::exception &e) {

@@ -22,6 +22,8 @@ struct PanelState {
   std::size_t array_visible_rows = 0;
   // Value-only cache: safe across immutable FrameState replacement/selection.
   const Session *category_source = nullptr;
+  std::optional<SnapshotView> category_snapshot;
+  std::weak_ptr<const FrameState> category_frame;
   std::size_t category_prefix = std::numeric_limits<std::size_t>::max(),
               category_page = 0;
   std::vector<ObjectGroup> categories;

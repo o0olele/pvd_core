@@ -165,7 +165,12 @@ struct ActorNode {
   std::vector<ShapeNode> shapes;
 };
 struct FrameState {
-  Snapshot snapshot;
+  // Complete immutable capture state. Inspector/navigation retain every
+  // recorded object; successive frames share unchanged object versions.
+  SnapshotView snapshot;
+  // CPU spatial algorithms need no PxMaterial payloads. Keep their projection
+  // separate and shared across display-only FrameState copies.
+  std::shared_ptr<const SnapshotView> spatial_snapshot;
   ColorPalette palette; // Derived from ViewOptions, not a second preference.
   render::Frame render;
   render::DebugResult debug;
