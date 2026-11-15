@@ -3277,7 +3277,7 @@ private:
           (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
         try {
           rotate_camera(camera(),-io.MouseDelta.x/ui_scale_->current().screen_scale,
-                        -io.MouseDelta.y/ui_scale_->current().screen_scale,ui().navigation);
+                        io.MouseDelta.y/ui_scale_->current().screen_scale,ui().navigation);
           notifyManualCameraInput(ui().scene_tools);
           set_fitted(true);
         }catch(const std::exception &e){ui().camera_panel.error=e.what();}
