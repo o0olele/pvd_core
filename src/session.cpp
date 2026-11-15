@@ -206,7 +206,8 @@ struct Session::Impl {
     top_level,
     color,
     camera,
-    origin
+    origin,
+    reference_delta
   };
   struct Operation {
     std::size_t event_count = 0;
@@ -219,6 +220,8 @@ struct Session::Impl {
     std::string camera_name;
     CameraState camera;
     Vec3 shift, shift_delta;
+    std::string reference_property;
+    std::uint64_t reference = 0;
   };
   struct Chunk {
     std::uint64_t id;
@@ -242,6 +245,8 @@ struct Session::Impl {
   std::map<std::uint64_t, ProfileZoneInfo> zones;
   std::vector<Operation> operations;
   std::map<std::size_t, Snapshot> checkpoints;
+  std::map<std::size_t, std::size_t> checkpoint_weights;
+  std::size_t checkpoint_bytes = 0;
   std::map<std::uint64_t, std::map<std::uint32_t, std::string>> strings;
   std::map<std::uint64_t, Chunk> chunks;
   std::map<std::uint64_t, QualifiedName> message_groups;
@@ -251,6 +256,9 @@ struct Session::Impl {
   std::map<std::uint64_t, std::size_t> live_lifetime;
   std::map<std::uint64_t, std::uint64_t> generations;
   Snapshot working;
+  using ReferenceKey = std::pair<std::uint64_t, std::string>;
+  using DirtyReferences = std::set<ReferenceKey>;
+  DirtyReferences working_dirty;
   std::size_t index = 0;
   std::uint64_t current_byte_offset = 0;
   bool is_finished = false, is_failed = false;
@@ -298,18 +306,52 @@ struct Session::Impl {
       fail("undefined property message " + n.str());
     return i->second;
   }
-  static void apply(Snapshot &s, const Operation &o, const Metadata &metadata) {
+  static void materialize_reference(Snapshot &s, const ReferenceKey &key) {
+    auto object = s.instances.find(key.first);
+    if (object == s.instances.end())
+      return;
+    auto property = object->second.properties.find(key.second);
+    if (property == object->second.properties.end())
+      return;
+    auto &value = property->second;
+    const auto &references = *value.reference_ids;
+    if (references.size() >
+        std::numeric_limits<std::size_t>::max() / value.pointer_width)
+      throw std::length_error("reference array byte size overflow");
+    Bytes raw(references.size() * value.pointer_width);
+    for (std::size_t n = 0; n < references.size(); ++n)
+      for (std::size_t i = 0; i < value.pointer_width; ++i) {
+        auto shift = value.byte_order == ByteOrder::little
+                         ? i
+                         : value.pointer_width - i - 1;
+        raw[n * value.pointer_width + i] =
+            static_cast<std::uint8_t>(references[n] >> (shift * 8));
+      }
+    value.bytes = std::make_shared<const Bytes>(std::move(raw));
+  }
+  static void materialize_references(Snapshot &s, DirtyReferences &dirty) {
+    for (const auto &key : dirty)
+      materialize_reference(s, key);
+    dirty.clear();
+  }
+  static void apply(Snapshot &s, const Operation &o, const Metadata &metadata,
+                    const StreamHeader &header, DirtyReferences &dirty) {
     switch (o.kind) {
     case Kind::create:
       s.instances.emplace(o.id, o.instance);
       break;
     case Kind::destroy:
+      for (auto it = dirty.lower_bound({o.id, {}});
+           it != dirty.end() && it->first == o.id;)
+        it = dirty.erase(it);
       s.instances.erase(o.id);
       s.origin_shifts.erase(o.id);
       break;
     case Kind::assign:
-      for (const auto &p : o.assignments)
+      for (const auto &p : o.assignments) {
         s.instances.at(o.id).properties[p.first] = p.second;
+        dirty.erase({o.id, p.first});
+      }
       break;
     case Kind::pickable:
       s.instances.at(o.id).pickable = o.flag;
@@ -327,10 +369,46 @@ struct Session::Impl {
       coordinates::detail::apply_shift(metadata, s, o.id, o.shift_delta);
       s.origin_shifts[o.id] = o.shift;
       break;
+    case Kind::reference_delta: {
+      auto &properties = s.instances.at(o.id).properties;
+      auto found = properties.find(o.reference_property);
+      if (found == properties.end()) {
+        auto value = make_value({"physx3", "VoidPtr"}, 0, {}, header);
+        value.reference_ids.emplace();
+        found =
+            properties.emplace(o.reference_property, std::move(value)).first;
+      }
+      auto &value = found->second;
+      auto &references = *value.reference_ids;
+      if (o.flag) {
+        auto reference =
+            std::find(references.begin(), references.end(), o.reference);
+        if (reference == references.end())
+          throw std::logic_error("invalid reference delta replay");
+        references.erase(reference);
+      } else
+        references.push_back(o.reference);
+      value.incoming_type = {"physx3", "VoidPtr"};
+      value.item_count = references.size();
+      value.byte_order = header.byte_order;
+      value.pointer_width = header.pointer_width();
+      value.opaque = false;
+      dirty.emplace(o.id, o.reference_property);
+      break;
+    }
     }
   }
   void commit(Operation o) {
     if (o.kind == Kind::assign) {
+      // Internal reference deltas postpone wire-byte encoding. Absolute writes
+      // compare against the canonical current value before no-op compaction.
+      for (const auto &p : o.assignments) {
+        auto dirty = working_dirty.find({o.id, p.first});
+        if (dirty != working_dirty.end()) {
+          materialize_reference(working, *dirty);
+          working_dirty.erase(dirty);
+        }
+      }
       for (auto &p : o.assignments)
         if (coordinates::detail::epoch_field(metadata, object(o.id), p.first))
           p.second.coordinate_epoch = object(o.id).coordinate_epoch;
@@ -369,8 +447,70 @@ struct Session::Impl {
       }
     }
     o.event_count = index + 1;
-    apply(working, o, metadata);
+    apply(working, o, metadata, header, working_dirty);
     operations.push_back(std::move(o));
+  }
+  static std::size_t estimated_snapshot_bytes(const Snapshot &state) noexcept {
+    std::size_t bytes = sizeof(Snapshot);
+    const auto add = [&](std::size_t amount) {
+      bytes = amount > std::numeric_limits<std::size_t>::max() - bytes
+                  ? std::numeric_limits<std::size_t>::max()
+                  : bytes + amount;
+    };
+    const auto string = [&](const std::string &value) {
+      // A copied string owns only its characters, not unused source capacity.
+      if (value.size() > std::string{}.capacity())
+        add(value.size() + 1);
+    };
+    const auto qualified = [&](const QualifiedName &value) {
+      string(value.namespace_name);
+      string(value.name);
+    };
+    constexpr auto node_links = 4 * sizeof(void *);
+    for (const auto &object : state.instances) {
+      add(sizeof(object) + node_links);
+      qualified(object.second.class_name);
+      for (const auto &property : object.second.properties) {
+        add(sizeof(property) + node_links);
+        string(property.first);
+        const auto &value = property.second;
+        qualified(value.incoming_type);
+        if (value.text)
+          string(*value.text);
+        if (value.reference_ids) {
+          if (value.reference_ids->size() >
+              std::numeric_limits<std::size_t>::max() / sizeof(std::uint64_t))
+            return std::numeric_limits<std::size_t>::max();
+          add(value.reference_ids->size() * sizeof(std::uint64_t));
+        }
+      }
+    }
+    for (const auto &camera : state.cameras) {
+      add(sizeof(camera) + node_links);
+      string(camera.first);
+    }
+    for (const auto &origin : state.origin_shifts)
+      add(sizeof(origin) + node_links);
+    return bytes;
+  }
+  void checkpoint() {
+    const auto weight = estimated_snapshot_bytes(working);
+    if (weight > options.max_checkpoint_bytes)
+      return;
+    // Evict before copying, bounding the transient as well as retained owned
+    // checkpoint structures. The initial empty replay state is always kept.
+    while (checkpoints.size() > 1 &&
+           (checkpoints.size() - 1 >= options.max_checkpoints ||
+            weight > options.max_checkpoint_bytes - checkpoint_bytes)) {
+      const auto first = std::next(checkpoints.begin());
+      checkpoint_bytes -= checkpoint_weights.at(first->first);
+      checkpoint_weights.erase(first->first);
+      checkpoints.erase(first);
+    }
+    materialize_references(working, working_dirty);
+    checkpoints.emplace(events.size(), working);
+    checkpoint_weights.emplace(events.size(), weight);
+    checkpoint_bytes += weight;
   }
   std::pair<std::string, std::size_t> cstring(const Bytes &b, std::size_t o) {
     if (o >= b.size())
@@ -481,34 +621,21 @@ struct Session::Impl {
     const auto &d = prop(id, p);
     if (d.property_type != 2 || !builtin(d.datatype, "ObjectRef"))
       fail("reference mutation requires ObjectRef array: " + p);
-    std::vector<std::uint64_t> values;
     if (const auto *old = object(id).property(p)) {
       if (!old->reference_ids)
         fail("cannot mutate unresolved internal ObjectRef encoding");
-      values = *old->reference_ids;
-    }
-    auto found = std::find(values.begin(), values.end(), ref);
-    if (remove) {
-      if (found == values.end())
+      if (remove &&
+          std::find(old->reference_ids->begin(), old->reference_ids->end(),
+                    ref) == old->reference_ids->end())
         fail("removing absent reference");
-      values.erase(found);
-    } else
-      values.push_back(ref);
-    Bytes raw;
-    for (auto v : values)
-      for (std::size_t i = 0; i < header.pointer_width(); ++i) {
-        auto shift = header.byte_order == ByteOrder::little
-                         ? i
-                         : header.pointer_width() - i - 1;
-        raw.push_back(static_cast<std::uint8_t>(v >> (shift * 8)));
-      }
-    auto value = make_value({"physx3", "VoidPtr"}, values.size(),
-                            std::move(raw), header);
-    value.reference_ids = std::move(values);
+    } else if (remove)
+      fail("removing absent reference");
     Operation op;
-    op.kind = Kind::assign;
+    op.kind = Kind::reference_delta;
     op.id = id;
-    op.assignments.emplace_back(p, std::move(value));
+    op.reference_property = p;
+    op.reference = ref;
+    op.flag = remove;
     commit(std::move(op));
   }
   void process(const Event &e) {
@@ -794,11 +921,10 @@ struct Session::Impl {
         events.push_back(std::move(event));
         working.event_count = events.size();
         if (options.checkpoint_interval && options.max_checkpoints &&
+            options.max_checkpoint_bytes &&
             events.size() % options.checkpoint_interval == 0 &&
             at_transaction_boundary()) {
-          checkpoints.emplace(events.size(), working);
-          while (checkpoints.size() - 1 > options.max_checkpoints)
-            checkpoints.erase(std::next(checkpoints.begin()));
+          checkpoint();
         }
       }
     } catch (...) {
@@ -937,6 +1063,7 @@ Snapshot Session::snapshot_at_event(std::size_t count) const {
   auto cp = impl_->checkpoints.upper_bound(count);
   --cp;
   Snapshot state = cp->second;
+  Impl::DirtyReferences dirty;
   auto first =
       std::upper_bound(impl_->operations.begin(), impl_->operations.end(),
                        cp->first, [](std::size_t i, const Impl::Operation &op) {
@@ -944,7 +1071,8 @@ Snapshot Session::snapshot_at_event(std::size_t count) const {
                        });
   for (auto it = first;
        it != impl_->operations.end() && it->event_count <= count; ++it)
-    Impl::apply(state, *it, impl_->metadata);
+    Impl::apply(state, *it, impl_->metadata, impl_->header, dirty);
+  Impl::materialize_references(state, dirty);
   state.event_count = count;
   return state;
 }
@@ -968,5 +1096,9 @@ Snapshot Session::latest() const {
 std::size_t Session::checkpoint_count() const {
   impl_->require_state();
   return impl_->checkpoints.size() - 1;
+}
+std::size_t Session::estimated_checkpoint_bytes() const {
+  impl_->require_state();
+  return impl_->checkpoint_bytes;
 }
 } // namespace pvd

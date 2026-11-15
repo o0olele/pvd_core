@@ -66,6 +66,10 @@ if (!frames.empty()) {
 
 `sections()` 还提供所有已闭合的命名 section，包含流、section ID、时间戳和事件前缀位置，便于上层实现自定义时间区段分析。
 
+`SessionOptions` 默认每 4,096 个事件在安全事务边界建立检查点，最多保留 64 个，并以 `max_checkpoint_bytes` 限制检查点拥有的节点、字符串和引用数组的估算总量（默认 128 MiB）。预算不足时先淘汰旧检查点；单个状态超过预算则跳过。`checkpoint_count()` 和 `estimated_checkpoint_bytes()` 可用于诊断。数量或字节预算为 0 都会禁用检查点；字节预算设为 `std::numeric_limits<std::size_t>::max()` 可仅保留数量限制。共享的不可变属性载荷不重复计入，因此该值不是进程内存硬上限。关闭检查点仍保持查询结果一致，只增加重放开销。
+
+引用数组历史记录增删操作，在检查点或返回快照时一次生成完整的原始字节，保留顺序、重复 ID 和删除首个匹配项的语义。已返回快照仍然独立且不可变。0.10 新增的预算字段位于原有 `decode_limits` 之后，保留原先三参数聚合初始化的含义；C++ 结构布局发生变化，升级 DLL 时必须同步重编所有调用方。
+
 PhysX 3.4 的 `ScbScenePvdClient::frameEnd()` 在发送当前动态姿态之前结束 `frame` section，源文件注释说明这是为了同步 contacts。因此这里的 frame 快照严格对应 EndSection 事件，不能直接解释为本次 `fetchResults()` 返回后的状态。集成测试分别记录模拟前帧真值，以及 fetch 后发出的独立 `validation_after_fetch` section 标记，验证两个时间点，而不通过猜测固定偏移匹配姿态。
 
 对象 ID 保持原始 64 位值；`generation` 区分 ID 回收后的新对象。引用可能指向尚未创建或已销毁的对象，调用者应查询快照确认存在，不能把 ID 作为本进程内存指针。
@@ -112,7 +116,7 @@ pvd::Session session(*decoder.header(), decoder.events());
 ## 当前限制
 
 - 可追加会话及独立 TCP 接收器已提供；一个采集对象对应一个连接，重连需创建新会话。直接使用可变 Session 时由调用方同步，TcpCapture 则提供同步后的副本查询。
-- 事件和属性载荷保存在内存，检查点数量可配置；当前没有磁盘分页、压缩或大型录制性能承诺。
+- 事件和属性载荷保存在内存，检查点数量和估算结构预算可配置；当前没有磁盘分页或压缩，大型录制的内存仍取决于事件、对象和前端快照数量。
 - Profile / memory / errors 的历史索引、聚合、原生帧活动和 CSV 已由独立 `pvd::analysis` 提供；debug-render 解码与坐标轴等派生数据由 `pvd::render` 提供。
 - OriginShift 保留原始属性字节，并为已确认的 PhysX 3.4 世界字段维护逐次 float 平移的不可变 shadow。渲染或物理读取使用 `coordinates::native_transform/native_vec3/native_value`；`as_*` 仍表示 last-wire 值，不能在 shift 后直接当作当前世界坐标。详见 [origin-shift.md](origin-shift.md)。
 - Raw 保存、命名剪辑及裁剪已实现；`pvd::repx` 提供独立导出，ImGui/D3D11 只在可选查看器中。旧保存容器和旧 SDK 协议仍按用户范围后续兼容。

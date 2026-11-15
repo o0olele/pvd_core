@@ -154,6 +154,10 @@ struct SessionOptions {
   std::size_t max_checkpoints =
       64; // Limits state copies; zero disables checkpoints.
   DecodeLimits decode_limits;
+  // Estimated owned checkpoint nodes/strings/reference vectors. Immutable
+  // property byte buffers are shared and are not counted again. Zero disables
+  // checkpoints; SIZE_MAX removes this byte bound (the count bound remains).
+  std::size_t max_checkpoint_bytes = 128u * 1024u * 1024u;
 };
 class SessionError : public std::runtime_error {
 public:
@@ -228,6 +232,9 @@ public:
                                           std::size_t frame_index) const;
   PVD_CORE_API Snapshot latest() const;
   PVD_CORE_API std::size_t checkpoint_count() const;
+  // Estimated owned structures retained by noninitial checkpoints; excludes
+  // immutable shared byte buffers and allocator-specific overhead.
+  PVD_CORE_API std::size_t estimated_checkpoint_bytes() const;
 
 private:
   struct Impl;
