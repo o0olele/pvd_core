@@ -10,6 +10,7 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 
 namespace pvd::viewer {
@@ -180,6 +181,30 @@ Color display_color(const render::ShapeInstance &shape,
   }
   }
   throw std::invalid_argument("unknown viewer color mode");
+}
+bool same_view_options(const ViewOptions &a, const ViewOptions &b) {
+  if (std::tie(a.show_static, a.show_dynamic, a.show_kinematic, a.show_sleeping,
+               a.show_trigger, a.color_mode, a.uniform_color.r, a.uniform_color.g,
+               a.uniform_color.b, a.uniform_color.a, a.sleeping_scope,
+               a.trigger_scope, a.geometry_scale, a.show_planes,
+               a.joint_frame_scale, a.joint_limit_scale, a.palette.profile_by_event) !=
+      std::tie(b.show_static, b.show_dynamic, b.show_kinematic, b.show_sleeping,
+               b.show_trigger, b.color_mode, b.uniform_color.r, b.uniform_color.g,
+               b.uniform_color.b, b.uniform_color.a, b.sleeping_scope,
+               b.trigger_scope, b.geometry_scale, b.show_planes,
+               b.joint_frame_scale, b.joint_limit_scale, b.palette.profile_by_event))
+    return false;
+  for (auto role : color_palette_roles)
+    if (std::memcmp(palette_color(a.palette, role).data(),
+                    palette_color(b.palette, role).data(), 4 * sizeof(float)))
+      return false;
+  // The workspace codec preserves IEEE bits, including signed zero.
+  for (const auto values : {std::pair<float, float>{a.geometry_scale, b.geometry_scale},
+                            {a.joint_frame_scale, b.joint_frame_scale},
+                            {a.joint_limit_scale, b.joint_limit_scale}})
+    if (std::memcmp(&values.first, &values.second, sizeof(float)))
+      return false;
+  return true;
 }
 void enable_categories(ViewOptions &v) {
   v.show_static = v.show_dynamic = v.show_kinematic = v.show_sleeping =
@@ -721,6 +746,13 @@ struct Document::Impl {
   std::optional<ObjectKey> inspected;
   std::map<std::vector<std::uint64_t>, CacheEntry> cache;
   std::uint64_t clock = 0;
+  struct ActorTreeCache {
+    bool valid = false;
+    std::size_t prefix = 0, metadata_prefix = 0;
+    std::optional<std::uint64_t> scene;
+    std::vector<ActorNode> nodes;
+  };
+  mutable ActorTreeCache actor_tree_cache;
   explicit Impl(ModelOptions o) : options(o), extractor(o.extractor), query_index(o.scene_queries) {
     frame->label = "No recording";
   }
@@ -1652,6 +1684,15 @@ std::vector<ActorNode> Document::actor_tree() const {
   std::vector<ActorNode> result;
   if (!loaded())
     return result;
+  auto &cache = impl_->actor_tree_cache;
+  const auto prefix = impl_->frame->snapshot.event_count;
+  // Metadata is global to Session. An accepted future DeriveClass can change
+  // classification even while the displayed snapshot is paused, so use the
+  // accepted event count as a conservative metadata invalidation token.
+  const auto metadata_prefix = impl_->session->event_count();
+  if (cache.valid && cache.prefix == prefix &&
+      cache.metadata_prefix == metadata_prefix && cache.scene == impl_->scene)
+    return cache.nodes;
   const auto &snapshot = impl_->frame->snapshot;
   const auto &m = impl_->session->metadata();
   for (const auto &[id, object] : snapshot.instances) {
@@ -1693,7 +1734,12 @@ std::vector<ActorNode> Document::actor_tree() const {
     }
     result.push_back(std::move(actor));
   }
-  return result;
+  cache.nodes.swap(result);
+  cache.prefix = prefix;
+  cache.metadata_prefix = metadata_prefix;
+  cache.scene = impl_->scene;
+  cache.valid = true;
+  return cache.nodes;
 }
 bool Document::fit_scene(OrbitCamera &c, double aspect) const {
   if (!impl_->frame->bounds)
@@ -1805,6 +1851,8 @@ void Document::set_view_options(ViewOptions options) {
   for (const auto scale : {options.joint_frame_scale, options.joint_limit_scale})
     if (!std::isfinite(scale) || scale < 0 || scale > 10000)
       throw std::invalid_argument("joint display scale must be in [0,10000]");
+  if (same_view_options(impl_->view, options))
+    return;
   auto previous = impl_->view;
   impl_->view = options;
   try {

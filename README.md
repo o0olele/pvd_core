@@ -34,6 +34,8 @@ ImGui 主机与面板支持[每显示器 DPI 和字体重建](docs/ui-scale.md)�
 
 0.9 版补齐[配色编辑](docs/palette.md)与[显示比例、剔面、平面和关节尺寸](docs/display-settings.md)，GPU/CPU 拾取共享投影裁剪语义；工作区 v5 保存全局和各录制偏好并读取 v1–v4。显示溢出会保留已发布样本并允许恢复，实时原始接收继续。当前 3.4 验收和边界见[验收记录](docs/physx34-acceptance.md)。
 
+0.10 版修复大量对象引用追加时的平方级内存增长，检查点增加默认 128 MiB 的结构预算，并缓存暂停状态的场景对象树。复杂初始化录制的复测与内存指标见[性能记录](docs/performance.md)。`SessionOptions` 新增字段，DLL 与调用方需要一同重新编译。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug
