@@ -515,6 +515,7 @@ private:
     RenderOptions render_options;
     SceneToolState scene_tools;
     CameraNavigationPreferences navigation;
+    CameraInputState camera_input;
     CameraPanelState camera_panel;
     ClipPanelState clips;
     std::uint64_t clips_revision = std::numeric_limits<std::uint64_t>::max();
@@ -808,6 +809,7 @@ private:
       error_ = "This document tab no longer exists.";
       return;
     }
+    ui_for(id).camera_input={};
     update_title();
   }
   void close_slot(SlotId id) {
@@ -1178,8 +1180,9 @@ private:
       ImGui::TextWrapped("Ctrl+Shift+S opens view preferences; Ctrl+Shift+R restores built-in preferences.");
       ImGui::TextWrapped("Scene-first layout: Objects and Properties open one overlay drawer at a time. Escape closes the drawer. Analysis and scene tools are grouped in the top menu.");
       ImGui::TextWrapped(
-          "RMB look, MMB pan, wheel zoom; hover the viewport for WASD/QE, Shift 2x. "
-          "View offers orbit/first-person controllers, speed, look-at and clipping. Click picks a visible shape. View "
+          "RMB looks in place, Alt+LMB orbits, MMB pans, wheel zooms. "
+          "Hover the viewport for WASD/QE; hold to accelerate, Shift doubles speed. "
+          "View offers speed, look-at and clipping. Click picks a visible shape. View "
           "tools contains visibility, colors, tracking and captured cameras.");
       ImGui::TextWrapped(
           "Workspace files store source paths, views and verified bookmarks, "
@@ -3650,7 +3653,7 @@ private:
                                ImGuiButtonFlags_MouseButtonMiddle);
     const bool hovered = ImGui::IsItemHovered() && !over_drawer && !over_chip;
     try {
-      if(navigateCameraFromImGui(camera(),ui().navigation,hovered)) {
+      if(navigateCameraFromImGui(camera(),ui().navigation,ui().camera_input,hovered)) {
         notifyManualCameraInput(ui().scene_tools);set_fitted(true);
       }
     }catch(const std::exception &e){ui().camera_panel.error=e.what();}
@@ -3659,14 +3662,12 @@ private:
       camera().zoom(io.MouseWheel);
     }
     if (ImGui::IsItemActive() && !over_drawer && !over_chip) {
-      if (ImGui::IsMouseDragging(ImGuiMouseButton_Right) ||
-          (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))
-        try {
-          rotate_camera(camera(),-io.MouseDelta.x/ui_scale_->current().screen_scale,
-                        io.MouseDelta.y/ui_scale_->current().screen_scale,ui().navigation);
+      try {
+        if(rotateCameraFromImGui(camera(),ui().navigation,true,ui_scale_->current().screen_scale)) {
           notifyManualCameraInput(ui().scene_tools);
           set_fitted(true);
-        }catch(const std::exception &e){ui().camera_panel.error=e.what();}
+        }
+      }catch(const std::exception &e){ui().camera_panel.error=e.what();}
       if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
         notifyManualCameraInput(ui().scene_tools);
         camera().pan(io.MouseDelta.x, io.MouseDelta.y, viewport_size_.y);

@@ -26,7 +26,7 @@ cmake --build build-physx34 --config Debug --parallel 4
 - **File** 菜单集中提供 Open capture、Live capture、Save / crop 和 Export RepX；可选模块关闭时，对应入口不显示。底部状态入口显示 **Ready** 或当前任务状态，点击后打开 **Activity**，汇总加载、导出、实时采集、通知和错误；后台任务不会在视口上方额外增加状态行。
 - 45dp 高的视口工具栏使用线性图标。左侧图标的提示为 **Scene objects**，打开对象树浮层；右侧图标的提示为 **Object properties**，打开属性浮层，两者互斥。再次点击当前图标、点击浮层右上角关闭图标或按 Escape 可关闭。浮层覆盖场景，不改变渲染纹理尺寸或相机视角；在浮层内点击、滚动不会操作背后的场景。
 - 场景树、视口选中和属性检查器共享同一个对象选择状态；共享 shape 以 scene / actor / shape 及 generation 区分实例。选中对象后，视口下方显示真实对象名和 **/ Selected**，点击该摘要打开属性浮层；名称缺失时使用捕获类型作为回退。
-- 视口右键拖动旋转、中键拖动平移、滚轮缩放、单击选择、双击聚焦选中对象、F 聚焦场景。
+- 视口右键拖动原地转向、Alt+左键拖动环绕目标、中键拖动平移、滚轮缩放；悬停视口用 WASD/QE 移动，长按渐进加速，Shift 额外加倍。单击选择、双击聚焦选中对象、F 聚焦场景。
 - 场景选择位于视口工具栏的下拉框；其他工作区也可通过 **More → Recorded scene** 切换。底部时间轴为 96dp 的两行布局：第一行是首尾、逐帧、播放图标、帧号、采样点与速度；第二行是细轨、圆形游标和整数帧刻度。采样位置明确显示为 **Frame end** 或 **After simulation**。滑轨保留无符号 64 位帧索引，Ctrl 点击可输入精确帧号，也支持键盘导航。**…** 图标打开 Playback options，包含 Loop、Reverse 和可用的录制标记间隔；窄布局的采样点选择也在其中，当前采样点显示在帧号旁。Space 播放或暂停，方向键逐帧，Home / End 跳转首尾。
 - 属性检查器先展示名称、类型、可复制的 ID 和 Actor / Shape / Scene 切换，再按实际捕获字段显示 Transform、Dynamics、Collision 或 Scene 摘要。**All properties** 展开完整原始属性表，保留属性搜索、分页数组、对象引用跳转和精确复制；没有可用摘要字段的对象默认展开原始属性。右上角齿轮图标（提示 **Number format and precision**）打开 Inspector preferences，集中设置数值格式、精度与数组分组，摘要与原始表使用同一套格式和复制规则。
 - **Fit** 按钮适配当前可见场景。**Display** 菜单中的 Grid / Wireframe / Contacts 控制常用图层；**Display → Display and camera settings...**（Ctrl+Shift+S）打开分为 **Scene / Camera / Display / Layers** 四组的设置弹窗，各组内容独立滚动。**Display → Diagnostics** 打开诊断浮层，显示提取阶段遇到的不完整或未支持数据。

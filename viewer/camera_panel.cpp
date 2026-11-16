@@ -6,10 +6,16 @@
 #include <stdexcept>
 namespace pvd::viewer {
 bool navigateCameraFromImGui(OrbitCamera &camera,
-                            const CameraNavigationPreferences &prefs,bool hovered) {
+                            const CameraNavigationPreferences &prefs,
+                            CameraInputState &state,bool hovered) {
   const auto &io=ImGui::GetIO();
+  const auto frame=ImGui::GetFrameCount();
+  if(state.last_frame!=frame-1)state.movement={};
+  state.last_frame=frame;
   if(!hovered||io.WantTextInput||io.KeyCtrl||io.KeyAlt||io.KeySuper||
-      ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))return false;
+      ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel)) {
+    state.movement={};return false;
+  }
   const auto axis=[](ImGuiKey positive,ImGuiKey negative) {
     return double(ImGui::IsKeyDown(positive))-double(ImGui::IsKeyDown(negative));
   };
@@ -19,7 +25,22 @@ bool navigateCameraFromImGui(OrbitCamera &camera,
   input.up=axis(ImGuiKey_E,ImGuiKey_Q);
   input.boost=io.KeyShift;
   input.elapsed_seconds=std::clamp(double(io.DeltaTime),0.,.1);
-  return move_camera(camera,input,prefs);
+  return move_camera(camera,input,prefs,state.movement);
+}
+bool rotateCameraFromImGui(OrbitCamera &camera,
+                          const CameraNavigationPreferences &prefs,
+                          bool active,float screen_scale) {
+  const auto &io=ImGui::GetIO();
+  if(!active||io.WantTextInput||
+      ImGui::IsPopupOpen(nullptr,ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel))return false;
+  auto look=prefs;
+  if(ImGui::IsMouseDragging(ImGuiMouseButton_Right))
+    look.mode=CameraNavigationMode::first_person;
+  else if(io.KeyAlt&&ImGui::IsMouseDragging(ImGuiMouseButton_Left))
+    look.mode=CameraNavigationMode::orbit;
+  else return false;
+  return rotate_camera(camera,-io.MouseDelta.x/screen_scale,
+                       io.MouseDelta.y/screen_scale,look);
 }
 bool drawCameraControls(const Document &doc,OrbitCamera &camera,
                          CameraNavigationPreferences &prefs,CameraPanelState &state) {
@@ -33,10 +54,6 @@ bool drawCameraControls(const Document &doc,OrbitCamera &camera,
     catch(const std::exception &e){state.error=e.what();}
   };
   ImGui::TextUnformatted("CAMERA NAVIGATION");
-  int mode=static_cast<int>(prefs.mode);
-  ImGui::SetNextItemWidth(ui_pixels(180));
-  if(ImGui::Combo("Controller",&mode,"Orbit (pivot)\0First person (eye)\0"))
-    prefs.mode=static_cast<CameraNavigationMode>(mode);
   ImGui::SetNextItemWidth(ui_pixels(180));
   auto speed=prefs.movement_speed;
   if(ImGui::InputDouble("Speed (units/s)",&speed,1,10,"%.6g")) {
@@ -54,8 +71,8 @@ bool drawCameraControls(const Document &doc,OrbitCamera &camera,
     }else state.error.clear();
   }
   ImGui::TextWrapped("Hover the viewport: WASD moves, Q/E moves along display up, "
-                     "Shift is 2x speed. Right-drag looks around the eye in first-person mode "
-                     "or rotates around the pivot in orbit mode.");
+                     "hold to accelerate up to 8x in 3 seconds. Shift doubles speed. "
+                     "Right-drag looks around in place; Alt+left-drag orbits the target.");
   ImGui::SetNextItemWidth(ui_pixels(240));
   if(ImGui::InputFloat3("Look at point",&state.target.x,"%.6g"))state.target_dirty=true;
   if(ImGui::Button("Apply look-at"))act([&] {

@@ -28,16 +28,24 @@ void validate_camera(const OrbitCamera &c) {
     if(!std::isfinite(n))throw std::invalid_argument("Camera matrix exceeds finite range");
 }
 }
-bool move_camera(OrbitCamera &camera,const CameraMovement &input,
-                 const CameraNavigationPreferences &settings) {
+namespace {
+bool move_camera_impl(OrbitCamera &camera,const CameraMovement &input,
+                      const CameraNavigationPreferences &settings,
+                      CameraMovementState *state) {
   valid(settings);
   for(const auto n:{input.forward,input.right,input.up})
     if(!std::isfinite(n)||n < -1||n > 1)
       throw std::invalid_argument("Camera movement axes must be in [-1,1]");
   if(!std::isfinite(input.elapsed_seconds)||input.elapsed_seconds<0||input.elapsed_seconds>1)
     throw std::invalid_argument("Camera frame delta must be in [0,1] seconds");
+  if(state&&(!std::isfinite(state->held_seconds)||state->held_seconds<0||state->held_seconds>3))
+    throw std::invalid_argument("Camera movement hold duration must be in [0,3] seconds");
   if((input.forward==0&&input.right==0&&input.up==0)||
-      input.elapsed_seconds==0||settings.movement_speed==0)return false;
+      settings.movement_speed==0) {
+    if(state)*state={};
+    return false;
+  }
+  if(input.elapsed_seconds==0)return false;
   validate_camera(camera);
   const auto m=camera.view_matrix();
   const D3 right{m.values[0],m.values[4],m.values[8]},
@@ -50,16 +58,37 @@ bool move_camera(OrbitCamera &camera,const CameraMovement &input,
   auto direction=add(add(multiply(forward,input.forward),multiply(right,input.right)),
                      multiply(up,input.up));
   const auto magnitude=length(direction);
-  if(magnitude==0)return false;
+  if(magnitude==0) {
+    if(state)*state={};
+    return false;
+  }
   if(magnitude>1)direction=multiply(direction,1/magnitude);
-  const auto distance=settings.movement_speed*input.elapsed_seconds*(input.boost?2:1);
+  double movement_seconds=input.elapsed_seconds;
+  if(state) {
+    // Integrate the linear ramp, including a frame that crosses the speed cap.
+    // This gives equal travel at different frame rates.
+    const auto ramp_seconds=std::min(input.elapsed_seconds,3-state->held_seconds);
+    movement_seconds=ramp_seconds*(1+7*(state->held_seconds+ramp_seconds*.5)/3)+
+                     (input.elapsed_seconds-ramp_seconds)*8;
+  }
+  const auto distance=settings.movement_speed*movement_seconds*(input.boost?2:1);
   auto next=camera;
   next.target=finite_position(add(value(camera.target),multiply(direction,distance)));
   validate_camera(next);
   const bool changed=next.target.x!=camera.target.x||next.target.y!=camera.target.y||
                      next.target.z!=camera.target.z;
   camera=next;
+  if(state)state->held_seconds=std::min(3.,state->held_seconds+input.elapsed_seconds);
   return changed;
+}
+}
+bool move_camera(OrbitCamera &camera,const CameraMovement &input,
+                 const CameraNavigationPreferences &settings) {
+  return move_camera_impl(camera,input,settings,nullptr);
+}
+bool move_camera(OrbitCamera &camera,const CameraMovement &input,
+                 const CameraNavigationPreferences &settings,CameraMovementState &state) {
+  return move_camera_impl(camera,input,settings,&state);
 }
 bool rotate_camera(OrbitCamera &camera,double dx,double dy,
                    const CameraNavigationPreferences &settings) {
