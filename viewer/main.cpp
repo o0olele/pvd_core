@@ -2518,7 +2518,7 @@ private:
       document().set_view_options(view);
       ui().render_options.antialiasing = Antialiasing::msaa4x;
       ui().render_options.background_color = {.12f, .08f, .17f, 1};
-      ui().render_options.face_culling=FaceCulling::back;
+      ui().render_options.face_culling=FaceCulling::front;
       ui().render_options.show_orbit_target=true;
       ui().panels.inspector_preferences.number_format = NumberFormat::scientific;
       ui().panels.inspector_preferences.array_page_size = 512;
@@ -2593,7 +2593,7 @@ private:
               restored.joint_frame_scale==.75f&&restored.joint_limit_scale==1.5f&&
               restored.palette.active==PaletteRgba{.17f,.31f,.57f,.9f}&&
               !restored.palette.profile_by_event&&restored.palette.profile_bar==PaletteRgba{.73f,.19f,.27f,1}&&
-              ui_for(smoke_slot_b_).render_options.face_culling==FaceCulling::back&&
+              ui_for(smoke_slot_b_).render_options.face_culling==FaceCulling::front&&
               ui_for(smoke_slot_b_).render_options.show_orbit_target,
               "Workspace did not restore the visual geometry, palette or raster preferences");
       const auto *reset_source=b->document().session();
@@ -2603,7 +2603,7 @@ private:
               workspace_source_identity(*reset_source)==reset_identity&&camera_equal(camera(),smoke_camera_b_)&&
               document().view_options().geometry_scale==1&&document().view_options().show_planes&&
               document().view_options().palette.active==ColorPalette{}.active&&
-              ui().render_options.face_culling==FaceCulling::none&&!ui().render_options.show_orbit_target&&
+              ui().render_options.face_culling==FaceCulling::back&&!ui().render_options.show_orbit_target&&
               ui().panels.inspector_preferences.number_format==NumberFormat::general,
               "Restoring built-in preferences changed source/playhead/pose or failed to reset display settings");
       require(a->bookmark_verified(smoke_bookmark_),
@@ -3994,6 +3994,8 @@ private:
       auto frame = document().frame();
       // Prefer a visible simulated object, projecting its mesh center and
       // confirming the nearest ray hit. No selection through occluders.
+      const auto pick_draws = visualization_pick_draws(
+          *frame, ui().render_options, visualization_selection());
       auto accept_hit = [&](const std::optional<PickHit> &hit) {
         if (!hit || !document().select(hit->key))
           return false;
@@ -4037,7 +4039,7 @@ private:
           if (std::abs(x) >= 1 || std::abs(y) >= 1)
             continue;
           auto hit =
-              pick(frame->draws,
+              pick(pick_draws,
                    camera().screen_ray((x + 1) * 0.5 * viewport_size_.x,
                                        (1 - y) * 0.5 * viewport_size_.y,
                                        viewport_size_.x, viewport_size_.y));
@@ -4048,7 +4050,7 @@ private:
       for (double y = 0.18; y < 0.83 && !smoke_picking_; y += 0.04) {
         for (double x = 0.12; x < 0.90 && !smoke_picking_; x += 0.04) {
           auto hit = pick(
-              frame->draws,
+              pick_draws,
               camera().screen_ray(x * viewport_size_.x, y * viewport_size_.y,
                                   viewport_size_.x, viewport_size_.y));
           smoke_picking_ = accept_hit(hit);

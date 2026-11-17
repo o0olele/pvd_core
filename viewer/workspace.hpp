@@ -9,7 +9,7 @@
 namespace pvd::viewer {
 using SlotId = std::uint64_t;
 using BookmarkId = std::uint64_t;
-inline constexpr std::uint32_t workspace_format_version = 5;
+inline constexpr std::uint32_t workspace_format_version = 6;
 enum class SlotLock { loading, live, exporting };
 struct SourceIdentity {
   std::uint32_t algorithm =

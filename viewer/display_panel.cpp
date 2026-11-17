@@ -78,6 +78,9 @@ void drawDisplaySettings(Document &doc, OrbitCamera &camera,
   int culling = static_cast<int>(options.face_culling);
   if (ImGui::Combo("Face culling", &culling, "None\0Front\0Back\0"))
     options.face_culling = static_cast<FaceCulling>(culling);
+  if (ImGui::IsItemHovered())
+    ImGui::SetTooltip("Back (default) hides the reverse side of walls and ceilings "
+                     "to reveal room interiors. None draws both sides.");
   ImGui::Checkbox("Orbit target marker", &options.show_orbit_target);
   ImGui::TextWrapped("Geometry scale changes each shape about its local origin; "
       "it does not move its recorded pose. Picking, fit, transparency sorting "

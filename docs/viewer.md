@@ -20,6 +20,19 @@ cmake --build build-physx34 --config Debug --parallel 4
 
 支持 **File → Open capture...**、Ctrl+O、拖入文件或命令行路径。录制在独立线程加载，加载失败会显示错误并保留原来的文档。Windows 文件路径通过 UTF-8 / UTF-16 转换处理。
 
+### 单文件 Release 版
+
+在项目根目录运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-viewer-single-exe.ps1
+# 可选：指定编译并行数或单独的构建目录。
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-viewer-single-exe.ps1 `
+  -Parallel 8 -BuildDirectory .\build-portable
+```
+
+脚本使用 Visual Studio 2022 x64 工具链，默认输出 `build-single-exe/viewer/Release/pvd_viewer.exe`；通过脚本自身路径定位源码，因此也可从其他工作目录调用。构建启用实时采集、渲染、分析和 RepX 导出，关闭工具及 SDK 验证程序，并使用 `BUILD_SHARED_LIBS=OFF` 和 `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded`（`/MT`）静态链接项目模块及 VC++ 运行库。分发时无需附带 `pvd_*.dll`、`MSVCP140.dll` 或 `VCRUNTIME140*.dll`；Direct3D、Win32 等 Windows 系统 DLL 仍由目标系统提供。
+
 ## 操作
 
 - 默认进入全宽的 **Scene** 视口。顶部第一行为 46dp 的应用栏，包含 **File / Workspace / Help**；第二行为 42dp 的录制栏，左侧是带文件图标和选中底边的录制标签，右侧为 **Scene / Analysis / More**。**Analysis** 提供 Profiler、Memory、Errors、Property curves、Event curves 和 Frame diff；**More** 提供 Deformables、Scene queries、Named clips、Recorded scene 和 Workspace。**Workspace** 菜单提供标签、书签、工作区保存/载入和布局重置。

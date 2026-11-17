@@ -137,7 +137,7 @@ Loading validates the complete sidecar before replacing workspace state. It crea
 The sidecar contains open file-source slots, their current view/camera/category options/render and inspector preferences/identity, per-path bookmark archives and latest matching views, recent files, global default preferences, and the active persisted slot. It embeds no raw capture, resource mesh, receiver state, export job, credentials, or hidden-object state. Transient slots are omitted; the host can explain this when saving a workspace containing unrecorded live data.
 
 The app-owned format uses an eight-byte magic, u32 version, u64 payload size,
-CRC-32 and a reserved zero field. The current writer produces version 5. Its
+CRC-32 and a reserved zero field. The current writer produces version 6. Its
 preference record retains the 62-byte v2 prefix and the 17-byte v3 navigation
 record, then appends visualization scopes, actor/shape/mass-frame switches,
 coordinate-frame scale, transparency opacity and the Inspector integer-hex
@@ -148,13 +148,18 @@ entries and the profile event-color flag to ViewOptions. A complete global
 ViewOptions follows global ViewPreferences. Each capture archive appends
 its bounded catalog list after bookmarks. Clip bindings and ranges use exact
 fixed-width u64 IDs, generations, event counts and frame ordinals. Native
-padding is never serialized.
+padding is never serialized. V6 retains the V5 byte layout and distinguishes
+the new back-face-culling default from legacy two-sided defaults.
 
-Versions 1/2/3/4 remain readable. V1 gets right-handed display and default
+Versions 1/2/3/4/5 remain readable. V1 gets right-handed display and default
 preferences; v1/v2 receive built-in navigation defaults. Older versions get
 default All scopes for existing master switches, no new coordinate frames,
 transparency None and integer hex off (v1–v3); pre-v5 files get geometry/joint
-scale 1, planes on, culling None, marker off and the original palette. No older
+scale 1, planes on, culling Back, marker off and the original palette. When
+loading V5, culling None is migrated to Back in global defaults, open slots and
+archived last views so existing saved settings receive the wall/roof cutaway
+behavior. V5 Front and Back remain unchanged. V6 preserves an explicitly saved
+None, allowing two-sided rendering to be selected and retained. No older
 version invents clips absent from that format. Fixed independent
 524-byte v1, actual old-writer 491-byte v2 and actual 04c3055 v3-writer 558-byte
 fixtures and actual frozen 0.8 v4-writer 1,018-byte output are retained.

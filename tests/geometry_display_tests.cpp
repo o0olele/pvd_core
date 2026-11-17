@@ -318,6 +318,69 @@ RenderOptions quiet() {
                   options.show_cloth = options.show_particles = false;
   return options;
 }
+void room_cutaway(Renderer &renderer, ID3D11Device *device,
+                  ID3D11DeviceContext *context) {
+  // A collision room has inward-facing walls and ceiling. From outside, its
+  // near wall must disappear while the far wall and interior solid stay opaque.
+  auto room_mesh = std::make_shared<render::TriangleBuffer>(
+      render::tessellate(render::Box{{2, 2, 2}}));
+  for (std::size_t i = 0; i < room_mesh->indices.size(); i += 3)
+    std::swap(room_mesh->indices[i + 1], room_mesh->indices[i + 2]);
+  for (auto &normal : room_mesh->normals) {
+    normal.x = -normal.x;
+    normal.y = -normal.y;
+    normal.z = -normal.z;
+  }
+  const auto source_indices = room_mesh->indices;
+  DrawItem room;
+  room.mesh = room_mesh;
+  room.key = {{1, 0}, {10, 0}, {100, 0}};
+  room.color = {230, 30, 30, 255};
+  DrawItem body;
+  body.mesh = std::make_shared<render::TriangleBuffer>(
+      render::tessellate(render::Box{{.5f, .5f, .5f}}));
+  body.key = {{1, 0}, {11, 0}, {101, 0}};
+  body.color = {30, 30, 230, 255};
+  FrameState frame;
+  frame.draws = {room, body};
+  OrbitCamera camera;
+  camera.set_look_at({{0, 0, 5}, {0, 1, 0}, {0, 0, 0}});
+  // Sample away from face diagonals so the wire overlay cannot mask the fill.
+  const auto center = (std::size_t(125) * 320 + 174) * 4;
+  for (auto hand :
+       {DisplayHandedness::right_handed, DisplayHandedness::left_handed}) {
+    camera.handedness = hand;
+    for (bool wireframe : {false, true}) {
+      auto options = quiet();
+      check(options.face_culling == FaceCulling::back,
+            "new view defaults must expose inward-facing rooms");
+      options.show_wireframe = wireframe;
+      renderer.render(frame, camera, options);
+      auto image = readTextureRgba8(device, context, renderer.texture());
+      auto hit = pick(visualization_pick_draws(frame, options),
+                      camera.screen_ray(174, 125, 320, 240));
+      check(image.pixels[center + 2] > image.pixels[center] && hit &&
+                hit->key == body.key,
+            "room cutaway reveals and picks opaque interior body in both hands");
+      const auto uploaded = renderer.stats().cache_misses;
+      options.face_culling = FaceCulling::none;
+      renderer.render(frame, camera, options);
+      image = readTextureRgba8(device, context, renderer.texture());
+      hit = pick(visualization_pick_draws(frame, options),
+                 camera.screen_ray(174, 125, 320, 240));
+      check(image.pixels[center] > image.pixels[center + 2] && hit &&
+                hit->key == room.key &&
+                renderer.stats().cache_misses == uploaded,
+            "None restores two-sided occlusion and picking without mesh uploads");
+    }
+  }
+  check(room_mesh->indices == source_indices &&
+            frame.draws[0].mesh == room_mesh && room.color.a == 255 &&
+            body.color.a == 255,
+        "cutaway must preserve recorded winding, mesh identity and opacity");
+  std::cout << "Room cutaway WARP/CPU: inward shell, opaque body, both hands, "
+               "wireframe and two-sided override passed\n";
+}
 void gpu() {
   ComPtr<ID3D11Device> device;
   ComPtr<ID3D11DeviceContext> context;
@@ -327,6 +390,7 @@ void gpu() {
         "WARP device");
   Renderer renderer(device.Get(), context.Get());
   renderer.resize(320, 240);
+  room_cutaway(renderer, device.Get(), context.Get());
   OrbitCamera camera;
   camera.set_look_at({{0, 0, 5}, {0, 1, 0}, {0, 0, 0}});
   for (auto hand :
@@ -756,6 +820,8 @@ void widgets(float width, float scale) {
             ui.doc.frame()->draws[0].geometry_scale > 1,
         "actual geometry scale drag changes model display transform");
   ui.focus("Face culling");
+  ui.options.face_culling = FaceCulling::none;
+  ui.frame();
   ui.click(ui.focused());
   const auto &popups = ImGui::GetCurrentContext()->OpenPopupStack;
   check(popups.Size && popups.back().Window, "actual culling combo opens");

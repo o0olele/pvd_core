@@ -1301,6 +1301,66 @@ void global_display_defaults() {
   }
   std::cout<<"Workspace v5 display defaults/archives/live/palette validation passed\n";
 }
+void face_culling_migration() {
+  check(workspace_format_version == 6 &&
+            Workspace{}.default_preferences().rendering.face_culling ==
+                FaceCulling::back,
+        "new workspaces must default to back-face culling");
+  Fixture fixture;
+  for (const auto version : {5u, 6u}) {
+    for (const auto mode :
+         {FaceCulling::none, FaceCulling::front, FaceCulling::back}) {
+      auto settings = minimal();
+      settings.default_preferences.rendering.face_culling = mode;
+      settings.slots[0].view.preferences.rendering.face_culling = mode;
+      check(settings.captures[0].last_view.has_value(),
+            "culling migration fixture must contain an archived view");
+      settings.captures[0].last_view->preferences.rendering.face_culling = mode;
+      auto wire = encode_workspace(settings);
+      // V6 intentionally retains the V5 payload byte layout. The version is
+      // outside the checksummed payload, so this also exercises V5 decoding.
+      wire[8] = static_cast<std::uint8_t>(version);
+      const auto decoded = decode_workspace(wire);
+      const auto expected_mode =
+          version == 5 && mode == FaceCulling::none ? FaceCulling::back : mode;
+      auto expected = settings;
+      expected.default_preferences.rendering.face_culling = expected_mode;
+      expected.slots[0].view.preferences.rendering.face_culling = expected_mode;
+      expected.captures[0].last_view->preferences.rendering.face_culling =
+          expected_mode;
+      check(encode_workspace(decoded) == encode_workspace(expected),
+            "culling migration changed other global/slot/archive settings");
+      if (version == 6)
+        check(encode_workspace(decoded) == wire,
+              "explicit V6 None/Front/Back did not round-trip exactly");
+
+      Workspace restored;
+      restored.restore(decoded);
+      const auto slot = decoded.slots[0].id;
+      const auto source = decoded.slots[0].source_path;
+      check(restored.default_preferences().rendering.face_culling ==
+                    expected_mode &&
+                restored.find(slot)->preferences().rendering.face_culling ==
+                    expected_mode,
+            "restoring culling lost the global or placeholder setting");
+      const auto empty = restored.create_empty();
+      check(restored.find(empty)->preferences().rendering.face_culling ==
+                expected_mode,
+            "new slots did not inherit the migrated culling default");
+      auto incoming = fixture.document();
+      check(restored.replace(slot, incoming, source) &&
+                restored.find(slot)->preferences().rendering.face_culling ==
+                    expected_mode,
+            "verified capture load lost the migrated culling setting");
+      check(restored.close(slot), "close culling migration source");
+      const auto reopened = restored.add(fixture.document(), source);
+      check(restored.find(reopened)->preferences().rendering.face_culling ==
+                expected_mode,
+            "archived reopen lost the migrated or explicit culling setting");
+    }
+  }
+  std::cout << "Workspace V5 culling migration and V6 explicit settings passed\n";
+}
 } // namespace
 int main() {
   try {
@@ -1314,7 +1374,10 @@ int main() {
           restored_v4.slots[0].view.options.trigger_scope==VisualizationScope::unselected &&
           restored_v4.slots[0].view.options.geometry_scale==1 &&
           restored_v4.slots[0].view.options.show_planes &&
-          restored_v4.slots[0].view.preferences.rendering.face_culling==FaceCulling::none &&
+          restored_v4.default_preferences.rendering.face_culling==FaceCulling::back &&
+          restored_v4.slots[0].view.preferences.rendering.face_culling==FaceCulling::back &&
+          restored_v4.captures[0].last_view &&
+          restored_v4.captures[0].last_view->preferences.rendering.face_culling==FaceCulling::back &&
           !restored_v4.slots[0].view.preferences.rendering.show_orbit_target &&
           view_options_equal(restored_v4.default_view_options,ViewOptions{}) &&
           restored_v4.slots[0].view.options.palette.active==ColorPalette{}.active,
@@ -1337,6 +1400,13 @@ int main() {
                 VisualizationScope::all &&
             restored_v3.default_preferences.rendering.transparent_scope ==
                 VisualizationScope::none &&
+            restored_v3.default_preferences.rendering.face_culling ==
+                FaceCulling::back &&
+            restored_v3.slots[0].view.preferences.rendering.face_culling ==
+                FaceCulling::back &&
+            restored_v3.captures[0].last_view &&
+            restored_v3.captures[0].last_view->preferences.rendering.face_culling ==
+                FaceCulling::back &&
             !restored_v3.default_preferences.rendering.show_mass_frames &&
             !restored_v3.default_preferences.inspection.integer_hex &&
             !restored_v3.slots[0].view.preferences.inspection.integer_hex &&
@@ -1355,6 +1425,13 @@ int main() {
                   DisplayHandedness::left_handed &&
               restored_v2.slots[0].view.preferences.rendering.antialiasing ==
                   Antialiasing::msaa4x &&
+              restored_v2.default_preferences.rendering.face_culling ==
+                  FaceCulling::back &&
+              restored_v2.slots[0].view.preferences.rendering.face_culling ==
+                  FaceCulling::back &&
+              restored_v2.captures[0].last_view &&
+              restored_v2.captures[0].last_view->preferences.rendering.face_culling ==
+                  FaceCulling::back &&
               restored_v2.default_preferences.inspection.array_page_size ==
                   512 &&
               restored_v2.default_preferences.navigation.mode ==
@@ -1396,6 +1473,7 @@ int main() {
     clip_live_binding_and_merge();
     clip_pending_shared_source_edits();
     global_display_defaults();
+    face_culling_migration();
     clip_placeholder_limits_and_corruption();
     std::cout << "workspace tests passed\n";
     return 0;

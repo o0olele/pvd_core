@@ -55,7 +55,9 @@ struct RenderOptions {
     float coordinate_frame_scale = 0.5f;
     VisualizationScope transparent_scope = VisualizationScope::none;
     float transparent_opacity = 0.35f;
-    FaceCulling face_culling = FaceCulling::none;
+    // Interior-facing collision meshes should expose rooms when viewed from
+    // outside; drawing their back faces would seal roofs and near walls.
+    FaceCulling face_culling = FaceCulling::back;
     bool show_orbit_target = false;
 };
 struct RenderStats {

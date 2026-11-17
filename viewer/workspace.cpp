@@ -554,6 +554,11 @@ struct Decoder {
       v.rendering.face_culling = static_cast<FaceCulling>(u(1));
       v.rendering.show_orbit_target = boolean();
     }
+    // V5 wrote None as the default, which rendered inward-facing building
+    // shells as closed roofs/walls. V6 keeps the same wire layout while
+    // migrating that legacy value once; an explicit V6 None stays two-sided.
+    if (version < 6 && v.rendering.face_culling == FaceCulling::none)
+      v.rendering.face_culling = FaceCulling::back;
     return v;
   }
   ViewOptions options() {

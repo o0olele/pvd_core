@@ -38,6 +38,8 @@ ImGui 主机与面板支持[每显示器 DPI 和字体重建](docs/ui-scale.md)�
 
 0.11 版针对实际场景的播放与相机卡顿增加完整只读 `SnapshotView`、选定对象查询和直接读取视图的渲染提取入口，复用静态对象及当前场景网格；实时增量读取支持不等待后台解析锁。新增 `pvd_viewer_benchmark` 可分别测量播放、相机、GPU 完成和面板耗时，见[性能记录](docs/performance.md)。升级时需同步更新 DLL 与调用方。
 
+查看器默认开启背面剔除，让内向碰撞网格的屋顶和近侧墙壁露出内部；`Face culling → None` 可切回双面显示。工作区 v6 会将旧版默认 None 迁移为 Back，并保留新版显式选择，详见[显示设置](docs/display-settings.md)。
+
 ```powershell
 cmake -S . -B build-core -G "Visual Studio 17 2022" -A x64
 cmake --build build-core --config Debug

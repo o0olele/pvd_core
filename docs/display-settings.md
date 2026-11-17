@@ -33,7 +33,14 @@ It does not remove independent captured debug triangles or change an infinite
 physical plane into a finite resource. **Restore all visibility** restores this
 category along with the other category switches.
 
-`RenderOptions::face_culling` is None (default), Front, or Back. It applies to
+`RenderOptions::face_culling` is None, Front, or Back (default). Back-face
+culling exposes the interior of inward-facing collision meshes: the reverse
+side of a ceiling or near wall is invisible from outside, while front-facing
+walls, floors and closed solid geometry remain opaque. This is a cutaway by
+triangle orientation, not alpha transparency or automatic removal of every
+roof. Choose None to inspect both sides, or Front to inspect reversed faces.
+The setting is under **Display -> Display and camera settings -> Display**.
+It applies to
 shape fill, wire/highlights and CPU face picking. Front follows the triangle
 buffer's original winding; a horizontal display mirror changes the GPU's
 front-face convention so the same physical side remains front in both hands.
