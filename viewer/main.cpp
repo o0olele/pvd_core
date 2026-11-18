@@ -618,8 +618,7 @@ private:
   std::optional<SlotId> live_slot_id_;
   std::string live_recording_path_;
   bool live_bound_ = false;
-  std::array<char, 64> capture_address_{'1', '2', '7', '.', '0',
-                                        '.', '0', '.', '1'};
+  std::array<char, 64> capture_address_{'0', '.', '0', '.', '0', '.', '0'};
   std::array<char, 4096> capture_path_{};
   int capture_port_ = 5425;
   bool record_capture_ = true, live_document_seen_ = false,
