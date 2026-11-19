@@ -650,7 +650,8 @@ struct SceneQueryIndex::Impl {
               SceneQueryLineKind::impact_normal, i, 0xfff2c94cu);
       }
   }
-  SceneQueries extract(const Session &session, SceneQueryWindow window) {
+  SceneQueries extract(const Session &session, SceneQueryWindow window,
+                       std::optional<std::uint64_t> frame_stream = {}) {
     SceneQueries out;
     out.scene = {window.scene_id, 0};
     out.begin_event_count = window.begin_event_count;
@@ -693,7 +694,8 @@ struct SceneQueryIndex::Impl {
         [](std::size_t p, const Update &u) { return p < u.prefix; });
     for (auto it = first;
          it != updates.end() && it->prefix <= window.end_event_count; ++it) {
-      if (!(it->scene == out.scene) || it->property % 7 >= 3)
+      if (!(it->scene == out.scene) || it->property % 7 >= 3 ||
+          (frame_stream && it->stream != *frame_stream))
         continue;
       const auto slot = (it->property / 7) * 3 + it->property % 7;
       selected[slot] = &*it;
@@ -798,6 +800,10 @@ std::size_t SceneQueryIndex::indexed_event_count() const noexcept {
 }
 SceneQueries SceneQueryIndex::extract(const Session &s, SceneQueryWindow w) {
   return impl_->extract(s, w);
+}
+SceneQueries SceneQueryIndex::extract(const Session &s, SceneQueryWindow w,
+                                      std::uint64_t stream_id) {
+  return impl_->extract(s, w, stream_id);
 }
 SceneQueries SceneQueryIndex::extract(const Session &s, const FrameMarker &f) {
   return extract(

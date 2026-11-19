@@ -75,7 +75,8 @@ struct Fixture {
   std::vector<Event> events;
   std::map<std::string, std::uint32_t> handles;
   std::size_t first_prefix = 0;
-  explicit Fixture(ByteOrder order = ByteOrder::little) {
+  explicit Fixture(ByteOrder order = ByteOrder::little,
+                   bool overlapping_frame = false) {
     header.byte_order = order;
     header.stream_flags = 1;
     const auto scene = type("PxScene"), actor = type("PxActor"),
@@ -95,6 +96,11 @@ struct Fixture {
     emit(CreateInstance{scene, scene_b});
     emit(CreateInstance{actor, actor_id});
     emit(CreateInstance{shape, shape_id});
+    constexpr std::uint64_t other_stream = 0xF100000000000002ULL;
+    if (overlapping_frame) {
+      emit(StringHandleEvent{"frame", 1}, other_stream);
+      emit(BeginSection{scene_a, 1, events.size() * 5}, other_stream);
+    }
     mark(true, scene_a, "frame");
     BytesWriter hits(order);
     hits.hit();
@@ -110,6 +116,8 @@ struct Fixture {
     set(scene_a, "BatchedQueries.Raycasts", "PvdRaycast", 1, batch.data);
     mark(false, scene_a, "frame");
     first_prefix = events.size();
+    if (overlapping_frame)
+      emit(EndSection{scene_a, 1, events.size() * 5}, other_stream);
     mark(true, scene_a, "validation_after_fetch");
     mark(false, scene_a, "validation_after_fetch");
     mark(true, scene_b, "frame");
@@ -128,8 +136,8 @@ struct Fixture {
     emit(CreateInstance{actor, actor_id});
     mark(false, scene_a, "frame");
   }
-  void emit(Payload p) {
-    events.push_back({0xF100000000000001ULL, events.size() * 5,
+  void emit(Payload p, std::uint64_t stream = 0xF100000000000001ULL) {
+    events.push_back({stream, events.size() * 5,
                       events.size() * 19, std::move(p)});
   }
   std::uint32_t text(const std::string &value) {
@@ -166,6 +174,31 @@ struct Fixture {
     check(doc.set_frame(0), "synthetic frame absent");
   }
 };
+void ray_frame_lifetime() {
+  Fixture fixture(ByteOrder::little, true);
+  const auto first_end = fixture.events.begin() + fixture.first_prefix - 1;
+  Document doc;
+  doc.begin_live(fixture.header);
+  doc.append_live({fixture.events.begin(), first_end});
+  check(!doc.frame()->marker && doc.frame()->scene_queries.lines.empty(),
+        "unclosed frame displayed raycasts");
+
+  doc.append_live({*first_end});
+  const auto &trigger_lines = doc.frame()->scene_queries.lines;
+  check(doc.frame()->marker && trigger_lines.size() == 303,
+        "trigger frame did not display native and batched raycasts and normals");
+  const auto selected = trigger_lines.front().source;
+  check(doc.select_query(selected), "trigger query is not selectable");
+
+  doc.append_live({*(first_end + 1)});
+  check(doc.frame_index() == 1 && doc.frame()->scene_queries.lines.empty() &&
+            !doc.selected_query(),
+        "overlapping next frame retained the same raycasts");
+  check(doc.step(-1) && doc.frame()->scene_queries.lines.size() == 303,
+        "reverse seek did not restore trigger frame raycasts");
+  check(doc.step(1) && doc.frame()->scene_queries.lines.empty(),
+        "forward seek repeated trigger frame raycasts");
+}
 struct Output {
   std::string text;
   float overflow = 0;
@@ -383,6 +416,7 @@ int main(int argc, char **argv) {
     unsigned char *pixels;
     int w, h;
     io.Fonts->GetTexDataAsRGBA32(&pixels, &w, &h);
+    ray_frame_lifetime();
     widgets(1060, ByteOrder::little);
     widgets(420, ByteOrder::little);
     widgets(420, ByteOrder::big);

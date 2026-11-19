@@ -1237,9 +1237,13 @@ struct Document::Impl {
     } else
       range.end_event_count = next->snapshot.event_count;
     range.scene_id = scene;
-    if (scene && sample == SamplePoint::native_frame) {
-      next->scene_queries = query_index.extract(*session,
-          render::SceneQueryWindow{*scene, range.begin_event_count, range.end_event_count});
+    if (next->marker && next->marker->sample_point == SamplePoint::native_frame) {
+      const auto &marker = *next->marker;
+      next->scene_queries = query_index.extract(
+          *session, render::SceneQueryWindow{marker.scene_id,
+                                             marker.begin_event_count,
+                                             marker.event_count},
+          marker.stream_id);
       std::size_t volume_triangles = 0;
       std::map<std::size_t, Snapshot> query_snapshots;
       bool volume_limit = false;
@@ -1295,10 +1299,6 @@ struct Document::Impl {
       }
     } else {
       next->scene_queries.event_count = next->snapshot.event_count;
-      for (std::size_t i = 0; i < 6; ++i) {
-        next->scene_queries.collections[i].kind = static_cast<render::SceneQueryKind>(i % 3);
-        next->scene_queries.collections[i].batched = i >= 3;
-      }
     }
     auto debug_options = options.debug;
     debug_options.joint_axis_length = 0;

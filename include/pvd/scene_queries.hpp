@@ -152,6 +152,9 @@ public:
          std::size_t event_count = std::numeric_limits<std::size_t>::max());
   PVD_RENDER_API std::size_t indexed_event_count() const noexcept;
   PVD_RENDER_API SceneQueries extract(const Session &, SceneQueryWindow);
+  // Filter publications by stream when native frame sections overlap.
+  PVD_RENDER_API SceneQueries extract(const Session &, SceneQueryWindow,
+                                      std::uint64_t stream_id);
   PVD_RENDER_API SceneQueries extract(const Session &, const FrameMarker &);
 
 private:
