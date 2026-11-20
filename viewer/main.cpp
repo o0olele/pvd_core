@@ -3353,10 +3353,14 @@ private:
            point.x < scene_drawer_max_.x && point.y < scene_drawer_max_.y;
   }
   void position_scene_drawer() {
-    const float width = std::min(ui_pixels(ui().sidebar == SlotUiState::Sidebar::objects ? 224.f : 280.f),
+    const bool objects = ui().sidebar == SlotUiState::Sidebar::objects;
+    const float preferred_width = objects
+        ? std::clamp(viewport_size_.x * .55f, ui_pixels(120), ui_pixels(384))
+        : ui_pixels(280);
+    const float width = std::min(preferred_width,
                                  std::max(ui_pixels(120), viewport_size_.x - ui_pixels(24)));
     scene_drawer_min_ = {viewport_origin_.x + ui_pixels(12), viewport_origin_.y + ui_pixels(8)};
-    if (ui().sidebar != SlotUiState::Sidebar::objects)
+    if (!objects)
       scene_drawer_min_.x = viewport_origin_.x + viewport_size_.x - width - ui_pixels(12);
     scene_drawer_max_ = {scene_drawer_min_.x + width,
                          viewport_origin_.y + viewport_size_.y - ui_pixels(12)};
@@ -3386,8 +3390,22 @@ private:
       if (ImGui::BeginChild("Drawer content", {0, 0})) {
         if (options_.scene_first_smoke && !objects && !diagnostics)
           inspector_test_window_ = ImGui::GetCurrentWindow();
-        if (objects) drawHierarchy(document(), ui().panels);
-        else if (diagnostics) drawDiagnostics(document(), ui().panels);
+        if (objects) {
+          drawHierarchy(document(), ui().panels, [this](HierarchyCameraTarget target) {
+            const double aspect = std::max(1.f, viewport_size_.x) /
+                                  std::max(1.f, viewport_size_.y);
+            auto fitted_camera = camera();
+            const bool focused = target == HierarchyCameraTarget::scene
+                ? document().fit_scene(fitted_camera, aspect)
+                : document().fit_selected(fitted_camera, aspect);
+            if (!focused)
+              return false;
+            point_camera_at(camera(), fitted_camera.target);
+            stopTracking(ui().scene_tools);
+            set_fitted(true);
+            return true;
+          });
+        } else if (diagnostics) drawDiagnostics(document(), ui().panels);
         else drawInspector(document(), ui().panels);
         if (options_.scene_first_smoke)
           layout_smoke_drawer_visible_ = ImGui::GetWindowDrawList()->VtxBuffer.Size > 0;

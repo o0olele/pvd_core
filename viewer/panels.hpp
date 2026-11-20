@@ -37,7 +37,9 @@ struct PanelState {
 // Content-only panels: the host owns Begin/End and its layout. The host calls
 // Document::advance(dt) exactly once per frame; these controls issue model
 // commands.
-void drawHierarchy(Document &, PanelState &);
+enum class HierarchyCameraTarget { scene, object };
+void drawHierarchy(Document &, PanelState &,
+                   const std::function<bool(HierarchyCameraTarget)> &look_at = {});
 void drawInspector(Document &, PanelState &);
 void drawTimeline(Document &, PanelState &);
 void drawDiagnostics(Document &, PanelState &);

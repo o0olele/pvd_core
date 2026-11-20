@@ -12,6 +12,7 @@
 #include <limits>
 #include <set>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 namespace pvd::viewer {
@@ -453,10 +454,81 @@ std::optional<double> interval_ms(const Document &doc,
 std::string scene_label(const SceneInfo &scene) {
   return scene.name.empty() ? "Scene " + id_text(scene.key.id) : scene.name;
 }
+void inspect_scene(Document &doc, PanelState &state, std::uint64_t id) {
+  command(state, [&] {
+    if (!doc.set_scene(id))
+      throw std::runtime_error("This scene has no recorded frames.");
+    doc.inspect(id);
+  });
+}
 
-void shape_menu(Document &doc, PanelState &state, const PickingKey &key) {
+std::string fit_hierarchy_label(std::string_view label, float width) {
+  if (label.empty() || width <= 0)
+    return {};
+  const char *begin = label.data(), *end = begin + label.size();
+  const char *fit = begin;
+  auto *font = ImGui::GetFont();
+  const float size = ImGui::GetFontSize();
+  font->CalcTextSizeA(size, width, 0, begin, end, &fit);
+  if (fit == end)
+    return std::string(label);
+  const float ellipsis = ImGui::CalcTextSize("...").x;
+  if (width < ellipsis)
+    return {};
+  font->CalcTextSizeA(size, width - ellipsis, 0, begin, end, &fit);
+  return std::string(begin, fit) + "...";
+}
+bool hierarchy_node(const char *id, std::string_view label,
+                    ImGuiTreeNodeFlags flags = 0) {
+  const auto fitted = fit_hierarchy_label(
+      label, ImGui::GetContentRegionAvail().x - ImGui::GetTreeNodeToLabelSpacing());
+  return ImGui::TreeNodeEx(id, flags | ImGuiTreeNodeFlags_SpanAvailWidth,
+                          "%s", fitted.c_str());
+}
+void hierarchy_tooltip(const std::string &label, const std::string &details = {}) {
+  if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+    return;
+  ImGui::BeginTooltip();
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 28);
+  ImGui::TextUnformatted(label.c_str());
+  if (!details.empty())
+    muted(details);
+  ImGui::PopTextWrapPos();
+  ImGui::EndTooltip();
+}
+struct TreeScope {
+  ~TreeScope() { ImGui::TreePop(); }
+};
+using HierarchyLookAt = std::function<bool(HierarchyCameraTarget)>;
+template <class Select>
+void activate_hierarchy_row(PanelState &state, const HierarchyLookAt &look_at,
+                            HierarchyCameraTarget target, bool focus,
+                            Select &&select) {
+  focus = focus && bool(look_at);
+  select(focus);
+  if (focus && state.error.empty())
+    command(state, [&] {
+      if (!look_at(target))
+        throw std::runtime_error("This item has no visible geometry to look at.");
+    });
+}
+template <class Select>
+void hierarchy_focus_menu(PanelState &state, const HierarchyLookAt &look_at,
+                          HierarchyCameraTarget target, bool has_other_actions,
+                          Select &&select) {
+  if (!look_at)
+    return;
+  if (ImGui::MenuItem("Look at"))
+    activate_hierarchy_row(state, look_at, target, true, select);
+  if (has_other_actions)
+    ImGui::Separator();
+}
+template <class Select>
+void shape_menu(Document &doc, PanelState &state, const PickingKey &key,
+                const HierarchyLookAt &look_at, Select &&select) {
   if (!ui::begin_popup_context_item("##shape-actions"))
     return;
+  hierarchy_focus_menu(state, look_at, HierarchyCameraTarget::object, true, select);
   if (ImGui::MenuItem("Hide attachment"))
     command(state, [&] { doc.set_visible(key, false); });
   if (ImGui::MenuItem("Show attachment"))
@@ -471,10 +543,12 @@ void shape_menu(Document &doc, PanelState &state, const PickingKey &key) {
   ImGui::PopTextWrapPos();
   ui::end_popup();
 }
-void actor_menu(Document &doc, PanelState &state, ObjectKey scene,
-                ObjectKey actor) {
+template <class Select>
+void actor_menu(Document &doc, PanelState &state, ObjectKey scene, ObjectKey actor,
+                const HierarchyLookAt &look_at, Select &&select) {
   if (!ui::begin_popup_context_item("##actor-actions"))
     return;
+  hierarchy_focus_menu(state, look_at, HierarchyCameraTarget::object, true, select);
   if (ImGui::MenuItem("Hide actor"))
     command(state, [&] { doc.set_actor_visible(scene, actor, false); });
   if (ImGui::MenuItem("Show actor"))
@@ -578,11 +652,15 @@ std::set<QualifiedName> update_category_groups(PanelState &state,
   return dirty;
 }
 void object_categories(Document &doc, PanelState &state,
-                       const std::string &query) {
+                       const std::string &query, const HierarchyLookAt &look_at) {
   if (state.reveal_object || !query.empty())
     ImGui::SetNextItemOpen(true);
-  if (!ImGui::CollapsingHeader("All objects by class (all scenes)"))
+  const std::string category_label = "All objects by class (all scenes)";
+  const bool category_open = hierarchy_node("##all-objects", category_label);
+  hierarchy_tooltip(category_label);
+  if (!category_open)
     return;
+  const TreeScope category_tree;
   const auto frame = doc.frame();
   const auto prefix = frame->snapshot.event_count;
   const bool refresh = state.category_source != doc.session() || !state.category_snapshot;
@@ -678,11 +756,12 @@ void object_categories(Document &doc, PanelState &state,
         reveal |= same(group.objects[oi].key, *state.reveal_object);
     if (reveal || !query.empty())
       ImGui::SetNextItemOpen(true);
-    if (!ImGui::TreeNodeEx(
-            (clipped(cls, 160) + " (" + std::to_string(list.size()) + ")")
-                .c_str(),
-            ImGuiTreeNodeFlags_SpanAvailWidth))
+    const auto group_label = cls + " (" + std::to_string(list.size()) + ")";
+    const bool group_open = hierarchy_node("##class", group_label);
+    hierarchy_tooltip(group_label);
+    if (!group_open)
       continue;
+    const TreeScope group_tree;
     auto &page = state.category_object_pages[cls];
     const auto last_object = (list.size() - 1) / object_page_size;
     page = std::min(page, last_object);
@@ -719,17 +798,34 @@ void object_categories(Document &doc, PanelState &state,
           ImGui::TableNextRow();
           ImGui::TableNextColumn();
           const auto inspected = doc.inspected_object();
-          if (ImGui::Selectable(clipped(object.name, 180).c_str(),
-                                inspected && same(*inspected, object.key)))
-            inspect(doc, state, object.key.id);
-          tooltip(object.class_name + " | " + id_text(object.key.id));
+          const auto label = fit_hierarchy_label(
+              object.name, ImGui::GetContentRegionAvail().x) + "###class-object";
+          const auto &scenes = doc.scenes();
+          const bool scene = look_at && std::any_of(scenes.begin(), scenes.end(),
+              [&](const SceneInfo &entry) { return same(entry.key, object.key); });
+          const auto target = scene ? HierarchyCameraTarget::scene
+                                    : HierarchyCameraTarget::object;
+          const auto select = [&](bool focus) {
+            if (focus && scene)
+              inspect_scene(doc, state, object.key.id);
+            else
+              inspect(doc, state, object.key.id);
+          };
+          if (ImGui::Selectable(label.c_str(), inspected && same(*inspected, object.key),
+                                look_at ? ImGuiSelectableFlags_AllowDoubleClick : 0))
+            activate_hierarchy_row(state, look_at, target,
+                                   ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left), select);
+          hierarchy_tooltip(object.name, object.class_name + " | " + id_text(object.key.id));
+          if (look_at && ui::begin_popup_context_item("##class-object-actions")) {
+            hierarchy_focus_menu(state, look_at, target, false, select);
+            ui::end_popup();
+          }
           ImGui::TableNextColumn();
           text(id_text(object.key.id) + " / " +
                std::to_string(object.key.generation));
         }
       ImGui::EndTable();
     }
-    ImGui::TreePop();
   }
 }
 } // namespace
@@ -951,7 +1047,7 @@ void drawEmptyState(const char *title, const char *description) {
   ImGui::PopStyleColor();
 }
 
-void drawHierarchy(Document &doc, PanelState &state) {
+void drawHierarchy(Document &doc, PanelState &state, const HierarchyLookAt &look_at) {
   state.object_visible_rows = 0;
   try {
     if (!doc.loaded()) {
@@ -962,9 +1058,9 @@ void drawHierarchy(Document &doc, PanelState &state) {
     if (ImGui::SmallButton("Restore all visibility"))
       command(state, [&] { doc.show_all(); });
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint(
-        "##hierarchy-search", "Search objects by name, class or ID...",
-        state.hierarchy_search.data(), state.hierarchy_search.size());
+    ImGui::InputTextWithHint("##hierarchy-search", "Search name, class or ID",
+                            state.hierarchy_search.data(),
+                            state.hierarchy_search.size());
     ImGui::Spacing();
     const auto query = lower(state.hierarchy_search.data());
     const auto selection = doc.selected_key();
@@ -983,26 +1079,28 @@ void drawHierarchy(Document &doc, PanelState &state) {
         ImGui::SetNextItemOpen(true);
       else
         ImGui::SetNextItemOpen(current, ImGuiCond_Once);
-      const auto label = clipped(scene_label(scene));
-      const bool opened = ImGui::TreeNodeEx(
-          label.c_str(), ImGuiTreeNodeFlags_OpenOnArrow |
-                             ImGuiTreeNodeFlags_SpanAvailWidth |
-                             (current ? ImGuiTreeNodeFlags_Selected : 0));
+      const auto label = scene_label(scene);
+      const bool opened = hierarchy_node(
+          "##scene", label, ImGuiTreeNodeFlags_OpenOnArrow |
+                                (current ? ImGuiTreeNodeFlags_Selected : 0));
       const bool clicked = ImGui::IsItemClicked();
       const bool toggled = ImGui::IsItemToggledOpen();
+      const auto select_scene = [&](bool) { inspect_scene(doc, state, scene.key.id); };
       if ((clicked && !toggled) || (opened && !current && toggled))
-        command(state, [&] {
-          if (!doc.set_scene(scene.key.id))
-            throw std::runtime_error("This scene has no recorded frames.");
-          doc.inspect(scene.key.id);
-        });
-      tooltip(scene_label(scene) + " | " + id_text(scene.key.id) + " | " +
-              std::to_string(scene.native_frames) + " frames");
+        activate_hierarchy_row(
+            state, look_at, HierarchyCameraTarget::scene,
+            clicked && !toggled && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left),
+            select_scene);
+      hierarchy_tooltip(label, id_text(scene.key.id) + " | " +
+                                   std::to_string(scene.native_frames) + " frames");
+      if (look_at && ui::begin_popup_context_item("##scene-actions")) {
+        hierarchy_focus_menu(state, look_at, HierarchyCameraTarget::scene, false,
+                             select_scene);
+        ui::end_popup();
+      }
       if (!opened)
         continue;
-      struct Pop {
-        ~Pop() { ImGui::TreePop(); }
-      } pop_scene;
+      const TreeScope scene_tree;
       if (!doc.scene_id() || *doc.scene_id() != scene.key.id) {
         muted("Select this scene to browse objects.");
         continue;
@@ -1043,57 +1141,61 @@ void drawHierarchy(Document &doc, PanelState &state) {
         }
         if (reveal)
           ImGui::SetNextItemOpen(true);
-        const auto actor_label = clipped(
-            actor.name.empty() ? actor.class_name + " " + id_text(actor.key.id)
-                               : actor.name);
-        const bool actor_open = ImGui::TreeNodeEx(
-            actor_label.c_str(),
-            ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+        const auto actor_label = actor.name.empty()
+                                     ? actor.class_name + " " + id_text(actor.key.id)
+                                     : actor.name;
+        const bool actor_open = hierarchy_node(
+            "##actor", actor_label, ImGuiTreeNodeFlags_OpenOnArrow |
                 (active ? ImGuiTreeNodeFlags_Selected : 0) |
                 (shapes.empty() ? ImGuiTreeNodeFlags_Leaf : 0));
+        const auto select_actor = [&](bool) { inspect(doc, state, actor.key.id); };
         if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
-          inspect(doc, state, actor.key.id);
-        actor_menu(doc, state, scene_key, actor.key);
-        tooltip(actor.class_name + " | " + id_text(actor.key.id));
+          activate_hierarchy_row(state, look_at, HierarchyCameraTarget::object,
+                                 ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left), select_actor);
+        hierarchy_tooltip(actor_label, actor.class_name + " | " + id_text(actor.key.id));
+        actor_menu(doc, state, scene_key, actor.key, look_at, select_actor);
         if (!actor_open)
           continue;
-        struct PopActor {
-          ~PopActor() { ImGui::TreePop(); }
-        } pop_actor;
+        const TreeScope actor_tree;
         for (const auto *shape : shapes) {
           IdScope shape_id("shape:" + std::to_string(shape->key.id));
           const PickingKey key{scene_key, actor.key, shape->key};
           const bool shape_active = (selected && *selected == key) ||
                                     (inspected && same(*inspected, shape->key));
-          const auto shape_label =
-              clipped(shape->name.empty()
-                          ? shape->class_name + " " + id_text(shape->key.id)
-                          : shape->name);
-          ImGui::TreeNodeEx(
-              shape_label.c_str(),
+          const auto shape_label = shape->name.empty()
+                                       ? shape->class_name + " " + id_text(shape->key.id)
+                                       : shape->name;
+          hierarchy_node(
+              "##shape", shape_label,
               ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
-                  ImGuiTreeNodeFlags_SpanAvailWidth |
                   (shape_active ? ImGuiTreeNodeFlags_Selected : 0));
-          const bool shape_clicked = ImGui::IsItemClicked();
-          shape_menu(doc, state, key);
-          if (shape_clicked)
+          const auto select_shape = [&](bool focus) {
             command(state, [&] {
-              if (!doc.select(key) && !doc.inspect(shape->key.id))
+              const bool selected_attachment = doc.select(key);
+              if (!selected_attachment && !doc.inspect(shape->key.id))
                 throw std::runtime_error(
                     "This shape is not present at the current frame.");
               state.reveal_object = shape->key;
+              if (focus && !selected_attachment)
+                throw std::runtime_error("This attachment has no geometry to look at.");
             });
-          tooltip(shape->class_name + " | " + id_text(shape->key.id) +
-                  (shape->present ? "" : " | Not present at this frame") +
-                  (doc.visible(key) ? " | Visible"
-                                    : " | Hidden, filtered or no geometry"));
+          };
+          if (ImGui::IsItemClicked())
+            activate_hierarchy_row(state, look_at, HierarchyCameraTarget::object,
+                                   ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left), select_shape);
+          hierarchy_tooltip(shape_label,
+                            shape->class_name + " | " + id_text(shape->key.id) +
+                                (shape->present ? "" : " | Not present at this frame") +
+                                (doc.visible(key) ? " | Visible"
+                                                  : " | Hidden, filtered or no geometry"));
+          shape_menu(doc, state, key, look_at, select_shape);
         }
       }
       if (!any)
         muted(query.empty() ? "No objects at this frame."
                             : "No matching objects.");
     }
-    object_categories(doc, state, query);
+    object_categories(doc, state, query, look_at);
     state.reveal_object.reset();
     panel_error(state);
   } catch (const std::exception &e) {
