@@ -1,0 +1,7 @@
+{
+  "name": "com.pvd.playback",
+  "version": "0.2.3",
+  "displayName": "PVD Playback",
+  "description": "Replay PhysX 3.4 raw recordings and receive live PVD streams in Unity on Windows x64.",
+  "unity": "2022.3"
+}

@@ -4,6 +4,8 @@
 
 数据内核只依赖 C++ 标准库，不链接 Qt、PhysX 或图形 API。PhysX 3.4 SDK 仅用于可选的真实录制生成与集成验证。
 
+可选的 [Unity 回放插件](unity/com.pvd.playback/README.md) 支持在 Windows x64 上监听 PhysX 3.4 PVD 实时流，或打开原始录制、播放和逐帧查看碰撞形状。
+
 0.2 版新增可追加会话，以及可独立启用的 `pvd::transport` TCP 模块，支持实时查询、原始录制、取消和断连安全前缀恢复。详见 [实时采集说明](docs/live-capture.md)。
 
 0.3 版新增 `pvd::render`，包含七类几何提取、共享资源缓存、调试图元、三角网格生成和 JSON/OBJ 无界面导出。详见 [渲染数据提取](docs/render-extraction.md)。

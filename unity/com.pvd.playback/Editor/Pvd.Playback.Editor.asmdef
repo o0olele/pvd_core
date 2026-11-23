@@ -1,0 +1,6 @@
+{
+  "name": "Pvd.Playback.Editor",
+  "rootNamespace": "Pvd.Playback",
+  "references": ["Pvd.Playback"],
+  "includePlatforms": ["Editor"]
+}

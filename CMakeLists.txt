@@ -14,6 +14,7 @@ else()
 endif()
 option(PVD_BUILD_VIEWER "Build the native Windows Direct3D 11 viewer" ${PVD_VIEWER_DEFAULT})
 option(PVD_BUILD_PHYSX34_VALIDATION "Build tests using an external PhysX 3.4 SDK" OFF)
+option(PVD_BUILD_UNITY_PLUGIN "Build the Windows x64 Unity PVD playback plug-in" OFF)
 include(CTest)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -365,6 +366,10 @@ if(PVD_BUILD_VIEWER)
         message(FATAL_ERROR "PVD_BUILD_VIEWER requires Windows and PVD_BUILD_RENDER")
     endif()
     add_subdirectory(viewer)
+endif()
+
+if(PVD_BUILD_UNITY_PLUGIN)
+    add_subdirectory(unity)
 endif()
 
 install(TARGETS ${PVD_INSTALL_TARGETS} EXPORT pvd_coreTargets
