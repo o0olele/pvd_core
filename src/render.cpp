@@ -1,7 +1,9 @@
 #include "pvd/render.hpp"
 #include "pvd/coordinates.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <stdexcept>
@@ -315,6 +317,14 @@ struct Extractor::Impl {
   // Returned Frames already own these resources. Remember their signatures
   // without extending mesh lifetimes beyond the bounded strong LRU.
   std::map<Key, WeakEntry> live_meshes;
+  struct BoundsEntry {
+    std::weak_ptr<const MeshData> mesh;
+    std::array<float, 14> transform{};
+    std::optional<Bounds> value;
+  };
+  static constexpr unsigned bounds_cache_bits = 12;
+  using BoundsCache = std::array<BoundsEntry, 1u << bounds_cache_bits>;
+  std::unique_ptr<BoundsCache> bounds_cache;
   std::uint64_t clock = 0;
   std::size_t hits = 0, misses = 0;
   std::map<QualifiedName, std::map<std::string_view, bool>> class_checks;
@@ -358,6 +368,44 @@ struct Extractor::Impl {
   explicit Impl(ExtractorOptions o) : options(o) {
     if (!o.max_vertices || !o.max_triangles || !o.max_heightfield_cells)
       throw std::invalid_argument("render resource limits must be nonzero");
+  }
+  std::optional<Bounds> mesh_bounds(const ShapeInstance &shape,
+                                    const std::shared_ptr<const MeshData> &mesh,
+                                    const MeshScale &scale) {
+    if (!bounds_cache)
+      bounds_cache = std::make_unique<BoundsCache>();
+    // Use the high bits after multiplication so aligned wire IDs don't leave
+    // most slots unused. Collisions only replace a cached result.
+    constexpr std::uint64_t multiplier = 0x9e3779b97f4a7c15ull;
+    const auto attachment = shape.actor_id * multiplier + shape.shape_id;
+    auto &entry = (*bounds_cache)[(attachment * multiplier) >> (64 - bounds_cache_bits)];
+    const auto &pose = shape.world_pose;
+    const std::array<float, 14> transform{
+        pose.position.x, pose.position.y, pose.position.z,
+        pose.rotation.x, pose.rotation.y, pose.rotation.z, pose.rotation.w,
+        scale.scale.x, scale.scale.y, scale.scale.z,
+        scale.rotation.x, scale.rotation.y, scale.rotation.z, scale.rotation.w};
+    // The immutable mesh owner identifies the decoded version. Compare float
+    // representations to preserve signed zero in the exact vertex bounds.
+    if (!entry.mesh.owner_before(mesh) && !mesh.owner_before(entry.mesh) &&
+        std::memcmp(entry.transform.data(), transform.data(),
+                    transform.size() * sizeof(float)) == 0)
+      return entry.value;
+    auto value = bounds(shape.geometry, pose);
+    entry = {mesh, transform, value};
+    return value;
+  }
+  std::optional<Bounds> world_bounds(const ShapeInstance &shape) {
+    if (options.max_cache_entries) {
+      if (auto mesh = std::get_if<TriangleMesh>(&shape.geometry))
+        return mesh_bounds(shape, mesh->mesh, mesh->scale);
+      if (auto mesh = std::get_if<ConvexMesh>(&shape.geometry))
+        return mesh_bounds(shape, mesh->mesh, mesh->scale);
+      if (auto field = std::get_if<HeightField>(&shape.geometry))
+        return mesh_bounds(shape, field->mesh,
+                           {{field->row_scale, field->height_scale, field->column_scale}, {}});
+    }
+    return bounds(shape.geometry, shape.world_pose);
   }
   void limit(std::uint64_t n, std::size_t max, const InstanceState &o,
              const std::string &p) {
@@ -801,8 +849,7 @@ struct Extractor::Impl {
                           instance.picking_key()) != o.selected.end();
             instance.geometry = geometry(m, s, geometry_object);
             try {
-              instance.world_bounds =
-                  bounds(instance.geometry, instance.world_pose);
+              instance.world_bounds = world_bounds(instance);
             } catch (const std::overflow_error &e) {
               fail(DiagnosticCode::invalid_value, geometry_object, "Bounds",
                    e.what());
@@ -875,6 +922,7 @@ GeometryExtraction Extractor::extract_geometry(const Metadata &metadata,
 void Extractor::clear_cache() noexcept {
   impl_->cache.clear();
   impl_->live_meshes.clear();
+  impl_->bounds_cache.reset();
   impl_->clock = 0;
   impl_->hits = impl_->misses = 0;
 }

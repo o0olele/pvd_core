@@ -233,6 +233,87 @@ bool diagnostic(const Frame &f, DiagnosticCode code) {
       return true;
   return false;
 }
+bool same_bounds(const Bounds &actual, const Bounds &expected) {
+  const auto same_float = [](const float &a, const float &b) {
+    return std::memcmp(&a, &b, sizeof(float)) == 0;
+  };
+  const auto same_point = [&](const Vec3 &a, const Vec3 &b) {
+    return same_float(a.x, b.x) && same_float(a.y, b.y) && same_float(a.z, b.z);
+  };
+  return same_point(actual.minimum, expected.minimum) &&
+         same_point(actual.maximum, expected.maximum);
+}
+
+void exact_world_bounds_across_seeks() {
+  Extractor cached;
+  ExtractorOptions options;
+  options.max_cache_entries = 0;
+  Extractor uncached(options);
+  const auto frame_bounds = [](const Frame &frame) -> const Bounds & {
+    const auto &result = only(frame).world_bounds;
+    check(result.has_value(), "expected finite world bounds");
+    return *result;
+  };
+  const auto verify = [&](const Fixture &fixture, const Snapshot &state) {
+    const auto expected = uncached.extract(fixture.metadata, state);
+    const auto result = cached.extract(fixture.metadata, SnapshotView(state));
+    check(result.event_count == state.event_count &&
+              same_bounds(frame_bounds(result), frame_bounds(expected)),
+          "cached world bounds match uncached extraction bit-for-bit");
+  };
+
+  Fixture triangle;
+  triangle.triangle();
+  const float eighth_turn = .3926990817f;
+  const Quat z_rotation{0, 0, std::sin(eighth_turn), std::cos(eighth_turn)};
+  triangle.transform(10, "GlobalPose", {z_rotation, {}});
+  const auto retained = cached.extract(triangle.metadata, triangle.state);
+  const auto &initial_bounds = frame_bounds(retained);
+  const float diagonal = std::sqrt(.5f);
+  near(initial_bounds.minimum, {-diagonal, 0, 0}, "tight rotated mesh minimum");
+  near(initial_bounds.maximum, {diagonal, diagonal, 1}, "tight rotated mesh maximum");
+
+  std::vector<Snapshot> frames{triangle.state, triangle.state};
+  triangle.transform(10, "GlobalPose", {z_rotation, {10, 20, 30}});
+  frames.push_back(triangle.state);
+  triangle.transform(100, "LocalPose", {{0, 0, 1, 0}, {}});
+  frames.push_back(triangle.state);
+  triangle.vec(200, "Scale.Scale", {-2, 1, 3});
+  frames.push_back(triangle.state);
+  triangle.quat(200, "Scale.Rotation", z_rotation);
+  frames.push_back(triangle.state);
+  triangle.state.instances.at(300).properties["Points"] =
+      value("PxVec3", floats({0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 1}), 4);
+  frames.push_back(triangle.state);
+  triangle.state.instances.at(300).generation = 1;
+  frames.push_back(triangle.state);
+  for (std::size_t i = 0; i < frames.size(); ++i)
+    frames[i].event_count += i;
+  for (auto i : {0, 1, 2, 3, 4, 5, 6, 7, 6, 5, 4, 3, 2, 1, 0, 5, 2, 7, 1})
+    verify(triangle, frames[i]);
+  cached.clear_cache();
+  verify(triangle, frames[0]);
+  const auto original = uncached.extract(triangle.metadata, frames[0]);
+  check(same_bounds(initial_bounds, frame_bounds(original)),
+        "later extractions and cache clear preserve previously returned bounds");
+
+  Fixture heightfield;
+  heightfield.heightfield();
+  verify(heightfield, heightfield.state);
+  heightfield.f(200, "HeightScale", 2);
+  verify(heightfield, heightfield.state);
+  heightfield.f(200, "RowScale", 5);
+  verify(heightfield, heightfield.state);
+  heightfield.f(200, "ColumnScale", 7);
+  verify(heightfield, heightfield.state);
+  const auto finite = heightfield.state;
+  heightfield.f(200, "HeightScale", std::numeric_limits<float>::max());
+  const auto overflow = cached.extract(heightfield.metadata, heightfield.state);
+  check(overflow.instances.empty() && diagnostic(overflow, DiagnosticCode::invalid_value),
+        "overflowing transformed bounds cannot return a cached finite result");
+  verify(heightfield, finite);
+}
+
 void primitive_transform_shared_scene_state() {
   Fixture f;
   const float h = std::sqrt(.5f);
@@ -581,6 +662,7 @@ int main() {
   try {
     primitive_transform_shared_scene_state();
     mesh_scale_cache_and_lifetime();
+    exact_world_bounds_across_seeks();
     metadata_role_memo_scope();
     heightfield_endian_and_diagnostics();
     geometry_without_actor_ownership();
